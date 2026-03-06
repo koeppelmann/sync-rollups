@@ -1,0 +1,3431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sync-rollups Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.9.0/dist/ethers.umd.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    body {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    h1 {
+      color: #333;
+      border-bottom: none;
+      padding-bottom: 0;
+      margin: 0;
+    }
+    /* Header bar with icons */
+    .header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #7c3aed;
+    }
+    .header-icons {
+      display: flex;
+      gap: 8px;
+    }
+    .icon-btn {
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      padding: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #666;
+    }
+    .icon-btn:hover {
+      background: #f0f0f0;
+      color: #7c3aed;
+    }
+    .icon-btn.active {
+      background: #ede9fe;
+      color: #7c3aed;
+    }
+    /* Popup panels */
+    .popup-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.3);
+      z-index: 999;
+    }
+    .popup-overlay.visible {
+      display: block;
+    }
+    .popup-panel {
+      display: none;
+      position: fixed;
+      top: 60px;
+      right: 20px;
+      width: 400px;
+      max-width: calc(100vw - 40px);
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      z-index: 1000;
+      overflow: hidden;
+    }
+    .popup-panel.visible {
+      display: block;
+    }
+    .popup-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid #eee;
+      font-weight: 600;
+      color: #7c3aed;
+    }
+    .popup-content {
+      padding: 16px;
+    }
+    #walletPanel {
+      width: 450px;
+    }
+    .close-btn {
+      background: none;
+      border: none;
+      font-size: 18px;
+      cursor: pointer;
+      color: #666;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    .close-btn:hover {
+      background: #f0f0f0;
+      color: #333;
+    }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .card h2 {
+      margin-top: 0;
+      color: #7c3aed;
+      font-size: 1.2em;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .chain-status {
+      background: #f8f9fa;
+      border-radius: 6px;
+      padding: 15px;
+      border-left: 4px solid #7c3aed;
+    }
+    .chain-status.l2 {
+      border-left-color: #10b981;
+    }
+    .chain-status h3 {
+      margin: 0 0 15px 0;
+      font-size: 14px;
+      color: #555;
+    }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #e9ecef;
+    }
+    .status-row:last-child {
+      border-bottom: none;
+    }
+    .status-label {
+      font-size: 13px;
+      color: #666;
+    }
+    .status-value {
+      font-family: monospace;
+      font-size: 13px;
+      color: #333;
+    }
+    .status-value.synced {
+      color: #10b981;
+      font-weight: 600;
+    }
+    .status-value.not-synced {
+      color: #ef4444;
+      font-weight: 600;
+    }
+    .hash {
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .hash:hover {
+      background: #e2e8f0;
+    }
+    .copy-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      width: 22px;
+      height: 22px;
+      margin-left: 6px;
+      background: #f0f0f0;
+      border: none;
+      border-radius: 50%;
+      vertical-align: middle;
+      opacity: 0.7;
+      transition: all 0.15s ease;
+    }
+    .copy-btn:hover {
+      opacity: 1;
+      background: #e0e0e0;
+    }
+    .copy-btn svg {
+      width: 12px;
+      height: 12px;
+      stroke: #666;
+      fill: none;
+      stroke-width: 1.5;
+    }
+    .copy-btn:hover svg {
+      stroke: #333;
+    }
+    .copy-btn.copied {
+      background: #d1fae5;
+    }
+    .copy-btn.copied svg {
+      stroke: #059669;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: 600;
+      color: #555;
+      font-size: 13px;
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: #7c3aed;
+    }
+    textarea {
+      min-height: 80px;
+      font-family: monospace;
+    }
+    button {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #6d28d9;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background: #6b7280;
+    }
+    button.secondary:hover {
+      background: #4b5563;
+    }
+    button.small {
+      padding: 6px 12px;
+      font-size: 12px;
+    }
+    .row {
+      display: flex;
+      gap: 15px;
+    }
+    .row .form-group {
+      flex: 1;
+    }
+    .log-container {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 15px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-entry {
+      margin-bottom: 5px;
+    }
+    .log-entry.error { color: #f48771; }
+    .log-entry.success { color: #89d185; }
+    .log-entry.info { color: #6796e6; }
+    .tx-history {
+      max-height: 250px;
+      overflow-y: auto;
+    }
+    /* Fullscreen mode for TX History */
+    #txHistoryCard.fullscreen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 9999;
+      margin: 0;
+      border-radius: 0;
+      display: flex;
+      flex-direction: column;
+      background: white;
+    }
+    #txHistoryCard.fullscreen h2 {
+      flex-shrink: 0;
+      padding: 16px 20px;
+      margin: 0;
+      border-bottom: 1px solid #eee;
+    }
+    #txHistoryCard.fullscreen .tx-history {
+      flex: 1;
+      max-height: none;
+      padding: 20px;
+      overflow-y: auto;
+    }
+    #txHistoryCard.fullscreen #maximizeHistoryBtn::after {
+      content: ' Exit';
+    }
+    .tx-item {
+      padding: 12px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .tx-item.success {
+      border-left: 3px solid #10b981;
+    }
+    .tx-item.error {
+      border-left: 3px solid #ef4444;
+    }
+    .tx-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .tx-time {
+      color: #888;
+    }
+    .tx-status {
+      font-weight: 600;
+    }
+    .tx-status.success { color: #10b981; }
+    .tx-status.error { color: #ef4444; }
+    .tx-details {
+      font-family: monospace;
+      color: #555;
+    }
+    .balance-display {
+      font-family: monospace;
+      font-size: 14px;
+      font-weight: 600;
+      color: #333;
+    }
+    .wallet-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .wallet-option {
+      display: grid;
+      grid-template-columns: 24px 1fr 100px 100px;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      cursor: pointer;
+      border: 2px solid transparent;
+      transition: all 0.2s;
+      font-size: 12px;
+    }
+    .wallet-option:hover {
+      background: #f0f0f0;
+    }
+    .wallet-option.selected {
+      border-color: #7c3aed;
+      background: #f5f3ff;
+    }
+    .wallet-option input[type="radio"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+    .wallet-address {
+      font-family: monospace;
+      font-size: 11px;
+      color: #333;
+    }
+    .wallet-balance {
+      font-family: monospace;
+      font-size: 11px;
+      text-align: right;
+    }
+    .wallet-balance .chain-label {
+      font-size: 10px;
+      color: #888;
+      display: block;
+    }
+    /* Connected wallet display in Submit TX */
+    .connected-wallet {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      border: 1px solid #e5e7eb;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .connected-wallet:hover {
+      background: #f0f0f0;
+      border-color: #7c3aed;
+    }
+    .connected-wallet-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .connected-label {
+      color: #666;
+      font-size: 12px;
+    }
+    .connected-address {
+      font-family: monospace;
+      font-size: 13px;
+      font-weight: 500;
+      color: #333;
+    }
+    .wallet-change-icon {
+      color: #888;
+      display: flex;
+      align-items: center;
+      margin-left: 4px;
+    }
+    .connected-wallet:hover .wallet-change-icon {
+      color: #7c3aed;
+    }
+    .connected-balances {
+      display: flex;
+      gap: 16px;
+    }
+    .balance-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .chain-tag {
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .chain-tag.l1 {
+      background: #dbeafe;
+      color: #1d4ed8;
+    }
+    .chain-tag.l2 {
+      background: #d1fae5;
+      color: #059669;
+    }
+    /* Address input with dropdown */
+    .address-input-wrapper {
+      display: flex;
+      gap: 0;
+    }
+    .address-input-wrapper input {
+      flex: 1;
+      border-radius: 4px 0 0 4px;
+      border-right: none;
+    }
+    .address-input-wrapper select {
+      width: 40px;
+      min-width: 40px;
+      padding: 8px 4px;
+      border-radius: 0 4px 4px 0;
+      border: 1px solid #ddd;
+      background: #f8f9fa;
+      cursor: pointer;
+      color: #666;
+    }
+    .address-input-wrapper select:hover {
+      background: #f0f0f0;
+    }
+    .chain-selector {
+      display: flex;
+      gap: 0;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid #ddd;
+      width: fit-content;
+    }
+    .chain-btn {
+      padding: 8px 24px;
+      border: none;
+      background: #f5f5f5;
+      cursor: pointer;
+      font-weight: 600;
+      color: #666;
+      transition: all 0.2s;
+    }
+    .chain-btn:hover {
+      background: #eee;
+    }
+    .chain-btn.active {
+      background: #7c3aed;
+      color: white;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 2fr 100px;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+    }
+    .settings-grid input {
+      padding: 6px 10px;
+    }
+    .status-indicator {
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .status-indicator.online {
+      background: #d1fae5;
+      color: #059669;
+    }
+    .status-indicator.offline {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+    .copy-tooltip {
+      position: absolute;
+      background: #333;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      top: -30px;
+      left: 50%;
+      transform: translateX(-50%);
+      opacity: 0;
+      transition: opacity 0.2s;
+      pointer-events: none;
+    }
+    .copy-tooltip.show {
+      opacity: 1;
+    }
+    .state-transition {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: monospace;
+      font-size: 11px;
+      background: #f1f5f9;
+      padding: 8px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .state-transition .arrow {
+      color: #7c3aed;
+      font-weight: bold;
+    }
+
+    /* L1 Transaction Group Styles */
+    .l1-tx-group {
+      background: white;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+    .l1-tx-header {
+      padding: 12px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+    }
+    .l2-tx-list {
+      padding: 8px 12px;
+    }
+    .l2-tx-item {
+      padding: 10px;
+      margin: 6px 0;
+      background: #fafafa;
+      border-radius: 6px;
+      border-left: 3px solid #10b981;
+      font-size: 12px;
+    }
+    .l2-tx-item.bridge {
+      border-left-color: #3b82f6;
+    }
+    .l2-tx-item.l2-l1 {
+      border-left-color: #f97316;
+    }
+    .l2-tx-item.admin {
+      border-left-color: #f59e0b;
+    }
+    .l2-tx-item.prep {
+      border-left-color: #a855f7;
+    }
+    .l2-tx-item.deployment {
+      border-left-color: #8b5cf6;
+    }
+    .tx-type-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .tx-type-badge.l2tx {
+      background: #d1fae5;
+      color: #059669;
+    }
+    .tx-type-badge.bridge {
+      background: #dbeafe;
+      color: #1d4ed8;
+    }
+    .tx-type-badge.l2-l1 {
+      background: #ffedd5;
+      color: #c2410c;
+    }
+    .l2-tx-item.rollups-admin {
+      border-left-color: #6b7280;
+    }
+    .tx-type-badge.rollups-admin {
+      background: #e5e7eb;
+      color: #374151;
+    }
+    .tx-type-badge.admin {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .tx-type-badge.prep {
+      background: #f3e8ff;
+      color: #7e22ce;
+    }
+    .prep-note {
+      margin-top: 6px;
+      padding: 6px 8px;
+      background: #eff6ff;
+      border: 1px solid #dbeafe;
+      border-radius: 4px;
+      font-size: 11px;
+      color: #1e40af;
+    }
+    .tx-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 4px 0;
+    }
+    .tx-row > span:first-child {
+      color: #888;
+      min-width: 70px;
+      font-size: 11px;
+    }
+    .deployment {
+      color: #8b5cf6;
+      font-weight: 500;
+    }
+    .decoded-call {
+      color: #28a745;
+      font-weight: 500;
+    }
+    .state-transition-mini {
+      padding: 8px 12px;
+      font-size: 11px;
+      color: #666;
+      border-top: 1px dashed #eee;
+      background: #fafafa;
+    }
+  </style>
+</head>
+<body>
+  <div class="header-bar">
+    <h1>sync-rollups Dashboard</h1>
+    <div class="header-icons">
+      <button class="icon-btn" id="settingsIconBtn" title="Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Settings Panel (hidden by default) -->
+  <div class="popup-panel" id="settingsPanel">
+    <div class="popup-header">
+      <span>Settings</span>
+      <button class="close-btn" id="closeSettingsBtn">✕</button>
+    </div>
+    <div class="popup-content">
+      <div class="settings-grid">
+        <span>L1 RPC Proxy</span>
+        <input type="text" id="l1Rpc" value="http://localhost:8546" />
+        <span class="status-indicator" id="l1Status">-</span>
+
+        <span>L2 Fullnode RPC</span>
+        <input type="text" id="l2Rpc" value="http://localhost:9547" />
+        <span class="status-indicator" id="l2Status">-</span>
+
+        <span>L2 RPC Proxy</span>
+        <input type="text" id="l2EvmRpc" value="http://localhost:9548" />
+        <span class="status-indicator" id="l2EvmStatus">-</span>
+
+        <span>Builder URL</span>
+        <input type="text" id="builderUrl" value="http://localhost:3200" />
+        <span class="status-indicator" id="builderUrlStatus">-</span>
+
+        <span>Rollups Contract</span>
+        <input type="text" id="rollupsAddress" value="0xe7f1725e7734ce288f8367e1bb143e90bb3f0512" />
+        <span></span>
+
+        <span>Rollup ID</span>
+        <input type="text" id="rollupId" value="0" />
+        <span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Wallet Panel (hidden by default) -->
+  <div class="popup-panel" id="walletPanel">
+    <div class="popup-header">
+      <span>Select Wallet</span>
+      <button class="close-btn" id="closeWalletBtn">✕</button>
+    </div>
+    <div class="popup-content">
+      <div class="wallet-list" id="walletList">
+        <!-- Wallet options will be rendered here -->
+      </div>
+      <div id="customWalletSection" style="margin-top: 15px; display: none;">
+        <div class="form-group">
+          <label>Custom Private Key</label>
+          <input type="password" id="customPrivateKey" placeholder="0x..." />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay for popups -->
+  <div class="popup-overlay" id="popupOverlay"></div>
+
+  <!-- Status Card -->
+  <div class="card">
+    <h2>
+      Chain Status
+      <button class="small secondary" id="refreshBtn">Refresh</button>
+    </h2>
+
+    <div class="dashboard-grid">
+      <!-- L1 Status -->
+      <div class="chain-status">
+        <h3 id="l1ChainTitle">L1</h3>
+        <div class="status-row">
+          <span class="status-label">Block Number</span>
+          <span class="status-value" id="l1BlockNumber">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">State Root (Contract)</span>
+          <span class="status-value hash" id="l1StateRoot" title="" onclick="copyToClipboard(this)">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Rollup ETH Balance</span>
+          <span class="status-value" id="l1EtherBalance">-</span>
+        </div>
+      </div>
+
+      <!-- L2/Fullnode Status -->
+      <div class="chain-status l2">
+        <h3>L2 Fullnode (Chain 10200200)</h3>
+        <div class="status-row">
+          <span class="status-label">Block Number</span>
+          <span class="status-value" id="l2BlockNumber">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">State Root (EVM)</span>
+          <span class="status-value hash" id="l2StateRoot" title="" onclick="copyToClipboard(this)">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Sync Status</span>
+          <span class="status-value" id="syncStatus">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Builder Status -->
+    <div class="status-row" style="margin-top: 15px; padding: 12px; background: #f8f9fa; border-radius: 6px;">
+      <span class="status-label">Builder</span>
+      <span class="status-value" id="builderStatus">-</span>
+    </div>
+  </div>
+
+  <!-- Submit Transaction Card -->
+  <div class="card">
+    <h2>Submit Transaction</h2>
+
+    <!-- Connected Wallet Display (clickable to change wallet) -->
+    <div class="connected-wallet" id="connectedWalletDisplay" title="Click to change wallet">
+      <div class="connected-wallet-info">
+        <span class="connected-label">From:</span>
+        <span class="connected-address" id="connectedAddress">-</span>
+        <span class="wallet-change-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/>
+            <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>
+          </svg>
+        </span>
+      </div>
+      <div class="connected-balances">
+        <span class="balance-item"><span class="chain-tag l1">L1</span> <span id="connectedL1Balance">-</span></span>
+        <span class="balance-item"><span class="chain-tag l2">L2</span> <span id="connectedL2Balance">-</span></span>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Chain</label>
+      <div class="chain-selector">
+        <button type="button" class="chain-btn active" id="chainL1Btn" data-chain="L1">L1</button>
+        <button type="button" class="chain-btn" id="chainL2Btn" data-chain="L2">L2</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="form-group" style="flex: 2;">
+        <label>To Address</label>
+        <div class="address-input-wrapper">
+          <input type="text" id="txToAddress" placeholder="0x..." value="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC" />
+          <select id="addressSelect" title="Select from known addresses">
+            <option value="">Select...</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="flex: 1;">
+        <label>Value (ETH)</label>
+        <input type="text" id="txValue" placeholder="0.1" value="0.1" />
+      </div>
+    </div>
+
+    <div class="form-group" id="functionSelectorGroup" style="display: none;">
+      <label>Function</label>
+      <select id="functionSelector" style="width: 100%;">
+        <option value="">-- Select function or enter data manually --</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Data (hex, optional)</label>
+      <input type="text" id="txData" placeholder="0x" value="0x" />
+    </div>
+
+    <div class="form-group" id="crossChainOption" style="display: flex; align-items: center; gap: 10px;">
+      <input type="checkbox" id="targetIsOtherChain" />
+      <label for="targetIsOtherChain" style="margin: 0; cursor: pointer;">Target is on <span id="otherChainLabel">L2</span> (use proxy)</label>
+      <span class="hash" id="proxyAddressDisplay" style="display: none; margin-left: 10px;" onclick="copyToClipboard(this)"></span>
+      <span class="hash" id="sourceProxyAddressDisplay" style="display: none; margin-left: 10px;" onclick="copyToClipboard(this)"></span>
+    </div>
+
+    <div style="display: flex; gap: 10px;">
+      <button id="sendTxBtn">Send Transaction</button>
+      <button id="simulateTxBtn" class="secondary">Simulate Call</button>
+    </div>
+
+    <div id="simulateResult" style="margin-top: 15px; display: none;">
+      <div style="background: #dbeafe; padding: 12px; border-radius: 6px; border-left: 3px solid #3b82f6;">
+        <strong>Simulation Result:</strong>
+        <pre id="simulateResultData" style="margin: 8px 0 0 0; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all;"></pre>
+      </div>
+    </div>
+
+    <div id="txResult" style="margin-top: 15px; display: none;">
+      <div id="txSuccessBox" style="background: #f0fdf4; padding: 12px; border-radius: 6px; border-left: 3px solid #10b981;">
+        <strong>TX Hash:</strong> <span class="hash" id="txHashResult">-</span>
+      </div>
+      <div class="state-transition" id="stateTransition" style="display: none; margin-top: 10px;">
+        <span>State:</span>
+        <span class="hash" id="txOldState" onclick="copyToClipboard(this)">-</span>
+        <span class="arrow">→</span>
+        <span class="hash" id="txNewState" onclick="copyToClipboard(this)">-</span>
+      </div>
+      <div id="txErrorBox" style="display: none; background: #fee2e2; padding: 12px; border-radius: 6px; border-left: 3px solid #ef4444; margin-top: 10px;">
+        <strong style="color: #dc2626;">Error:</strong>
+        <span id="txErrorText"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transaction History Card -->
+  <div class="card" id="txHistoryCard">
+    <h2>
+      L2 Execution History (from L1)
+      <button id="refreshHistoryBtn" style="font-size: 12px; padding: 4px 10px;">Refresh</button>
+      <button id="maximizeHistoryBtn" style="font-size: 12px; padding: 4px 10px;" title="Fullscreen">⛶</button>
+    </h2>
+    <div class="tx-history" id="txHistory">
+      <div style="text-align: center; color: #888; padding: 20px;">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Logs Card -->
+  <div class="card">
+    <h2>
+      Logs
+      <button class="small secondary" id="clearLogs">Clear</button>
+    </h2>
+    <div class="log-container" id="logs"></div>
+  </div>
+
+  <script>
+    // ============ Configuration ============
+    const L2_CHAIN_ID = 10200200;
+    const DEFAULT_RUNTIME_SETTINGS = {
+      l1Rpc: "http://localhost:8546",
+      l2Rpc: "http://localhost:9547",
+      l2EvmRpc: "http://localhost:9548",
+      builderUrl: "http://localhost:3200",
+      rollupsAddress: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+      rollupId: "0",
+      deploymentBlock: "0"
+    };
+
+    // Proxy detection magic addresses and values
+    // When getBalance is called on these addresses, proxies return magic values
+    const L1_PROXY_DETECTION_ADDRESS = "0x00000000000000000000000050524f5859525043"; // "PROXYRPC"
+    const L1_PROXY_DETECTION_MAGIC = "0x50524f5859525043";
+    const L2_PROXY_DETECTION_ADDRESS = "0x0000000000000000000000004c3250524f585952"; // "L2PROXYR"
+    const L2_PROXY_DETECTION_MAGIC = "0x4c3250524f585952";
+
+    const ROLLUPS_ABI = [
+      "function rollups(uint256) view returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)",
+      "function authorizedProxies(address) view returns (bool)",
+      "event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
+      "event ExecutionsLoaded(uint256 count)",
+      "event L2ProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
+    ];
+
+    // L2Proxy ABI for fetching original address
+    const L2PROXY_ABI = [
+      "function originalAddress() view returns (address)",
+      "function originalRollupId() view returns (uint256)",
+    ];
+
+    // Known function selectors for decoding calldata
+    const KNOWN_FUNCTIONS = {
+      // Counter contract
+      '0xd09de08a': { name: 'increment', sig: 'increment()', params: [], returns: ['uint256'] },
+      '0xa87d942c': { name: 'getCount', sig: 'getCount()', params: [], returns: ['uint256'], view: true },
+      '0x06661abd': { name: 'count', sig: 'count()', params: [], returns: ['uint256'], view: true },
+      '0x2113522a': { name: 'lastCaller', sig: 'lastCaller()', params: [], returns: ['address'], view: true },
+      // Common ERC20
+      '0x70a08231': { name: 'balanceOf', sig: 'balanceOf(address)', params: ['address'], returns: ['uint256'], view: true },
+      '0xa9059cbb': { name: 'transfer', sig: 'transfer(address,uint256)', params: ['address', 'uint256'], returns: ['bool'] },
+      '0x23b872dd': { name: 'transferFrom', sig: 'transferFrom(address,address,uint256)', params: ['address', 'address', 'uint256'], returns: ['bool'] },
+      '0x095ea7b3': { name: 'approve', sig: 'approve(address,uint256)', params: ['address', 'uint256'], returns: ['bool'] },
+      '0x18160ddd': { name: 'totalSupply', sig: 'totalSupply()', params: [], returns: ['uint256'], view: true },
+      '0x06fdde03': { name: 'name', sig: 'name()', params: [], returns: ['string'], view: true },
+      '0x95d89b41': { name: 'symbol', sig: 'symbol()', params: [], returns: ['string'], view: true },
+      '0x313ce567': { name: 'decimals', sig: 'decimals()', params: [], returns: ['uint8'], view: true },
+      // Common general
+      '0x8da5cb5b': { name: 'owner', sig: 'owner()', params: [], returns: ['address'], view: true },
+      '0xf2fde38b': { name: 'transferOwnership', sig: 'transferOwnership(address)', params: ['address'] },
+    };
+
+    // Known address labels for friendly display
+    const KNOWN_ADDRESS_LABELS = {};
+
+    // Contract type definitions with their functions
+    const CONTRACT_TYPES = {
+      'Counter': {
+        functions: [
+          { name: 'increment', sig: 'increment()', selector: '0xd09de08a', params: [], returns: ['uint256'] },
+          { name: 'getCount', sig: 'getCount()', selector: '0xa87d942c', params: [], returns: ['uint256'], view: true },
+          { name: 'count', sig: 'count()', selector: '0x06661abd', params: [], returns: ['uint256'], view: true },
+          { name: 'lastCaller', sig: 'lastCaller()', selector: '0x2113522a', params: [], returns: ['address'], view: true },
+        ]
+      },
+      'ERC20': {
+        functions: [
+          { name: 'balanceOf', sig: 'balanceOf(address)', selector: '0x70a08231', params: ['address'], returns: ['uint256'], view: true },
+          { name: 'transfer', sig: 'transfer(address,uint256)', selector: '0xa9059cbb', params: ['address', 'uint256'], returns: ['bool'] },
+          { name: 'approve', sig: 'approve(address,uint256)', selector: '0x095ea7b3', params: ['address', 'uint256'], returns: ['bool'] },
+          { name: 'allowance', sig: 'allowance(address,address)', selector: '0xdd62ed3e', params: ['address', 'address'], returns: ['uint256'], view: true },
+          { name: 'totalSupply', sig: 'totalSupply()', selector: '0x18160ddd', params: [], returns: ['uint256'], view: true },
+          { name: 'name', sig: 'name()', selector: '0x06fdde03', params: [], returns: ['string'], view: true },
+          { name: 'symbol', sig: 'symbol()', selector: '0x95d89b41', params: [], returns: ['string'], view: true },
+          { name: 'decimals', sig: 'decimals()', selector: '0x313ce567', params: [], returns: ['uint8'], view: true },
+        ]
+      },
+    };
+
+    // Default functions available for any deployed contract
+    const DEFAULT_CONTRACT_FUNCTIONS = [
+      { name: 'increment', sig: 'increment()', selector: '0xd09de08a', params: [], returns: ['uint256'] },
+      { name: 'getCount', sig: 'getCount()', selector: '0xa87d942c', params: [], returns: ['uint256'], view: true },
+      { name: 'lastCaller', sig: 'lastCaller()', selector: '0x2113522a', params: [], returns: ['address'], view: true },
+    ];
+
+    // Default user wallets (development only). Can be overridden by ui/wallets.dev.json.
+    const DEFAULT_USER_WALLETS = [
+      {
+        privateKey: "0x1c6bdebe45b85aa62d7170a8e43aa0fbf5c51ffc168ec5f58ae377b115f68d31",
+        label: "User #1"
+      },
+      {
+        privateKey: "0xa71547650a593008aa8d778643883b78dfad7cecb4e935e61530c6af38220802",
+        label: "User #2"
+      }
+    ];
+    let USER_WALLETS = [];
+
+    function normalizeUserWallets(entries) {
+      if (!Array.isArray(entries)) return [];
+      return entries.map((entry, idx) => {
+        const privateKey = entry?.privateKey;
+        if (!privateKey || !privateKey.startsWith('0x') || privateKey.length !== 66) return null;
+        try {
+          const wallet = new ethers.Wallet(privateKey);
+          const label = entry?.label || `User #${idx + 1}`;
+          return { address: wallet.address, privateKey, label };
+        } catch {
+          return null;
+        }
+      }).filter(Boolean);
+    }
+
+    async function loadUserWalletConfig() {
+      USER_WALLETS = normalizeUserWallets(DEFAULT_USER_WALLETS);
+      try {
+        const resp = await fetch('wallets.dev.json', { cache: 'no-store' });
+        if (resp.ok) {
+          const cfg = await resp.json();
+          const fileWallets = normalizeUserWallets(cfg?.users || cfg);
+          if (fileWallets.length >= 2) {
+            USER_WALLETS = fileWallets;
+          }
+        }
+      } catch {
+        // Keep defaults if runtime config is unavailable.
+      }
+      refreshKnownAddressLabels();
+    }
+
+    function refreshKnownAddressLabels() {
+      Object.keys(KNOWN_ADDRESS_LABELS).forEach((k) => delete KNOWN_ADDRESS_LABELS[k]);
+      USER_WALLETS.forEach((wallet, idx) => {
+        KNOWN_ADDRESS_LABELS[wallet.address] = wallet.label || `User #${idx + 1}`;
+      });
+    }
+
+    function customWalletIndex() {
+      return USER_WALLETS.length;
+    }
+
+    function browserWalletIndex() {
+      return USER_WALLETS.length + 1;
+    }
+
+    // ============ State ============
+    let selectedWalletIndex = 0; // 0..N-1 configured users, N custom key, N+1 browser wallet
+    let selectedChain = 'L1';
+    let browserWalletAddress = null; // Connected browser wallet address
+    let walletBalances = {}; // { address: { l1: '0', l2: '0' } }
+    let deployedContracts = []; // { address, name, deployedBy, timestamp }
+
+    let runtimeDeploymentBlock = 0;
+
+    function applyRuntimeSettings(settings) {
+      if (!settings || typeof settings !== 'object') return;
+      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'rollupsAddress', 'rollupId'];
+      for (const key of keys) {
+        if (typeof settings[key] === 'string' && settings[key].length > 0) {
+          const input = document.getElementById(key);
+          if (input) input.value = settings[key];
+        }
+      }
+      if (settings.deploymentBlock !== undefined) {
+        runtimeDeploymentBlock = parseInt(settings.deploymentBlock, 10) || 0;
+      }
+    }
+
+    async function loadRuntimeSettingsConfig() {
+      applyRuntimeSettings(DEFAULT_RUNTIME_SETTINGS);
+      try {
+        const resp = await fetch('settings.dev.json', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const cfg = await resp.json();
+        applyRuntimeSettings(cfg);
+      } catch {
+        // Keep defaults if runtime config is unavailable.
+      }
+    }
+
+    // Load/save deployed contracts from localStorage
+    function loadDeployedContracts() {
+      const stored = localStorage.getItem('sync-rollups-deployed-contracts');
+      if (stored) {
+        try {
+          deployedContracts = JSON.parse(stored);
+        } catch (e) {
+          deployedContracts = [];
+        }
+      }
+    }
+
+    function saveDeployedContracts() {
+      localStorage.setItem('sync-rollups-deployed-contracts', JSON.stringify(deployedContracts));
+    }
+
+    function addDeployedContract(address, deployedBy, timestamp) {
+      if (!deployedContracts.find(c => c.address.toLowerCase() === address.toLowerCase())) {
+        deployedContracts.push({
+          address,
+          deployedBy,
+          timestamp,
+          name: `Contract ${shortHash(address)}`
+        });
+        saveDeployedContracts();
+        updateAddressDropdown();
+      }
+    }
+
+    // Copy icon SVG
+    const COPY_ICON = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+    const CHECK_ICON = `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+
+    function copyText(btn, text) {
+      event.stopPropagation();
+      navigator.clipboard.writeText(text);
+      btn.innerHTML = CHECK_ICON;
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.innerHTML = COPY_ICON;
+        btn.classList.remove('copied');
+      }, 1000);
+    }
+
+    // ============ Utility Functions ============
+    function copyToClipboard(element) {
+      const text = element.title || element.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        let tooltip = element.querySelector('.copy-tooltip');
+        if (!tooltip) {
+          tooltip = document.createElement('span');
+          tooltip.className = 'copy-tooltip';
+          element.style.position = 'relative';
+          element.appendChild(tooltip);
+        }
+        tooltip.textContent = 'Copied!';
+        tooltip.classList.add('show');
+        setTimeout(() => tooltip.classList.remove('show'), 1500);
+      });
+    }
+
+    function log(message, type = 'info') {
+      const logs = document.getElementById('logs');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      const time = new Date().toLocaleTimeString();
+      entry.textContent = `[${time}] ${message}`;
+      logs.appendChild(entry);
+      logs.scrollTop = logs.scrollHeight;
+    }
+
+    function shortHash(hash) {
+      if (!hash || hash.length < 20) return hash || '-';
+      return hash.slice(0, 10) + '...' + hash.slice(-6);
+    }
+
+    // Block explorer URL based on L1 chain ID (detected at runtime)
+    let l1ExplorerBaseUrl = '';
+    const CHAIN_EXPLORERS = {
+      100: 'https://gnosisscan.io',
+      1: 'https://etherscan.io',
+      31337: '', // local anvil - no explorer
+    };
+
+    function getL1ExplorerTxUrl(txHash) {
+      return l1ExplorerBaseUrl ? `${l1ExplorerBaseUrl}/tx/${txHash}` : '#';
+    }
+
+    // Get address label (known name or truncated hash)
+    function addrLabel(addr) {
+      if (!addr) return 'N/A';
+      try {
+        const checksummed = ethers.getAddress(addr);
+        return KNOWN_ADDRESS_LABELS[checksummed] || shortHash(addr);
+      } catch {
+        return shortHash(addr);
+      }
+    }
+
+    // Decode calldata to human-readable format
+    function decodeCalldata(data) {
+      if (!data || data.length < 10) {
+        return { decoded: false, raw: data || '0x' };
+      }
+
+      const normalizedData = data.toLowerCase();
+      const selector = normalizedData.slice(0, 10);
+      const funcInfo = KNOWN_FUNCTIONS[selector];
+
+      if (!funcInfo) {
+        return { decoded: false, raw: data, selector };
+      }
+
+      try {
+        if (funcInfo.params.length === 0) {
+          return {
+            decoded: true,
+            name: funcInfo.name,
+            sig: funcInfo.sig,
+            args: [],
+            formatted: `${funcInfo.name}()`
+          };
+        }
+
+        const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+        const paramsData = '0x' + normalizedData.slice(10);
+        const decoded = abiCoder.decode(funcInfo.params, paramsData);
+        const args = decoded.map((arg, i) => {
+          if (funcInfo.params[i] === 'address') {
+            return addrLabel(arg);
+          } else if (funcInfo.params[i].startsWith('uint') || funcInfo.params[i].startsWith('int')) {
+            return arg.toString();
+          }
+          return arg.toString();
+        });
+
+        return {
+          decoded: true,
+          name: funcInfo.name,
+          sig: funcInfo.sig,
+          args,
+          formatted: `${funcInfo.name}(${args.join(', ')})`
+        };
+      } catch (e) {
+        return { decoded: false, raw: data, selector, error: e.message };
+      }
+    }
+
+    // Format calldata for display (with value)
+    function formatCalldata(data, value) {
+      const decoded = decodeCalldata(data);
+      const valueStr = value && value > 0n ? ` <span style="color: #10b981;">{${ethers.formatEther(value)} ETH}</span>` : '';
+
+      if (decoded.decoded) {
+        return `<span class="decoded-call">${decoded.formatted}</span>${valueStr}`;
+      } else if (decoded.selector) {
+        const hasParams = data.length > 10;
+        const display = hasParams ? `${decoded.selector}...(${(data.length - 10) / 2}B)` : decoded.selector;
+        return `<code class="hash" title="${data}">${display}</code>${valueStr}`;
+      } else {
+        return `<code class="hash" title="${data}">${decoded.raw}</code>${valueStr}`;
+      }
+    }
+
+    function formatBalance(wei) {
+      const eth = parseFloat(ethers.formatEther(wei));
+      if (eth === 0) return '0';
+      if (eth < 0.0001) return '<0.0001';
+      return eth.toFixed(4);
+    }
+
+    // ============ Wallet Functions ============
+    function getSelectedWallet() {
+      if (selectedWalletIndex >= 0 && selectedWalletIndex < USER_WALLETS.length) {
+        return USER_WALLETS[selectedWalletIndex];
+      } else if (selectedWalletIndex === customWalletIndex()) {
+        const customKey = document.getElementById('customPrivateKey').value;
+        if (customKey && customKey.startsWith('0x') && customKey.length === 66) {
+          try {
+            const wallet = new ethers.Wallet(customKey);
+            return { address: wallet.address, privateKey: customKey, label: 'Custom' };
+          } catch (e) {
+            return null;
+          }
+        }
+        return null;
+      } else if (selectedWalletIndex === browserWalletIndex() && browserWalletAddress) {
+        return { address: browserWalletAddress, privateKey: null, label: 'Browser Wallet', isBrowserWallet: true };
+      }
+      return null;
+    }
+
+    async function connectBrowserWallet() {
+      if (!window.ethereum) {
+        log('No browser wallet detected. Please install MetaMask or Rabby.', 'error');
+        return false;
+      }
+
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        if (accounts.length > 0) {
+          browserWalletAddress = accounts[0];
+          log(`Connected browser wallet: ${browserWalletAddress}`, 'success');
+          selectWallet(browserWalletIndex());
+
+          // Force full re-render to show the connected address
+          renderWalletList();
+          fetchAllWalletBalances();
+
+          // Switch to the currently selected chain
+          await switchBrowserWalletNetwork(selectedChain);
+
+          return true;
+        }
+      } catch (e) {
+        log('Failed to connect browser wallet: ' + e.message, 'error');
+      }
+      return false;
+    }
+
+    async function selectWallet(index) {
+      // If selecting browser wallet and not connected, try to connect first
+      if (index === browserWalletIndex() && !browserWalletAddress) {
+        connectBrowserWallet();
+        return;
+      }
+
+      selectedWalletIndex = index;
+
+      // Update UI
+      document.querySelectorAll('.wallet-option').forEach((el, i) => {
+        el.classList.toggle('selected', i === index);
+        const radio = el.querySelector('input[type="radio"]');
+        if (radio) radio.checked = i === index;
+      });
+
+      // Show/hide custom key input
+      const customSection = document.getElementById('customWalletSection');
+      customSection.style.display = index === customWalletIndex() ? 'block' : 'none';
+
+      const walletLabel = (index >= 0 && index < USER_WALLETS.length) ? USER_WALLETS[index].address :
+                          index === customWalletIndex() ? 'Custom' :
+                          browserWalletAddress || 'Browser Wallet';
+      log(`Selected wallet: ${walletLabel}`, 'info');
+
+      // If selecting browser wallet (already connected), switch to the currently selected chain
+      if (index === browserWalletIndex() && browserWalletAddress && window.ethereum) {
+        await switchBrowserWalletNetwork(selectedChain);
+      }
+
+      // Update connected wallet display
+      updateConnectedWalletDisplay();
+    }
+
+    function updateConnectedWalletDisplay() {
+      const wallet = getSelectedWallet();
+      const addressEl = document.getElementById('connectedAddress');
+      const l1BalanceEl = document.getElementById('connectedL1Balance');
+      const l2BalanceEl = document.getElementById('connectedL2Balance');
+
+      if (!wallet) {
+        addressEl.textContent = 'No wallet selected';
+        l1BalanceEl.textContent = '-';
+        l2BalanceEl.textContent = '-';
+        return;
+      }
+
+      // Get address
+      let address;
+      if (selectedWalletIndex >= 0 && selectedWalletIndex < USER_WALLETS.length) {
+        address = USER_WALLETS[selectedWalletIndex].address;
+      } else if (selectedWalletIndex === customWalletIndex()) {
+        try {
+          const w = new ethers.Wallet(document.getElementById('customPrivateKey').value);
+          address = w.address;
+        } catch { address = null; }
+      } else if (selectedWalletIndex === browserWalletIndex()) {
+        address = browserWalletAddress;
+      }
+
+      if (address) {
+        // Show truncated address with label if available
+        const label = KNOWN_ADDRESS_LABELS[ethers.getAddress(address)];
+        addressEl.textContent = label ? `${label} (${shortHash(address)})` : shortHash(address);
+        addressEl.title = address;
+
+        // Show balances
+        const balances = walletBalances[address];
+        if (balances) {
+          l1BalanceEl.textContent = parseFloat(ethers.formatEther(balances.l1)).toFixed(4) + ' ETH';
+          l2BalanceEl.textContent = parseFloat(ethers.formatEther(balances.l2)).toFixed(4) + ' ETH';
+        } else {
+          l1BalanceEl.textContent = '-';
+          l2BalanceEl.textContent = '-';
+        }
+      } else {
+        addressEl.textContent = 'Invalid wallet';
+        l1BalanceEl.textContent = '-';
+        l2BalanceEl.textContent = '-';
+      }
+    }
+
+    async function fetchAllWalletBalances() {
+      const l1Rpc = document.getElementById('l1Rpc').value;
+      const l2Rpc = document.getElementById('l2Rpc').value;
+
+      try {
+        const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
+        const l2Provider = new ethers.JsonRpcProvider(l2Rpc);
+
+        // Fetch balances for all configured user wallets
+        for (const account of USER_WALLETS) {
+          const [l1Balance, l2Balance] = await Promise.all([
+            l1Provider.getBalance(account.address),
+            l2Provider.getBalance(account.address)
+          ]);
+          walletBalances[account.address] = {
+            l1: l1Balance.toString(),
+            l2: l2Balance.toString()
+          };
+        }
+
+        // Fetch custom wallet balance if set
+        const customWallet = selectedWalletIndex === customWalletIndex() ? getSelectedWallet() : null;
+        if (customWallet) {
+          const [l1Balance, l2Balance] = await Promise.all([
+            l1Provider.getBalance(customWallet.address),
+            l2Provider.getBalance(customWallet.address)
+          ]);
+          walletBalances[customWallet.address] = {
+            l1: l1Balance.toString(),
+            l2: l2Balance.toString()
+          };
+        }
+
+        // Fetch browser wallet balance if connected
+        if (browserWalletAddress) {
+          const [l1Balance, l2Balance] = await Promise.all([
+            l1Provider.getBalance(browserWalletAddress),
+            l2Provider.getBalance(browserWalletAddress)
+          ]);
+          walletBalances[browserWalletAddress] = {
+            l1: l1Balance.toString(),
+            l2: l2Balance.toString()
+          };
+        }
+
+        // Update balances in-place to avoid flickering (only re-render if list doesn't exist yet)
+        const container = document.getElementById('walletList');
+        if (container.children.length === 0) {
+          renderWalletList();
+        } else {
+          updateWalletBalancesInPlace();
+        }
+
+        // Update the connected wallet display
+        updateConnectedWalletDisplay();
+      } catch (e) {
+        console.error('Error fetching wallet balances:', e);
+      }
+    }
+
+    // Update only the balance text without rebuilding the DOM
+    function updateWalletBalancesInPlace() {
+      const walletOptions = document.querySelectorAll('.wallet-option');
+
+      walletOptions.forEach((option, index) => {
+        const balanceDivs = option.querySelectorAll('.wallet-balance');
+        if (balanceDivs.length < 2) return;
+
+        let address = null;
+        if (index >= 0 && index < USER_WALLETS.length) {
+          address = USER_WALLETS[index].address;
+        } else if (index === customWalletIndex()) {
+          const customWallet = selectedWalletIndex === customWalletIndex() ? getSelectedWallet() : null;
+          address = customWallet?.address;
+        } else if (index === browserWalletIndex()) {
+          address = browserWalletAddress;
+        }
+
+        if (address && walletBalances[address]) {
+          const balances = walletBalances[address];
+          balanceDivs[0].innerHTML = `<span class="chain-label">L1</span>${formatBalance(balances.l1)} ETH`;
+          balanceDivs[1].innerHTML = `<span class="chain-label">L2</span>${formatBalance(balances.l2)} ETH`;
+        }
+      });
+    }
+
+    // Update address dropdown with known addresses and deployed contracts
+    function updateAddressDropdown() {
+      const select = document.getElementById('addressSelect');
+      if (!select) return;
+
+      const options = [];
+
+      // Add configured user wallets
+      USER_WALLETS.forEach(a => {
+        options.push({ address: a.address, label: a.label });
+      });
+
+      // Add browser wallet if connected
+      if (browserWalletAddress) {
+        options.push({ address: browserWalletAddress, label: 'Browser Wallet' });
+      }
+
+      // Add deployed contracts
+      deployedContracts.forEach(c => {
+        options.push({
+          address: c.address,
+          label: c.name || `Contract ${shortHash(c.address)}`
+        });
+      });
+
+      select.innerHTML = '<option value="">▼</option>' + options.map(o =>
+        `<option value="${o.address}">${o.label} (${shortHash(o.address)})</option>`
+      ).join('');
+    }
+
+    // Update function selector dropdown based on selected address
+    function updateFunctionSelector() {
+      const toAddress = document.getElementById('txToAddress').value.toLowerCase();
+      const selectorGroup = document.getElementById('functionSelectorGroup');
+      const selector = document.getElementById('functionSelector');
+
+      // Check if this is a deployed contract
+      const contract = deployedContracts.find(c => c.address.toLowerCase() === toAddress);
+
+      if (contract) {
+        // Show function selector for deployed contracts
+        selectorGroup.style.display = 'block';
+
+        // Get functions for this contract type (default to Counter functions for now)
+        const functions = contract.contractType
+          ? (CONTRACT_TYPES[contract.contractType]?.functions || DEFAULT_CONTRACT_FUNCTIONS)
+          : DEFAULT_CONTRACT_FUNCTIONS;
+
+        selector.innerHTML = `
+          <option value="">-- Select function or enter data manually --</option>
+          ${functions.map(f => `
+            <option value="${f.selector}" data-params='${JSON.stringify(f.params)}' data-view="${f.view || false}">
+              ${f.sig}${f.view ? ' (view)' : ''}
+            </option>
+          `).join('')}
+        `;
+      } else {
+        selectorGroup.style.display = 'none';
+      }
+    }
+
+    // Handle function selection - encode calldata
+    function onFunctionSelect() {
+      const selector = document.getElementById('functionSelector');
+      const dataInput = document.getElementById('txData');
+      const valueInput = document.getElementById('txValue');
+      const selectedOption = selector.options[selector.selectedIndex];
+
+      if (!selectedOption || !selectedOption.value) {
+        return;
+      }
+
+      const funcSelector = selectedOption.value;
+      const params = JSON.parse(selectedOption.dataset.params || '[]');
+
+      if (params.length === 0) {
+        // No params needed, just use the selector
+        dataInput.value = funcSelector;
+      } else {
+        // Need to prompt for params
+        const paramValues = [];
+        for (const param of params) {
+          const value = prompt(`Enter value for ${param}:`);
+          if (value === null) {
+            // User cancelled
+            selector.value = '';
+            return;
+          }
+          paramValues.push(value);
+        }
+
+        // Encode the calldata
+        try {
+          const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+          const encodedParams = abiCoder.encode(params, paramValues);
+          dataInput.value = funcSelector + encodedParams.slice(2);
+        } catch (e) {
+          alert('Error encoding parameters: ' + e.message);
+          selector.value = '';
+        }
+      }
+
+      if (selectedOption.dataset.view === 'true' && parseFloat(valueInput.value || '0') > 0) {
+        valueInput.value = '0';
+        log('Reset Value to 0 ETH for view function simulation', 'info');
+      }
+    }
+
+    // Simulate a call (eth_call) without sending a transaction
+    async function simulateCall() {
+      const resultDiv = document.getElementById('simulateResult');
+      const resultData = document.getElementById('simulateResultData');
+      const selectorEl = document.getElementById('functionSelector');
+      const selectedOption = selectorEl.options[selectorEl.selectedIndex];
+
+      resultDiv.style.display = 'none';
+
+      const to = document.getElementById('txToAddress').value;
+      let value = document.getElementById('txValue').value;
+      const data = document.getElementById('txData').value || '0x';
+
+      if (!to) {
+        alert('Please enter a To address');
+        return;
+      }
+
+      const wallet = getSelectedWallet();
+      if (!wallet) {
+        alert('Please select a wallet');
+        return;
+      }
+
+      try {
+        // Determine RPC URL based on selected chain
+        const rpcUrl = selectedChain === 'L1'
+          ? document.getElementById('l1Rpc').value
+          : document.getElementById('l2EvmRpc').value;
+
+        log(`Simulating call on ${selectedChain} (${rpcUrl})...`);
+
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
+
+        const selector = data.toLowerCase().slice(0, 10);
+        const knownFunc = KNOWN_FUNCTIONS[selector];
+        const isKnownNonPayable = !!knownFunc && knownFunc.payable !== true;
+        const isSelectedView = selectedOption?.dataset?.view === 'true';
+
+        if (parseFloat(value || '0') > 0 && (isKnownNonPayable || isSelectedView)) {
+          const funcLabel = knownFunc?.sig || selectedOption?.textContent?.trim() || selector;
+          log(`Non-payable call detected (${funcLabel}); forcing Value to 0 for simulation`, 'info');
+          value = '0';
+          document.getElementById('txValue').value = '0';
+        }
+
+        // Build call params
+        const callParams = {
+          from: wallet.address,
+          to: to,
+          data: data,
+        };
+
+        if (value && parseFloat(value) > 0) {
+          callParams.value = ethers.parseEther(value);
+        }
+
+        // Execute eth_call
+        const result = await provider.call(callParams);
+
+        log('Simulation successful', 'success');
+
+        // Try to decode the result
+        let decodedResult = result;
+        if (data && data.length >= 10) {
+          const funcSelector = data.toLowerCase().slice(0, 10);
+          const funcInfo = KNOWN_FUNCTIONS[funcSelector];
+          if (funcInfo && funcInfo.returns && funcInfo.returns.length > 0) {
+            try {
+              const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+              const decoded = abiCoder.decode(funcInfo.returns, result);
+              decodedResult = `${funcInfo.name}() returned:\n`;
+              decoded.forEach((v, i) => {
+                const type = funcInfo.returns[i];
+                if (type.startsWith('uint') || type.startsWith('int')) {
+                  decodedResult += `  [${i}] ${type}: ${v.toString()}\n`;
+                } else if (type === 'bool') {
+                  decodedResult += `  [${i}] ${type}: ${v}\n`;
+                } else if (type === 'address') {
+                  decodedResult += `  [${i}] ${type}: ${v}\n`;
+                } else {
+                  decodedResult += `  [${i}] ${type}: ${v}\n`;
+                }
+              });
+              decodedResult += `\nRaw: ${result}`;
+            } catch (e) {
+              decodedResult = `Raw result: ${result}`;
+            }
+          } else {
+            // Try to decode as uint256 if result is 32 bytes
+            if (result.length === 66) {
+              try {
+                const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+                const [val] = abiCoder.decode(['uint256'], result);
+                decodedResult = `Decoded as uint256: ${val.toString()}\nRaw: ${result}`;
+              } catch (e) {
+                decodedResult = `Raw result: ${result}`;
+              }
+            } else {
+              decodedResult = `Raw result: ${result}`;
+            }
+          }
+        }
+
+        resultDiv.style.display = 'block';
+        resultData.textContent = decodedResult;
+
+      } catch (e) {
+        let errorMessage = e.message;
+        if (errorMessage.includes('missing revert data') && parseFloat(value || '0') > 0) {
+          errorMessage += ' (hint: for view/non-payable functions, set Value to 0 ETH)';
+        }
+        log('Simulation failed: ' + errorMessage, 'error');
+        resultDiv.style.display = 'block';
+        resultData.textContent = `Error: ${errorMessage}`;
+        resultData.parentElement.style.background = '#fee2e2';
+        resultData.parentElement.style.borderLeftColor = '#ef4444';
+      }
+    }
+
+    function renderWalletList() {
+      const container = document.getElementById('walletList');
+
+      const accountsHtml = USER_WALLETS.map((account, index) => {
+        const balances = walletBalances[account.address] || { l1: '0', l2: '0' };
+        const isSelected = selectedWalletIndex === index;
+        return `
+          <div class="wallet-option ${isSelected ? 'selected' : ''}" onclick="selectWallet(${index})" data-wallet-index="${index}">
+            <input type="radio" name="wallet" ${isSelected ? 'checked' : ''} />
+            <div class="wallet-address">
+              <strong>${account.label}</strong><br>
+              <span style="color: #666;">${shortHash(account.address)}</span><span class="copy-btn" onclick="copyText(this,'${account.address}')">${COPY_ICON}</span>
+            </div>
+            <div class="wallet-balance">
+              <span class="chain-label">L1</span>
+              ${formatBalance(balances.l1)} ETH
+            </div>
+            <div class="wallet-balance">
+              <span class="chain-label">L2</span>
+              ${formatBalance(balances.l2)} ETH
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      // Custom wallet option
+      const customWallet = selectedWalletIndex === customWalletIndex() ? getSelectedWallet() : null;
+      const customBalances = customWallet ? (walletBalances[customWallet.address] || { l1: '0', l2: '0' }) : { l1: '-', l2: '-' };
+      const isCustomSelected = selectedWalletIndex === customWalletIndex();
+      const customHtml = `
+        <div class="wallet-option ${isCustomSelected ? 'selected' : ''}" onclick="selectWallet(${customWalletIndex()})" data-wallet-index="${customWalletIndex()}">
+          <input type="radio" name="wallet" ${isCustomSelected ? 'checked' : ''} />
+          <div class="wallet-address">
+            <strong>Custom Key</strong><br>
+            <span style="color: #666;">${customWallet ? shortHash(customWallet.address) : 'Enter private key below'}</span>${customWallet ? `<span class="copy-btn" onclick="copyText(this,'${customWallet.address}')">${COPY_ICON}</span>` : ''}
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L1</span>
+            ${customWallet ? formatBalance(customBalances.l1) + ' ETH' : '-'}
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L2</span>
+            ${customWallet ? formatBalance(customBalances.l2) + ' ETH' : '-'}
+          </div>
+        </div>
+      `;
+
+      // Browser wallet option (MetaMask/Rabby)
+      const browserBalances = browserWalletAddress ? (walletBalances[browserWalletAddress] || { l1: '0', l2: '0' }) : { l1: '-', l2: '-' };
+      const isBrowserSelected = selectedWalletIndex === browserWalletIndex();
+      const hasBrowserWallet = typeof window.ethereum !== 'undefined';
+      const browserHtml = `
+        <div class="wallet-option ${isBrowserSelected ? 'selected' : ''}" onclick="selectWallet(${browserWalletIndex()})" data-wallet-index="${browserWalletIndex()}" style="${!hasBrowserWallet ? 'opacity: 0.5;' : ''}">
+          <input type="radio" name="wallet" ${isBrowserSelected ? 'checked' : ''} ${!hasBrowserWallet ? 'disabled' : ''} />
+          <div class="wallet-address">
+            <strong>🦊 Browser Wallet</strong><br>
+            <span style="color: #666;">${browserWalletAddress ? shortHash(browserWalletAddress) : (hasBrowserWallet ? 'Click to connect' : 'Not detected')}</span>${browserWalletAddress ? `<span class="copy-btn" onclick="copyText(this,'${browserWalletAddress}')">${COPY_ICON}</span>` : ''}
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L1</span>
+            ${browserWalletAddress ? formatBalance(browserBalances.l1) + ' ETH' : '-'}
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L2</span>
+            ${browserWalletAddress ? formatBalance(browserBalances.l2) + ' ETH' : '-'}
+          </div>
+        </div>
+      `;
+
+      container.innerHTML = accountsHtml + customHtml + browserHtml;
+    }
+
+    // ============ Chain Selector ============
+    async function selectChain(chain) {
+      selectedChain = chain;
+
+      document.getElementById('chainL1Btn').classList.toggle('active', chain === 'L1');
+      document.getElementById('chainL2Btn').classList.toggle('active', chain === 'L2');
+
+      // Update the "other chain" label
+      document.getElementById('otherChainLabel').textContent = chain === 'L1' ? 'L2' : 'L1';
+
+      // Cross-chain proxy option is available for both directions.
+      document.getElementById('crossChainOption').style.display = 'flex';
+
+      log(`Selected chain: ${chain}`, 'info');
+
+      // If using browser wallet, trigger network switch
+      const wallet = getSelectedWallet();
+      if (wallet && wallet.isBrowserWallet && window.ethereum) {
+        await switchBrowserWalletNetwork(chain);
+      }
+
+      updateProxyAddress();
+    }
+
+    async function getL1ChainConfig() {
+      const l1Rpc = document.getElementById('l1Rpc').value;
+      const provider = new ethers.JsonRpcProvider(l1Rpc);
+      const network = await provider.getNetwork();
+      const chainId = Number(network.chainId);
+      const chainIdHex = '0x' + chainId.toString(16);
+      let chainName = `L1 Chain ${chainId}`;
+      let nativeCurrency = { name: 'Ether', symbol: 'ETH', decimals: 18 };
+
+      if (chainId === 100) {
+        chainName = 'Gnosis Chain';
+        nativeCurrency = { name: 'xDai', symbol: 'xDAI', decimals: 18 };
+      } else if (chainId === 31337) {
+        chainName = 'Anvil L1 (Proxy)';
+      }
+
+      return { chainId, chainIdHex, chainName, nativeCurrency, rpcUrl: l1Rpc };
+    }
+
+    function updateL1ChainTitle(chainId) {
+      const title = document.getElementById('l1ChainTitle');
+      if (!title) return;
+      if (chainId === 100) {
+        title.textContent = 'L1 (Gnosis - Chain 100)';
+      } else if (chainId === 31337) {
+        title.textContent = 'L1 (Anvil - Chain 31337)';
+      } else {
+        title.textContent = `L1 (Chain ${chainId})`;
+      }
+    }
+
+    // Switch browser wallet to the appropriate network
+    async function switchBrowserWalletNetwork(chain) {
+      const l1Rpc = document.getElementById('l1Rpc').value;
+      const l2EvmRpc = document.getElementById('l2EvmRpc').value;
+
+      try {
+        if (chain === 'L1') {
+          const l1Config = await getL1ChainConfig();
+          const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+
+          if (currentChainId.toLowerCase() !== l1Config.chainIdHex.toLowerCase()) {
+            log('Switching wallet to L1 network...', 'info');
+            try {
+              await window.ethereum.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: l1Config.chainIdHex }],
+              });
+              log('Switched to L1 network', 'success');
+            } catch (switchError) {
+              if (switchError.code === 4902) {
+                log('Adding L1 network to wallet...', 'info');
+                await window.ethereum.request({
+                  method: 'wallet_addEthereumChain',
+                  params: [{
+                    chainId: l1Config.chainIdHex,
+                    chainName: l1Config.chainName,
+                    nativeCurrency: l1Config.nativeCurrency,
+                    rpcUrls: [l1Rpc],
+                  }],
+                });
+                await window.ethereum.request({
+                  method: 'wallet_switchEthereumChain',
+                  params: [{ chainId: l1Config.chainIdHex }],
+                });
+                log('Switched to L1 network', 'success');
+              } else if (switchError.code === 4001) {
+                log('User rejected network switch', 'error');
+              } else {
+                throw switchError;
+              }
+            }
+          } else {
+            log('Already on L1 network', 'info');
+          }
+        } else {
+          // L2 network
+          const l2ChainIdHex = '0x' + L2_CHAIN_ID.toString(16); // 0x9ba5e8
+          const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+
+          if (currentChainId !== l2ChainIdHex) {
+            log('Switching wallet to L2 network...', 'info');
+            try {
+              await window.ethereum.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: l2ChainIdHex }],
+              });
+              log('Switched to L2 network', 'success');
+            } catch (switchError) {
+              if (switchError.code === 4902) {
+                log('Adding L2 network to wallet...', 'info');
+                await window.ethereum.request({
+                  method: 'wallet_addEthereumChain',
+                  params: [{
+                    chainId: l2ChainIdHex,
+                    chainName: 'Sync Rollup L2 (Proxy)',
+                    nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                    rpcUrls: [l2EvmRpc],
+                  }],
+                });
+                await window.ethereum.request({
+                  method: 'wallet_switchEthereumChain',
+                  params: [{ chainId: l2ChainIdHex }],
+                });
+                log('Switched to L2 network', 'success');
+              } else if (switchError.code === 4001) {
+                log('User rejected network switch', 'error');
+              } else {
+                throw switchError;
+              }
+            }
+          } else {
+            log('Already on L2 network', 'info');
+          }
+        }
+      } catch (e) {
+        log('Error switching network: ' + e.message, 'error');
+      }
+    }
+
+    // ============ Proxy Address Computation ============
+    async function updateProxyAddress() {
+      const checkbox = document.getElementById('targetIsOtherChain');
+      const proxySpan = document.getElementById('proxyAddressDisplay');
+      const sourceProxySpan = document.getElementById('sourceProxyAddressDisplay');
+      const toAddress = document.getElementById('txToAddress').value;
+
+      if (checkbox.checked && toAddress && toAddress.startsWith('0x')) {
+        try {
+          const rollupsAddr = document.getElementById('rollupsAddress').value;
+          const rollupId = BigInt(document.getElementById('rollupId').value);
+          const l1Rpc = document.getElementById('l1Rpc').value;
+          const wallet = getSelectedWallet();
+
+          if (!wallet) {
+            proxySpan.textContent = 'Select wallet first';
+            proxySpan.style.display = 'inline';
+            sourceProxySpan.style.display = 'none';
+            return;
+          }
+
+          // Get L1 chain ID
+          const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
+          const network = await l1Provider.getNetwork();
+          const l1ChainId = network.chainId;
+
+          // Compute direction-aware alias:
+          // L1 -> L2 uses (original=l2Target, origin=rollupId, domain=L1)
+          // L2 -> L1 target alias uses (original=l1Target, origin=L1, domain=L1)
+          // L2 -> L1 caller identity uses (original=l2Sender, origin=rollupId, domain=L1)
+          const rollups = new ethers.Contract(rollupsAddr, [
+            "function computeL2ProxyAddress(address,uint256,uint256) view returns (address)"
+          ], l1Provider);
+          if (selectedChain === 'L1') {
+            const proxyAddress = await rollups.computeL2ProxyAddress(toAddress, rollupId, l1ChainId);
+            proxySpan.textContent = `Target proxy: ${shortHash(proxyAddress)}`;
+            proxySpan.title = proxyAddress;
+            proxySpan.style.display = 'inline';
+            proxySpan.dataset.proxyAddress = proxyAddress;
+            sourceProxySpan.style.display = 'none';
+          } else {
+            const targetProxyAddress = await rollups.computeL2ProxyAddress(toAddress, l1ChainId, l1ChainId);
+            const callerProxyAddress = await rollups.computeL2ProxyAddress(wallet.address, rollupId, l1ChainId);
+            proxySpan.textContent = `Target proxy: ${shortHash(targetProxyAddress)}`;
+            proxySpan.title = targetProxyAddress;
+            proxySpan.style.display = 'inline';
+            proxySpan.dataset.proxyAddress = targetProxyAddress;
+
+            sourceProxySpan.textContent = `Caller on L1: ${shortHash(callerProxyAddress)}`;
+            sourceProxySpan.title = callerProxyAddress;
+            sourceProxySpan.style.display = 'inline';
+            sourceProxySpan.dataset.proxyAddress = callerProxyAddress;
+          }
+        } catch (e) {
+          console.error('[updateProxyAddress] Error:', e);
+          proxySpan.textContent = 'Error computing proxy';
+          proxySpan.title = e.message || String(e);
+          proxySpan.style.display = 'inline';
+          sourceProxySpan.style.display = 'none';
+        }
+      } else {
+        proxySpan.style.display = 'none';
+        sourceProxySpan.style.display = 'none';
+      }
+    }
+
+    // ============ Proxy Detection ============
+    /**
+     * Check if the given RPC URL is an RPC proxy by querying the magic address
+     * Proxies return a magic balance; real nodes return 0
+     */
+    async function isRpcProxy(rpcUrl, isL2 = false) {
+      const magicAddress = isL2 ? L2_PROXY_DETECTION_ADDRESS : L1_PROXY_DETECTION_ADDRESS;
+      const expectedMagic = isL2 ? L2_PROXY_DETECTION_MAGIC : L1_PROXY_DETECTION_MAGIC;
+
+      try {
+        const resp = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'eth_getBalance',
+            params: [magicAddress, 'latest'],
+            id: 1
+          }),
+          signal: AbortSignal.timeout(2000),
+        });
+
+        if (!resp.ok) return false;
+
+        const data = await resp.json();
+        return data.result === expectedMagic;
+      } catch {
+        return false;
+      }
+    }
+
+    // ============ Check Services ============
+    async function checkService(url, isRpc = true) {
+      try {
+        if (isRpc) {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 }),
+            signal: AbortSignal.timeout(2000),
+          });
+          return resp.ok;
+        } else {
+          const resp = await fetch(url + '/status', { signal: AbortSignal.timeout(2000) });
+          return resp.ok;
+        }
+      } catch {
+        return false;
+      }
+    }
+
+    async function callJsonRpc(rpcUrl, method, params = []) {
+      const resp = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method,
+          params,
+          id: 1,
+        }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!resp.ok) {
+        throw new Error(`${method} RPC failed: ${resp.status} ${resp.statusText}`);
+      }
+      const data = await resp.json();
+      if (data.error) {
+        throw new Error(`${method} RPC error: ${data.error.message || 'Unknown error'}`);
+      }
+      return data.result;
+    }
+
+    async function updateServiceStatuses() {
+      const l1Rpc = document.getElementById('l1Rpc').value;
+      const l2Rpc = document.getElementById('l2Rpc').value;
+      const l2EvmRpc = document.getElementById('l2EvmRpc').value;
+      const builderUrl = document.getElementById('builderUrl').value;
+
+      // Check L1 RPC (should be proxy)
+      const l1Online = await checkService(l1Rpc, true);
+      const l1IsProxy = l1Online ? await isRpcProxy(l1Rpc, false) : false;
+      const l1El = document.getElementById('l1Status');
+      l1El.textContent = l1Online ? (l1IsProxy ? 'Proxy ✓' : 'Direct (!)') : 'Offline';
+      l1El.className = `status-indicator ${l1Online ? (l1IsProxy ? 'online' : 'online') : 'offline'}`;
+      l1El.title = l1IsProxy ? 'Connected to L1 RPC Proxy' : (l1Online ? 'Warning: Not connected to proxy - browser wallet txs may fail' : 'Offline');
+
+      // Check L2 Fullnode
+      const l2Online = await checkService(l2Rpc, true);
+      const l2El = document.getElementById('l2Status');
+      l2El.textContent = l2Online ? 'Online' : 'Offline';
+      l2El.className = `status-indicator ${l2Online ? 'online' : 'offline'}`;
+
+      // Check L2 EVM/Proxy (should be proxy)
+      const l2EvmOnline = await checkService(l2EvmRpc, true);
+      const l2IsProxy = l2EvmOnline ? await isRpcProxy(l2EvmRpc, true) : false;
+      const l2EvmEl = document.getElementById('l2EvmStatus');
+      l2EvmEl.textContent = l2EvmOnline ? (l2IsProxy ? 'Proxy ✓' : 'Direct (!)') : 'Offline';
+      l2EvmEl.className = `status-indicator ${l2EvmOnline ? (l2IsProxy ? 'online' : 'online') : 'offline'}`;
+      l2EvmEl.title = l2IsProxy ? 'Connected to L2 RPC Proxy' : (l2EvmOnline ? 'Warning: Not connected to proxy - browser wallet txs may fail' : 'Offline');
+
+      // Check Builder
+      const builderOnline = await checkService(builderUrl, false);
+      const builderEl = document.getElementById('builderUrlStatus');
+      builderEl.textContent = builderOnline ? 'Online' : 'Offline';
+      builderEl.className = `status-indicator ${builderOnline ? 'online' : 'offline'}`;
+    }
+
+    // ============ Refresh Status ============
+    async function refreshStatus(silent = false) {
+      if (!silent) log('Refreshing status...');
+
+      try {
+        const builderUrl = document.getElementById('builderUrl').value;
+        const l1Rpc = document.getElementById('l1Rpc').value;
+        const l2Rpc = document.getElementById('l2Rpc').value;
+        const l2EvmRpc = document.getElementById('l2EvmRpc').value;
+        const rollupsAddr = document.getElementById('rollupsAddress').value;
+        const rollupId = document.getElementById('rollupId').value;
+        const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
+        const l2EvmProvider = new ethers.JsonRpcProvider(l2EvmRpc);
+
+        const [
+          builderStatusResult,
+          l1NetworkResult,
+          l1BlockResult,
+          rollupResult,
+          l2TrackedStateResult,
+          l2SyncResult,
+          l2BlockResult,
+        ] = await Promise.allSettled([
+          fetch(builderUrl + '/status').then(async (resp) => {
+            if (!resp.ok) throw new Error(`Builder status failed: ${resp.status}`);
+            return resp.json();
+          }),
+          l1Provider.getNetwork(),
+          l1Provider.getBlockNumber(),
+          new ethers.Contract(rollupsAddr, ROLLUPS_ABI, l1Provider).rollups(rollupId),
+          callJsonRpc(l2Rpc, 'syncrollups_getActualStateRoot', []),
+          callJsonRpc(l2Rpc, 'syncrollups_isSynced', []),
+          l2EvmProvider.getBlockNumber(),
+        ]);
+
+        // Update builder status (builder-private fullnode)
+        if (builderStatusResult.status === 'fulfilled') {
+          const builderData = builderStatusResult.value;
+          document.getElementById('builderStatus').textContent = builderData.isSynced ? 'Synced' : 'Not Synced';
+          document.getElementById('builderStatus').className = `status-value ${builderData.isSynced ? 'synced' : 'not-synced'}`;
+        } else {
+          document.getElementById('builderStatus').textContent = '-';
+          document.getElementById('builderStatus').className = 'status-value';
+        }
+
+        if (l1NetworkResult.status === 'fulfilled') {
+          updateL1ChainTitle(Number(l1NetworkResult.value.chainId));
+        }
+
+        // Update L1 status from Rollups contract directly
+        if (l1BlockResult.status === 'fulfilled') {
+          document.getElementById('l1BlockNumber').textContent = l1BlockResult.value;
+        } else {
+          document.getElementById('l1BlockNumber').textContent = '-';
+        }
+
+        if (rollupResult.status === 'fulfilled') {
+          const rollupData = rollupResult.value;
+          const l1StateRoot = rollupData.stateRoot || '0x';
+          document.getElementById('l1StateRoot').textContent = shortHash(l1StateRoot);
+          document.getElementById('l1StateRoot').title = l1StateRoot;
+          document.getElementById('l1EtherBalance').textContent = ethers.formatEther(rollupData.etherBalance) + ' ETH';
+        } else {
+          document.getElementById('l1StateRoot').textContent = '-';
+          document.getElementById('l1StateRoot').title = '';
+          document.getElementById('l1EtherBalance').textContent = '-';
+        }
+
+        // Update public L2 fullnode state and sync
+        if (l2TrackedStateResult.status === 'fulfilled') {
+          const trackedRoot = l2TrackedStateResult.value || '0x';
+          document.getElementById('l2StateRoot').textContent = shortHash(trackedRoot);
+          document.getElementById('l2StateRoot').title = trackedRoot;
+        } else {
+          document.getElementById('l2StateRoot').textContent = '-';
+          document.getElementById('l2StateRoot').title = '';
+        }
+
+        const syncEl = document.getElementById('syncStatus');
+        if (l2SyncResult.status === 'fulfilled') {
+          const isSynced = !!l2SyncResult.value;
+          syncEl.textContent = isSynced ? '✓ Synced' : '✗ Not Synced';
+          syncEl.className = `status-value ${isSynced ? 'synced' : 'not-synced'}`;
+        } else {
+          syncEl.textContent = '-';
+          syncEl.className = 'status-value';
+        }
+
+        if (l2BlockResult.status === 'fulfilled') {
+          document.getElementById('l2BlockNumber').textContent = l2BlockResult.value;
+        } else {
+          document.getElementById('l2BlockNumber').textContent = '-';
+        }
+
+        if (!silent) log('Status refreshed', 'success');
+      } catch (e) {
+        log('Error refreshing status: ' + e.message, 'error');
+      }
+
+      updateServiceStatuses();
+    }
+
+    // ============ Send Transaction (unified) ============
+    async function sendTransaction() {
+      const wallet = getSelectedWallet();
+      if (!wallet) {
+        log('Please select a wallet or enter a valid private key', 'error');
+        return;
+      }
+
+      const to = document.getElementById('txToAddress').value;
+      const value = document.getElementById('txValue').value;
+      const data = document.getElementById('txData').value || '0x';
+      const targetIsOtherChain = document.getElementById('targetIsOtherChain').checked;
+      const builderUrl = document.getElementById('builderUrl').value;
+      const l1Rpc = document.getElementById('l1Rpc').value;
+      const l2EvmRpc = document.getElementById('l2EvmRpc').value;
+
+      const btn = document.getElementById('sendTxBtn');
+      btn.disabled = true;
+
+      if (selectedChain === 'L1') {
+        await sendL1Transaction(wallet, to, value, data, targetIsOtherChain, builderUrl, l1Rpc);
+      } else {
+        await sendL2Transaction(wallet, to, value, data, targetIsOtherChain, builderUrl, l2EvmRpc);
+      }
+
+      btn.disabled = false;
+    }
+
+    // ============ Send L1 Transaction ============
+    async function sendL1Transaction(wallet, to, value, data, targetIsL2, builderUrl, l1Rpc) {
+      log('Preparing L1 transaction...');
+
+      try {
+        let signer;
+        if (wallet.isBrowserWallet) {
+          // Use browser wallet (MetaMask/Rabby)
+          log('Using browser wallet, checking network...', 'info');
+          await switchBrowserWalletNetwork('L1');
+
+          const browserProvider = new ethers.BrowserProvider(window.ethereum);
+          signer = await browserProvider.getSigner();
+          log('Browser wallet ready, requesting transaction...', 'info');
+        } else {
+          const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
+          signer = new ethers.Wallet(wallet.privateKey, l1Provider);
+        }
+
+        let finalTo = to;
+
+        // If target is on L2, we need to use the proxy
+        if (targetIsL2) {
+          log('Target is on L2, preparing proxy...');
+
+          // Call builder to prepare the L1→L2 call
+          const prepareResp = await fetch(builderUrl + '/prepare-l1-call', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              l2Target: to,
+              value: '0x' + ethers.parseEther(value).toString(16),
+              data: data,
+              sourceAddress: wallet.address,
+            })
+          });
+
+          if (!prepareResp.ok) {
+            throw new Error(`Builder API error: ${prepareResp.status} ${prepareResp.statusText}`);
+          }
+
+          const prepareResult = await prepareResp.json();
+
+          if (!prepareResult.success) {
+            throw new Error(prepareResult.error || 'Unknown error from builder');
+          }
+
+          if (!prepareResult.proxyAddress) {
+            throw new Error('Builder returned no proxy address');
+          }
+
+          finalTo = prepareResult.proxyAddress;
+          log(`Using proxy: ${finalTo}`, 'info');
+          if (prepareResult.sourceProxyAddress) {
+            log(`L2 sender proxy: ${prepareResult.sourceProxyAddress}`, 'info');
+          }
+        }
+
+        // Browser wallets can keep stale nonce state across local chain restarts.
+        // Always take nonce from the current RPC view to avoid nonce gaps (stuck tx).
+        let browserNonce;
+        if (wallet.isBrowserWallet) {
+          const nonceHex = await callJsonRpc(l1Rpc, 'eth_getTransactionCount', [wallet.address, 'pending']);
+          browserNonce = BigInt(nonceHex);
+          log(`Using L1 nonce from RPC: ${browserNonce}`, 'info');
+        }
+
+        // Send transaction on L1
+        const txRequest = {
+          to: finalTo,
+          value: ethers.parseEther(value),
+          data: data,
+          ...(browserNonce !== undefined ? { nonce: browserNonce } : {}),
+        };
+        const tx = await signer.sendTransaction(txRequest);
+
+        log(`L1 TX sent: ${tx.hash}`, 'info');
+        const receipt = await tx.wait();
+        log(`L1 TX mined in block ${receipt.blockNumber}`, 'success');
+
+        // Show result
+        showTxResult(tx.hash);
+
+        // Refresh after delay
+        setTimeout(() => {
+          refreshStatus();
+          fetchTxHistory();
+          fetchAllWalletBalances();
+        }, 3000);
+
+      } catch (e) {
+        log('L1 TX Error: ' + e.message, 'error');
+        showTxError(e.message);
+      }
+    }
+
+    // ============ Send L2 Transaction ============
+    async function sendL2Transaction(wallet, to, value, data, targetIsL1, builderUrl, l2EvmRpc) {
+      log('Preparing L2 transaction...');
+
+      try {
+        let finalTo = to;
+
+        // Explicit prep step for L2->L1:
+        // deploy deterministic alias proxy on L1 (if needed), then call alias from L2.
+        if (targetIsL1) {
+          log('Target is on L1, preparing proxy...', 'info');
+
+          const prepareResp = await fetch(builderUrl + '/prepare-l2-call', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              l1Target: to,
+              sourceAddress: wallet.address,
+            })
+          });
+
+          if (!prepareResp.ok) {
+            throw new Error(`Builder API error: ${prepareResp.status} ${prepareResp.statusText}`);
+          }
+
+          const prepareResult = await prepareResp.json();
+
+          if (!prepareResult.success) {
+            throw new Error(prepareResult.error || 'Unknown error from builder');
+          }
+
+          if (!prepareResult.proxyAddress) {
+            throw new Error('Builder returned no proxy address');
+          }
+
+          finalTo = prepareResult.proxyAddress;
+          log(`Using proxy alias: ${finalTo}`, 'info');
+          if (prepareResult.sourceProxyAddress) {
+            log(`L1 source proxy: ${prepareResult.sourceProxyAddress}`, 'info');
+          }
+        }
+
+        // Browser wallets: Switch to L2 network and use sendTransaction
+        // The L2 RPC proxy intercepts eth_sendRawTransaction and routes to builder
+        if (wallet.isBrowserWallet) {
+          log('Browser wallet L2 transaction: switching to L2 network...', 'info');
+
+          // 1. Switch to L2 network
+          const l2ChainIdHex = '0x' + L2_CHAIN_ID.toString(16); // 0x9ba5e8
+          const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+
+          if (currentChainId !== l2ChainIdHex) {
+            log(`Current chain: ${currentChainId}, switching to L2 (${l2ChainIdHex})...`, 'info');
+            try {
+              await window.ethereum.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: l2ChainIdHex }],
+              });
+            } catch (switchError) {
+              // If the network doesn't exist, add it
+              if (switchError.code === 4902) {
+                log('Adding L2 network to wallet...', 'info');
+                await window.ethereum.request({
+                  method: 'wallet_addEthereumChain',
+                  params: [{
+                    chainId: l2ChainIdHex,
+                    chainName: 'Sync Rollup L2 (Proxy)',
+                    nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                    rpcUrls: [l2EvmRpc],  // http://localhost:9548 (L2 proxy)
+                  }],
+                });
+                // Re-attempt switch after adding
+                await window.ethereum.request({
+                  method: 'wallet_switchEthereumChain',
+                  params: [{ chainId: l2ChainIdHex }],
+                });
+              } else {
+                throw switchError;
+              }
+            }
+          }
+
+          // 2. Use sendTransaction (the L2 proxy will intercept and route to builder)
+          const browserProvider = new ethers.BrowserProvider(window.ethereum);
+          const signer = await browserProvider.getSigner();
+          log('Browser wallet ready on L2, requesting transaction...', 'info');
+
+          // Same nonce guard for L2 browser-wallet transactions.
+          const nonceHex = await callJsonRpc(l2EvmRpc, 'eth_getTransactionCount', [wallet.address, 'pending']);
+          const browserNonce = BigInt(nonceHex);
+          log(`Using L2 nonce from RPC: ${browserNonce}`, 'info');
+
+          const tx = await signer.sendTransaction({
+            to: finalTo,
+            value: ethers.parseEther(value),
+            data: data,
+            nonce: browserNonce,
+          });
+
+          log(`L2 TX sent via proxy: ${tx.hash}`, 'info');
+          const receipt = await tx.wait();
+          log(`L2 TX confirmed in block ${receipt.blockNumber}`, 'success');
+
+          // Show result
+          showTxResult(tx.hash);
+
+          // Refresh after delay
+          setTimeout(() => {
+            refreshStatus();
+            fetchTxHistory();
+            fetchAllWalletBalances();
+          }, 3000);
+          return;
+        }
+
+        // Standard wallet with private key
+        const signer = new ethers.Wallet(wallet.privateKey);
+
+        // Get nonce from L2 EVM
+        const nonceResp = await fetch(l2EvmRpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'eth_getTransactionCount',
+            params: [wallet.address, 'latest'],
+            id: 1
+          })
+        });
+        const nonceData = await nonceResp.json();
+        const nonce = parseInt(nonceData.result, 16);
+
+        log(`Using nonce: ${nonce}`);
+
+        // Determine gas limit based on data
+        const gasLimit = data && data !== '0x' ? 100000n : 21000n;
+
+        // Build transaction
+        const tx = ethers.Transaction.from({
+          type: 2,
+          chainId: L2_CHAIN_ID,
+          nonce: nonce,
+          to: finalTo,
+          value: ethers.parseEther(value),
+          maxFeePerGas: 1000000000n,
+          maxPriorityFeePerGas: 1000000000n,
+          gasLimit: gasLimit,
+          data: data,
+        });
+
+        const signedTx = await signer.signTransaction(tx);
+        log('Transaction signed');
+
+        // Submit to builder
+        const submitResp = await fetch(builderUrl + '/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceChain: 'L2',
+            signedTx: signedTx,
+          })
+        });
+        const result = await submitResp.json();
+
+        if (result.success) {
+          log(`L2 TX successful! L1 TX: ${result.l1TxHash}`, 'success');
+          log(`New state root: ${result.stateRoot}`, 'success');
+
+          // Show result with state transition
+          showTxResult(result.l1TxHash, result.stateRoot);
+
+          // Refresh after delay
+          setTimeout(() => {
+            refreshStatus();
+            fetchTxHistory();
+            fetchAllWalletBalances();
+          }, 3000);
+        } else {
+          log(`L2 TX failed: ${result.error}`, 'error');
+          showTxError(result.error || 'Unknown error');
+        }
+      } catch (e) {
+        log('L2 TX Error: ' + e.message, 'error');
+        showTxError(e.message);
+      }
+    }
+
+    function ensureTxResultStructure() {
+      const container = document.getElementById('txResult');
+      if (!container) return null;
+
+      if (!document.getElementById('txHashResult') || !document.getElementById('txErrorText')) {
+        container.innerHTML = `
+          <div id="txSuccessBox" style="background: #f0fdf4; padding: 12px; border-radius: 6px; border-left: 3px solid #10b981;">
+            <strong>TX Hash:</strong> <span class="hash" id="txHashResult">-</span>
+          </div>
+          <div class="state-transition" id="stateTransition" style="display: none; margin-top: 10px;">
+            <span>State:</span>
+            <span class="hash" id="txOldState" onclick="copyToClipboard(this)">-</span>
+            <span class="arrow">→</span>
+            <span class="hash" id="txNewState" onclick="copyToClipboard(this)">-</span>
+          </div>
+          <div id="txErrorBox" style="display: none; background: #fee2e2; padding: 12px; border-radius: 6px; border-left: 3px solid #ef4444; margin-top: 10px;">
+            <strong style="color: #dc2626;">Error:</strong>
+            <span id="txErrorText"></span>
+          </div>
+        `;
+      }
+
+      return {
+        container,
+        successBox: document.getElementById('txSuccessBox'),
+        stateTransition: document.getElementById('stateTransition'),
+        txHashResult: document.getElementById('txHashResult'),
+        txNewState: document.getElementById('txNewState'),
+        txErrorBox: document.getElementById('txErrorBox'),
+        txErrorText: document.getElementById('txErrorText'),
+      };
+    }
+
+    function showTxError(message) {
+      const ui = ensureTxResultStructure();
+      if (!ui) return;
+
+      ui.container.style.display = 'block';
+      if (ui.successBox) ui.successBox.style.display = 'none';
+      if (ui.stateTransition) ui.stateTransition.style.display = 'none';
+      if (ui.txErrorBox) ui.txErrorBox.style.display = 'block';
+      if (ui.txErrorText) ui.txErrorText.textContent = String(message || 'Unknown error');
+    }
+
+    function showTxResult(txHash, newStateRoot = null) {
+      const ui = ensureTxResultStructure();
+      if (!ui) return;
+
+      ui.container.style.display = 'block';
+      if (ui.txErrorBox) ui.txErrorBox.style.display = 'none';
+      if (ui.successBox) ui.successBox.style.display = 'block';
+      if (ui.txHashResult) {
+        ui.txHashResult.textContent = shortHash(txHash);
+        ui.txHashResult.title = txHash;
+      }
+
+      if (newStateRoot && ui.stateTransition && ui.txNewState) {
+        ui.stateTransition.style.display = 'flex';
+        ui.txNewState.textContent = shortHash(newStateRoot);
+        ui.txNewState.title = newStateRoot;
+      } else if (ui.stateTransition) {
+        ui.stateTransition.style.display = 'none';
+      }
+    }
+
+    // ============ Transaction History from L1 Events ============
+
+    // Function selectors
+    const EXECUTE_L2TX_SELECTOR = '0x3f40cf69'; // executeL2TX(uint256,bytes)
+    const EXECUTE_L2_EXECUTION_SELECTOR = '0x367f4c42'; // executeL2Execution(bytes32)
+    const CREATE_L2_PROXY_SELECTOR = '0x838dddae'; // createL2ProxyContract(address,uint256)
+    // Keep multiple known selectors for loadL2Executions to support ABI variants in local builds.
+    const LOAD_L2_EXECUTIONS_SELECTORS = new Set(['0xc950ec6e', '0xd48f837a', '0x0bd4dac9']);
+
+    // Parse full L2 transaction details from executeL2TX calldata
+    function parseL2TxDetails(inputData) {
+      try {
+        // Check if this is executeL2TX(uint256 rollupId, bytes rlpEncodedTx)
+        if (!inputData || !inputData.startsWith(EXECUTE_L2TX_SELECTOR)) {
+          return null;
+        }
+
+        // Decode the ABI-encoded parameters
+        // Skip function selector (4 bytes = 8 hex chars + '0x')
+        const paramsData = '0x' + inputData.slice(10);
+
+        // ABI decode: (uint256 rollupId, bytes rlpEncodedTx)
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ['uint256', 'bytes'],
+          paramsData
+        );
+
+        const rlpEncodedTx = decoded[1];
+
+        // Parse the RLP-encoded L2 transaction
+        const l2Tx = ethers.Transaction.from(rlpEncodedTx);
+
+        const isDeployment = l2Tx.to === null;
+        let deployedAddress = null;
+        if (isDeployment) {
+          deployedAddress = ethers.getCreateAddress({ from: l2Tx.from, nonce: l2Tx.nonce });
+        }
+
+        return {
+          from: l2Tx.from,
+          to: l2Tx.to,
+          value: l2Tx.value,
+          data: l2Tx.data,
+          nonce: l2Tx.nonce,
+          isDeployment,
+          deployedAddress
+        };
+      } catch (e) {
+        console.error('Error parsing L2 tx details:', e);
+        return null;
+      }
+    }
+
+    // Legacy wrapper for backward compatibility
+    function parseL2TxSender(inputData) {
+      const details = parseL2TxDetails(inputData);
+      return details ? details.from : null;
+    }
+
+    function getTxSelector(data) {
+      if (!data || data === '0x' || data.length < 10) return null;
+      return data.slice(0, 10).toLowerCase();
+    }
+
+    async function isAuthorizedProxyAddress(proxyAddress, rollupsContract, cache = null) {
+      if (!proxyAddress) return false;
+      const cacheKey = proxyAddress.toLowerCase();
+      if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
+      try {
+        const authorized = await rollupsContract.authorizedProxies(proxyAddress);
+        const result = Boolean(authorized);
+        if (cache) cache.set(cacheKey, result);
+        return result;
+      } catch (e) {
+        if (cache) cache.set(cacheKey, false);
+        return false;
+      }
+    }
+
+    // Candidate for L1->L2 (must be validated as an authorized proxy with rollup-local origin).
+    function isL1ToL2Call(tx, rollupsAddr) {
+      if (!tx || !tx.to) return false;
+      return tx.to.toLowerCase() !== rollupsAddr.toLowerCase();
+    }
+
+    // Check if transaction is an executeL2TX call
+    function isExecuteL2TX(tx, rollupsAddr) {
+      return tx && tx.to &&
+        tx.to.toLowerCase() === rollupsAddr.toLowerCase() &&
+        tx.data?.startsWith(EXECUTE_L2TX_SELECTOR);
+    }
+
+    // Toggle fullscreen mode for TX History
+    function toggleTxHistoryFullscreen() {
+      const card = document.getElementById('txHistoryCard');
+      const btn = document.getElementById('maximizeHistoryBtn');
+      card.classList.toggle('fullscreen');
+      if (card.classList.contains('fullscreen')) {
+        btn.textContent = '✕';
+        btn.title = 'Exit Fullscreen';
+        // Close on Escape key
+        document.addEventListener('keydown', handleEscapeFullscreen);
+      } else {
+        btn.textContent = '⛶';
+        btn.title = 'Fullscreen';
+        document.removeEventListener('keydown', handleEscapeFullscreen);
+      }
+    }
+
+    function handleEscapeFullscreen(e) {
+      if (e.key === 'Escape') {
+        const card = document.getElementById('txHistoryCard');
+        if (card.classList.contains('fullscreen')) {
+          toggleTxHistoryFullscreen();
+        }
+      }
+    }
+
+    async function resolveProxyMetadata(proxyAddress, l1Provider, cache = null) {
+      if (!proxyAddress) return null;
+      const cacheKey = proxyAddress.toLowerCase();
+      if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
+      try {
+        const proxyContract = new ethers.Contract(proxyAddress, L2PROXY_ABI, l1Provider);
+        const [originalAddress, originalRollupIdRaw] = await Promise.all([
+          proxyContract.originalAddress(),
+          proxyContract.originalRollupId()
+        ]);
+        const metadata = {
+          proxyAddress,
+          originalAddress,
+          originalRollupId: BigInt(originalRollupIdRaw)
+        };
+        if (cache) cache.set(cacheKey, metadata);
+        return metadata;
+      } catch (e) {
+        if (cache) cache.set(cacheKey, null);
+        return null;
+      }
+    }
+
+    async function fetchTxHistory() {
+      const container = document.getElementById('txHistory');
+
+      // Preserve scroll position during refresh
+      const scrollTop = container.scrollTop;
+      const isFirstLoad = container.querySelector('.l1-tx-group') === null;
+
+      // Only show loading spinner on first load, not during auto-refresh
+      if (isFirstLoad) {
+        container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">Loading...</div>';
+      }
+
+      try {
+        const l1Rpc = document.getElementById('l1Rpc').value;
+        const l2Rpc = document.getElementById('l2Rpc').value;
+        const rollupsAddr = document.getElementById('rollupsAddress').value.toLowerCase();
+        const rollupId = document.getElementById('rollupId').value;
+
+        const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
+        const l2Provider = new ethers.JsonRpcProvider(l2Rpc);
+        const rollups = new ethers.Contract(rollupsAddr, ROLLUPS_ABI, l1Provider);
+        const selectedRollupId = BigInt(rollupId);
+        const l1ChainId = BigInt((await l1Provider.getNetwork()).chainId);
+        l1ExplorerBaseUrl = CHAIN_EXPLORERS[Number(l1ChainId)] || '';
+        const proxyMetaCache = new Map();
+        const authorizedProxyCache = new Map();
+
+        // Get current block
+        const currentBlock = await l1Provider.getBlockNumber();
+        const fromBlock = runtimeDeploymentBlock || 0;
+
+        // Query relevant events in parallel.
+        // For L2ExecutionPerformed we fetch unfiltered and then filter by selected rollup
+        // to avoid provider/topic edge-cases with user-entered rollup IDs.
+        const [allExecEvents, proxyEvents, loadEvents] = await Promise.all([
+          rollups.queryFilter(rollups.filters.L2ExecutionPerformed(), fromBlock, currentBlock),
+          rollups.queryFilter(rollups.filters.L2ProxyCreated(), fromBlock, currentBlock),
+          rollups.queryFilter(rollups.filters.ExecutionsLoaded(), fromBlock, currentBlock)
+        ]);
+        const execEvents = allExecEvents.filter((e) => {
+          try {
+            return BigInt(e.args[0]) === selectedRollupId;
+          } catch {
+            return false;
+          }
+        });
+        console.log(`[TxHistory] ${allExecEvents.length} raw exec events, ${execEvents.length} after rollupId filter, ${proxyEvents.length} proxy, ${loadEvents.length} load`);
+
+        if (execEvents.length === 0 && proxyEvents.length === 0 && loadEvents.length === 0) {
+          container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">No executions found</div>';
+          return;
+        }
+
+        // Group all events by L1 transaction hash
+        const eventsByTxHash = new Map();
+        for (const event of execEvents) {
+          const txHash = event.transactionHash;
+          if (!eventsByTxHash.has(txHash)) {
+            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], loadRegistrations: [], blockNumber: event.blockNumber });
+          }
+          eventsByTxHash.get(txHash).executions.push(event);
+        }
+        for (const event of proxyEvents) {
+          const txHash = event.transactionHash;
+          if (!eventsByTxHash.has(txHash)) {
+            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], loadRegistrations: [], blockNumber: event.blockNumber });
+          }
+          eventsByTxHash.get(txHash).proxyCreations.push(event);
+        }
+        for (const event of loadEvents) {
+          const txHash = event.transactionHash;
+          if (!eventsByTxHash.has(txHash)) {
+            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], loadRegistrations: [], blockNumber: event.blockNumber });
+          }
+          eventsByTxHash.get(txHash).loadRegistrations.push(event);
+        }
+
+        // Fetch details for the newest L1 transaction groups by block number.
+        const txGroupEntries = Array.from(eventsByTxHash.entries())
+          .sort((a, b) => b[1].blockNumber - a[1].blockNumber)
+          .slice(0, 30);
+
+        console.log(`[TxHistory] ${eventsByTxHash.size} L1 tx groups, showing ${txGroupEntries.length}`);
+
+        const l1TxGroupResults = await Promise.allSettled(
+          txGroupEntries.map(async ([txHash, group]) => {
+            const block = await l1Provider.getBlock(group.blockNumber);
+            const tx = await l1Provider.getTransaction(txHash);
+
+            const l2Transactions = [];
+
+            // Add builder registration entries (loadL2Executions)
+            for (const loadEvent of group.loadRegistrations) {
+              l2Transactions.push({
+                type: 'LOAD_EXECUTIONS',
+                l1TxHash: txHash,
+                from: tx?.from || null,
+                count: Number(loadEvent.args[0] || 0)
+              });
+            }
+
+            // Add proxy creation entries
+            for (const proxyEvent of group.proxyCreations) {
+              const proxyOriginalRollupId = BigInt(proxyEvent.args[2]);
+              if (proxyOriginalRollupId !== selectedRollupId && proxyOriginalRollupId !== l1ChainId) {
+                continue;
+              }
+              l2Transactions.push({
+                type: 'PROXY_DEPLOY',
+                l1TxHash: txHash,
+                from: tx?.from || null,
+                proxyAddress: proxyEvent.args[0],
+                originalAddress: proxyEvent.args[1],
+                originalRollupId: proxyOriginalRollupId
+              });
+            }
+
+            // Classify the L1 tx once. Execution count/state transitions are handled separately.
+            const isL2TX = tx && isExecuteL2TX(tx, rollupsAddr);
+            if (isL2TX && tx?.data) {
+              // Parse L2TX details
+              const txDetails = parseL2TxDetails(tx.data);
+              if (txDetails) {
+                // Track deployed contracts
+                if (txDetails.isDeployment && txDetails.deployedAddress) {
+                  addDeployedContract(txDetails.deployedAddress, txDetails.from, block?.timestamp * 1000);
+                }
+
+                let proxyMeta = null;
+                let isAuthorizedProxy = false;
+                if (!txDetails.isDeployment && txDetails.to) {
+                  proxyMeta = await resolveProxyMetadata(txDetails.to, l1Provider, proxyMetaCache);
+                  isAuthorizedProxy = await isAuthorizedProxyAddress(txDetails.to, rollups, authorizedProxyCache);
+                }
+                const isL2ToL1Bridge = !!(
+                  proxyMeta &&
+                  isAuthorizedProxy &&
+                  BigInt(proxyMeta.originalRollupId) === l1ChainId
+                );
+
+                if (isL2ToL1Bridge) {
+                  l2Transactions.push({
+                    type: 'L2_L1_BRIDGE',
+                    l1TxHash: txHash,
+                    from: txDetails.from,
+                    proxyAddress: txDetails.to,
+                    l1Target: proxyMeta.originalAddress,
+                    value: txDetails.value,
+                    data: txDetails.data,
+                    to: proxyMeta.originalAddress
+                  });
+                } else {
+                  l2Transactions.push({
+                    type: 'L2_L2',
+                    l1TxHash: txHash,
+                    from: txDetails.from,
+                    to: txDetails.to,
+                    value: txDetails.value,
+                    data: txDetails.data,
+                    isDeployment: txDetails.isDeployment,
+                    deployedAddress: txDetails.deployedAddress
+                  });
+                }
+              }
+            } else if (tx && tx.to && tx.to.toLowerCase() === rollupsAddr.toLowerCase()) {
+              // Rollups contract admin/coordination calls that are not executeL2TX.
+              // Most prep flows are already represented by events above; this row is a fallback for visibility.
+              const hasPrepEvents = group.proxyCreations.length > 0 || group.loadRegistrations.length > 0;
+              if (!hasPrepEvents) {
+                const selector = getTxSelector(tx.data);
+                let methodLabel = 'Unknown Rollups call';
+                if (selector === EXECUTE_L2_EXECUTION_SELECTOR) {
+                  methodLabel = 'executeL2Execution';
+                } else if (selector === CREATE_L2_PROXY_SELECTOR) {
+                  methodLabel = 'createL2ProxyContract';
+                } else if (selector && LOAD_L2_EXECUTIONS_SELECTORS.has(selector)) {
+                  methodLabel = 'loadL2Executions';
+                }
+                l2Transactions.push({
+                  type: 'ROLLUPS_ADMIN',
+                  l1TxHash: txHash,
+                  from: tx.from,
+                  selector,
+                  methodLabel
+                });
+              }
+            } else if (tx && isL1ToL2Call(tx, rollupsAddr)) {
+              // L1→L2 bridge call via proxy (strictly validated).
+              const proxyAddress = tx.to;
+              const proxyMeta = await resolveProxyMetadata(proxyAddress, l1Provider, proxyMetaCache);
+              const isAuthorizedProxy = await isAuthorizedProxyAddress(proxyAddress, rollups, authorizedProxyCache);
+              if (proxyMeta && isAuthorizedProxy) {
+                const originRollupId = BigInt(proxyMeta.originalRollupId);
+                // L1→L2 on this rollup only (exclude L2→L1 mirror proxies and foreign rollups).
+                if (originRollupId === selectedRollupId) {
+                  const l2Target = proxyMeta.originalAddress;
+
+                  l2Transactions.push({
+                    type: 'L1_L2_BRIDGE',
+                    l1TxHash: txHash,
+                    from: tx.from,
+                    proxyAddress: proxyAddress,
+                    l2Target: l2Target,
+                    value: tx.value,
+                    data: tx.data,
+                    to: l2Target || proxyAddress
+                  });
+                }
+              }
+            }
+
+            // Get state transition from executions
+            const stateTransitions = group.executions.map(e => ({
+              from: e.args[1],
+              to: e.args[2]
+            }));
+
+            return {
+              l1TxHash: txHash,
+              l1From: tx?.from || null,
+              l1BlockNumber: group.blockNumber,
+              timestamp: block ? new Date(block.timestamp * 1000) : new Date(),
+              l2Transactions,
+              executionCount: group.executions.length,
+              stateTransition: stateTransitions.length > 0 ? {
+                from: stateTransitions[0].from,
+                to: stateTransitions[stateTransitions.length - 1].to
+              } : null
+            };
+          })
+        );
+
+        // Filter out failed fetches
+        const failed = l1TxGroupResults.filter(r => r.status === 'rejected');
+        if (failed.length > 0) {
+          console.warn(`[TxHistory] ${failed.length} group(s) failed to fetch:`, failed.map(r => r.reason?.message));
+        }
+        const l1TxGroups = l1TxGroupResults
+          .filter(r => r.status === 'fulfilled')
+          .map(r => r.value);
+
+        console.log(`[TxHistory] ${l1TxGroups.length} groups rendered successfully`);
+
+        // Ensure stable order by newest block.
+        l1TxGroups.sort((a, b) => b.l1BlockNumber - a.l1BlockNumber);
+
+        // Use current L2 head for stable numbering; fall back to local count if unavailable.
+        let latestL2BlockNumber = null;
+        try {
+          latestL2BlockNumber = await l2Provider.getBlockNumber();
+        } catch (e) {
+          console.warn('Could not fetch current L2 block number for history numbering:', e);
+        }
+
+	        renderTxHistoryFromEvents(l1TxGroups, rollupsAddr, latestL2BlockNumber, l1ChainId);
+
+        // Restore scroll position after render
+        if (!isFirstLoad) {
+          container.scrollTop = scrollTop;
+        }
+      } catch (e) {
+        console.error('Error fetching tx history:', e);
+        container.innerHTML = `<div style="text-align: center; color: #ef4444; padding: 20px;">Error: ${e.message}</div>`;
+      }
+    }
+
+    function renderTxHistoryFromEvents(l1TxGroups, rollupsAddr, latestL2BlockNumber = null, l1ChainId = null) {
+      const container = document.getElementById('txHistory');
+      if (l1TxGroups.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">No L2 blocks found</div>';
+        return;
+      }
+
+      const totalExecutionCount = l1TxGroups.reduce((sum, group) => sum + (group.executionCount || 0), 0);
+      let l2Cursor = Number.isInteger(latestL2BlockNumber) ? latestL2BlockNumber : totalExecutionCount;
+
+      const allProxyPrep = [];
+      const allLoadPrep = [];
+      for (const group of l1TxGroups) {
+        for (const tx of group.l2Transactions) {
+              if (tx.type === 'PROXY_DEPLOY') {
+                allProxyPrep.push({
+                  proxyAddress: tx.proxyAddress?.toLowerCase(),
+                  l1TxHash: tx.l1TxHash,
+                  from: tx.from,
+                  originalAddress: tx.originalAddress,
+                  originalRollupId: tx.originalRollupId,
+                  l1BlockNumber: group.l1BlockNumber
+                });
+              } else if (tx.type === 'LOAD_EXECUTIONS') {
+            allLoadPrep.push({
+              l1TxHash: tx.l1TxHash,
+              from: tx.from,
+              count: tx.count,
+              l1BlockNumber: group.l1BlockNumber
+            });
+          }
+        }
+      }
+
+      const findNearestProxyPrep = (proxyAddress, beforeBlock) => {
+        if (!proxyAddress) return null;
+        const proxy = proxyAddress.toLowerCase();
+        let best = null;
+        for (const prep of allProxyPrep) {
+          if (prep.proxyAddress !== proxy) continue;
+          if (prep.l1BlockNumber >= beforeBlock) continue;
+          if (!best || prep.l1BlockNumber > best.l1BlockNumber) best = prep;
+        }
+        return best;
+      };
+
+      const findNearestLoadPrep = (beforeBlock) => {
+        let best = null;
+        for (const prep of allLoadPrep) {
+          if (prep.l1BlockNumber >= beforeBlock) continue;
+          if (!best || prep.l1BlockNumber > best.l1BlockNumber) best = prep;
+        }
+        return best;
+      };
+
+      container.innerHTML = l1TxGroups.map((group) => {
+        const executionCount = group.executionCount || 0;
+        let l2LabelHtml = '<span style="color: #7e22ce;">PREP (no L2 block)</span>';
+        if (executionCount > 0) {
+          if (executionCount === 1) {
+            l2LabelHtml = `<span style="color: #10b981;">L2 #${l2Cursor}</span>`;
+          } else {
+            const start = l2Cursor - executionCount + 1;
+            l2LabelHtml = `<span style="color: #10b981;">L2 #${start}..${l2Cursor}</span>`;
+          }
+          l2Cursor -= executionCount;
+        }
+
+        // Build L2 transactions HTML
+        const l2TxsHtml = group.l2Transactions.map(tx => {
+          if (tx.type === 'LOAD_EXECUTIONS') {
+            return `
+              <div class="l2-tx-item prep">
+                <span class="tx-type-badge prep">PREP: REGISTER EXECUTIONS</span>
+                <div class="tx-row">
+                  <span>From (L1):</span>
+                  <code class="hash" title="${tx.from || ''}">${addrLabel(tx.from || '')}</code>
+                  <span class="copy-btn" onclick="copyText(this,'${tx.from || ''}')">${COPY_ICON}</span>
+                </div>
+                <div class="tx-row">
+                  <span>Loaded:</span>
+                  <span>${tx.count} execution${tx.count === 1 ? '' : 's'}</span>
+                </div>
+                <div class="prep-note">
+                  Builder preparation transaction (registers call/execution plan before the user L1→L2 call).
+                </div>
+              </div>
+            `;
+          }
+
+	          if (tx.type === 'PROXY_DEPLOY') {
+            const isProxyForL1 = tx.originalRollupId != null && l1ChainId != null && BigInt(tx.originalRollupId) === BigInt(l1ChainId);
+            const targetLabel = isProxyForL1 ? 'For L1 addr:' : 'For L2 addr:';
+            const prepDescription = isProxyForL1
+              ? 'Builder preparation transaction (deploys deterministic proxy used by subsequent L2→L1 calls).'
+              : 'Builder preparation transaction (deploys deterministic proxy used by subsequent L1→L2 calls).';
+	            return `
+	              <div class="l2-tx-item admin">
+	                <span class="tx-type-badge admin">PREP: PROXY DEPLOY</span>
+                <div class="tx-row">
+                  <span>From (L1):</span>
+                  <code class="hash" title="${tx.from || ''}">${addrLabel(tx.from || '')}</code>
+                  <span class="copy-btn" onclick="copyText(this,'${tx.from || ''}')">${COPY_ICON}</span>
+                </div>
+                <div class="tx-row">
+                  <span>Proxy:</span>
+                  <code class="hash" title="${tx.proxyAddress}">${shortHash(tx.proxyAddress)}</code>
+                  <span class="copy-btn" onclick="copyText(this,'${tx.proxyAddress}')">${COPY_ICON}</span>
+                </div>
+	                <div class="tx-row">
+	                  <span>${targetLabel}</span>
+	                  <code class="hash" title="${tx.originalAddress}">${addrLabel(tx.originalAddress)}</code>
+	                  <span class="copy-btn" onclick="copyText(this,'${tx.originalAddress}')">${COPY_ICON}</span>
+	                </div>
+	                <div class="prep-note">
+	                  ${prepDescription}
+	                </div>
+		              </div>
+		            `;
+	          } else if (tx.type === 'ROLLUPS_ADMIN') {
+	            return `
+	              <div class="l2-tx-item rollups-admin">
+	                <span class="tx-type-badge rollups-admin">ROLLUPS ADMIN</span>
+	                <div class="tx-row">
+	                  <span>From (L1):</span>
+	                  <code class="hash" title="${tx.from || ''}">${addrLabel(tx.from || '')}</code>
+	                  <span class="copy-btn" onclick="copyText(this,'${tx.from || ''}')">${COPY_ICON}</span>
+	                </div>
+	                <div class="tx-row">
+	                  <span>Method:</span>
+	                  <span>${tx.methodLabel || 'Unknown'}</span>
+	                  ${tx.selector ? `<code class="hash" title="${tx.selector}">${tx.selector}</code><span class="copy-btn" onclick="copyText(this,'${tx.selector}')">${COPY_ICON}</span>` : ''}
+	                </div>
+	              </div>
+	            `;
+	          } else if (tx.type === 'L2_L1_BRIDGE') {
+            const proxyPrep = findNearestProxyPrep(tx.proxyAddress, group.l1BlockNumber);
+            const loadPrep = findNearestLoadPrep(group.l1BlockNumber);
+            const prepDetails = [];
+
+            if (proxyPrep) {
+              prepDetails.push(
+                `proxy deployed in <code class="hash" title="${proxyPrep.l1TxHash}">${shortHash(proxyPrep.l1TxHash)}</code>` +
+                ` by <code class="hash" title="${proxyPrep.from || ''}">${addrLabel(proxyPrep.from || '')}</code>`
+              );
+            }
+            if (loadPrep) {
+              prepDetails.push(
+                `executions registered in <code class="hash" title="${loadPrep.l1TxHash}">${shortHash(loadPrep.l1TxHash)}</code>` +
+                ` by <code class="hash" title="${loadPrep.from || ''}">${addrLabel(loadPrep.from || '')}</code>` +
+                ` (${loadPrep.count} loaded)`
+              );
+            }
+
+            const callHtml = tx.data && tx.data !== '0x' ? `<div class="tx-row"><span>Call:</span>${formatCalldata(tx.data, tx.value)}</div>` : '';
+            const valueHtml = tx.value && tx.value > 0n && (!tx.data || tx.data === '0x') ? `<div class="tx-row"><span>Value:</span><span style="color: #10b981;">${ethers.formatEther(tx.value)} ETH</span></div>` : '';
+            const prepHtml = prepDetails.length > 0
+              ? `<div class="prep-note"><strong>Preparation:</strong> ${prepDetails.join(' ; ')}</div>`
+              : '';
+
+	            return `
+	              <div class="l2-tx-item l2-l1">
+	                <span class="tx-type-badge l2-l1">L2→L1</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <code class="hash" title="${tx.from}">${addrLabel(tx.from)}</code>
+	                  <span class="copy-btn" onclick="copyText(this,'${tx.from}')">${COPY_ICON}</span>
+	                </div>
+	                <div class="tx-row">
+	                  <span>To:</span>
+	                  Proxy <code class="hash" title="${tx.proxyAddress}">${shortHash(tx.proxyAddress)}</code>
+	                  <span class="copy-btn" onclick="copyText(this,'${tx.proxyAddress}')">${COPY_ICON}</span>
+	                  → L1: <code class="hash" title="${tx.l1Target}">${addrLabel(tx.l1Target)}</code>
+	                  <span class="copy-btn" onclick="copyText(this,'${tx.l1Target}')">${COPY_ICON}</span>
+	                </div>
+	                ${callHtml}
+	                ${valueHtml}
+	                ${prepHtml}
+	              </div>
+	            `;
+	          } else if (tx.type === 'L2_L2') {
+	            const toDisplay = tx.isDeployment
+	              ? `<span class="deployment">CONTRACT DEPLOY → ${shortHash(tx.deployedAddress)}</span>`
+	              : `<code class="hash" title="${tx.to}">${addrLabel(tx.to)}</code><span class="copy-btn" onclick="copyText(this,'${tx.to}')">${COPY_ICON}</span>`;
+
+            const callHtml = tx.data && tx.data !== '0x' ? `<div class="tx-row"><span>Call:</span>${formatCalldata(tx.data, tx.value)}</div>` : '';
+            const valueHtml = tx.value && tx.value > 0n && (!tx.data || tx.data === '0x') ? `<div class="tx-row"><span>Value:</span><span style="color: #10b981;">${ethers.formatEther(tx.value)} ETH</span></div>` : '';
+
+	            return `
+	              <div class="l2-tx-item${tx.isDeployment ? ' deployment' : ''}">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <code class="hash" title="${tx.from}">${addrLabel(tx.from)}</code>
+	                  <span class="copy-btn" onclick="copyText(this,'${tx.from}')">${COPY_ICON}</span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  ${toDisplay}
+                </div>
+                ${callHtml}
+                ${valueHtml}
+              </div>
+            `;
+          } else if (tx.type === 'L1_L2_BRIDGE') {
+            const proxyPrep = findNearestProxyPrep(tx.proxyAddress, group.l1BlockNumber);
+            const loadPrep = findNearestLoadPrep(group.l1BlockNumber);
+            const prepDetails = [];
+
+            if (proxyPrep) {
+              prepDetails.push(
+                `proxy deployed in <code class="hash" title="${proxyPrep.l1TxHash}">${shortHash(proxyPrep.l1TxHash)}</code>` +
+                ` by <code class="hash" title="${proxyPrep.from || ''}">${addrLabel(proxyPrep.from || '')}</code>`
+              );
+            }
+            if (loadPrep) {
+              prepDetails.push(
+                `executions registered in <code class="hash" title="${loadPrep.l1TxHash}">${shortHash(loadPrep.l1TxHash)}</code>` +
+                ` by <code class="hash" title="${loadPrep.from || ''}">${addrLabel(loadPrep.from || '')}</code>` +
+                ` (${loadPrep.count} loaded)`
+              );
+            }
+
+            const l2TargetDisplay = tx.l2Target
+              ? `→ L2: <code class="hash" title="${tx.l2Target}">${addrLabel(tx.l2Target)}</code><span class="copy-btn" onclick="copyText(this,'${tx.l2Target}')">${COPY_ICON}</span>`
+              : '';
+            const callHtml = tx.data && tx.data !== '0x' ? `<div class="tx-row"><span>Call:</span>${formatCalldata(tx.data, tx.value)}</div>` : '';
+            const valueHtml = tx.value && tx.value > 0n && (!tx.data || tx.data === '0x') ? `<div class="tx-row"><span>Value:</span><span style="color: #10b981;">${ethers.formatEther(tx.value)} ETH</span></div>` : '';
+            const prepHtml = prepDetails.length > 0
+              ? `<div class="prep-note"><strong>Preparation:</strong> ${prepDetails.join(' ; ')}</div>`
+              : '';
+
+            return `
+              <div class="l2-tx-item bridge">
+                <span class="tx-type-badge bridge">L1→L2</span>
+                <div class="tx-row">
+                  <span>From (L1):</span>
+                  <code class="hash" title="${tx.from}">${addrLabel(tx.from)}</code>
+                  <span class="copy-btn" onclick="copyText(this,'${tx.from}')">${COPY_ICON}</span>
+                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  Proxy <code class="hash" title="${tx.proxyAddress}">${shortHash(tx.proxyAddress)}</code>
+                  ${l2TargetDisplay}
+                </div>
+                ${callHtml}
+                ${valueHtml}
+                ${prepHtml}
+              </div>
+            `;
+          }
+          return '';
+        }).join('');
+
+        const stateHtml = group.stateTransition ? `
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">${shortHash(group.stateTransition.from)}</span> → <span style="font-family: monospace;">${shortHash(group.stateTransition.to)}</span>
+          </div>
+        ` : '';
+
+        return `
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="${getL1ExplorerTxUrl(group.l1TxHash)}" target="_blank" class="hash" title="${group.l1TxHash}" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">${shortHash(group.l1TxHash)}</a>
+                <span class="copy-btn" onclick="copyText(this,'${group.l1TxHash}')">${COPY_ICON}</span>
+                <span style="margin-left: 8px; color: #888;">${group.timestamp.toLocaleTimeString()}</span>
+                ${group.l1From ? `
+                <span style="margin-left: 8px; color: #666;">
+                  from <code class="hash" title="${group.l1From}">${addrLabel(group.l1From)}</code>
+                </span>` : ''}
+              </span>
+              <span style="font-weight: 600;">
+                ${l2LabelHtml}
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #${group.l1BlockNumber})</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              ${l2TxsHtml || '<div style="color: #888; padding: 8px;">No L2 transactions</div>'}
+            </div>
+            ${stateHtml}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function addTxToHistory(tx) {
+      // Also refresh from L1 after local tx
+      setTimeout(fetchTxHistory, 3000);
+    }
+
+    function renderTxHistory() {
+      // Deprecated - now using fetchTxHistory
+    }
+
+    // ============ Event Listeners ============
+    document.getElementById('refreshBtn').addEventListener('click', refreshStatus);
+    document.getElementById('sendTxBtn').addEventListener('click', sendTransaction);
+    document.getElementById('refreshHistoryBtn').addEventListener('click', fetchTxHistory);
+    document.getElementById('maximizeHistoryBtn').addEventListener('click', toggleTxHistoryFullscreen);
+    document.getElementById('clearLogs').addEventListener('click', () => {
+      document.getElementById('logs').innerHTML = '';
+    });
+    // Popup panel toggles
+    function showPanel(panelId) {
+      document.getElementById(panelId).classList.add('visible');
+      document.getElementById('popupOverlay').classList.add('visible');
+      if (panelId === 'settingsPanel') updateServiceStatuses();
+    }
+    function hidePanel(panelId) {
+      document.getElementById(panelId).classList.remove('visible');
+      document.getElementById('popupOverlay').classList.remove('visible');
+    }
+    function hideAllPanels() {
+      document.getElementById('settingsPanel').classList.remove('visible');
+      document.getElementById('walletPanel').classList.remove('visible');
+      document.getElementById('popupOverlay').classList.remove('visible');
+    }
+
+    document.getElementById('settingsIconBtn').addEventListener('click', () => {
+      const panel = document.getElementById('settingsPanel');
+      if (panel.classList.contains('visible')) {
+        hideAllPanels();
+      } else {
+        hideAllPanels();
+        showPanel('settingsPanel');
+      }
+    });
+    document.getElementById('connectedWalletDisplay').addEventListener('click', () => {
+      const panel = document.getElementById('walletPanel');
+      if (panel.classList.contains('visible')) {
+        hideAllPanels();
+      } else {
+        hideAllPanels();
+        showPanel('walletPanel');
+      }
+    });
+    document.getElementById('closeSettingsBtn').addEventListener('click', hideAllPanels);
+    document.getElementById('closeWalletBtn').addEventListener('click', hideAllPanels);
+    document.getElementById('popupOverlay').addEventListener('click', hideAllPanels);
+
+    // Chain selector buttons
+    document.getElementById('chainL1Btn').addEventListener('click', () => selectChain('L1'));
+    document.getElementById('chainL2Btn').addEventListener('click', () => selectChain('L2'));
+
+    // Proxy checkbox and address input
+    document.getElementById('targetIsOtherChain').addEventListener('change', updateProxyAddress);
+    document.getElementById('txToAddress').addEventListener('input', updateProxyAddress);
+    document.getElementById('txToAddress').addEventListener('input', updateFunctionSelector);
+
+    // Address select dropdown
+    document.getElementById('addressSelect').addEventListener('change', (e) => {
+      if (e.target.value) {
+        document.getElementById('txToAddress').value = e.target.value;
+        updateProxyAddress();
+        updateFunctionSelector();
+        e.target.value = ''; // Reset select to show dropdown arrow
+      }
+    });
+
+    // Function selector change
+    document.getElementById('functionSelector').addEventListener('change', onFunctionSelect);
+
+    // Simulate call button
+    document.getElementById('simulateTxBtn').addEventListener('click', simulateCall);
+
+    // Custom private key input
+    document.getElementById('customPrivateKey').addEventListener('input', () => {
+      if (selectedWalletIndex === customWalletIndex()) {
+        fetchAllWalletBalances();
+      }
+    });
+
+    // Browser wallet event listeners
+    if (window.ethereum) {
+      window.ethereum.on('accountsChanged', (accounts) => {
+        if (accounts.length > 0) {
+          browserWalletAddress = accounts[0];
+          log(`Browser wallet changed to: ${browserWalletAddress}`, 'info');
+          if (selectedWalletIndex === browserWalletIndex()) {
+            fetchAllWalletBalances();
+          }
+          renderWalletList();
+        } else {
+          browserWalletAddress = null;
+          if (selectedWalletIndex === browserWalletIndex()) {
+            selectWallet(USER_WALLETS.length > 0 ? 0 : customWalletIndex());
+          }
+          renderWalletList();
+          log('Browser wallet disconnected', 'info');
+        }
+      });
+
+      window.ethereum.on('chainChanged', () => {
+        log('Browser wallet chain changed', 'info');
+      });
+    }
+
+    // ============ Initialize ============
+    async function initializeDashboard() {
+      await loadRuntimeSettingsConfig();
+      await loadUserWalletConfig();
+      loadDeployedContracts();
+      renderWalletList();
+      updateAddressDropdown();
+      updateFunctionSelector();
+      updateConnectedWalletDisplay();
+      await fetchAllWalletBalances();
+      await refreshStatus();
+      await fetchTxHistory();
+      setInterval(() => refreshStatus(true), 10000); // Auto-refresh every 10s (silent)
+      setInterval(fetchTxHistory, 15000); // Auto-refresh history every 15s
+      setInterval(fetchAllWalletBalances, 10000); // Auto-refresh balances
+    }
+
+    initializeDashboard().catch((e) => {
+      log('Initialization failed: ' + e.message, 'error');
+    });
+  </script>
+</body>
+</html>
