@@ -96,7 +96,7 @@ contract CrossChainManagerL2 {
             data: callData,
             failed: false,
             sourceAddress: sourceAddress,
-            sourceRollup: 0,
+            sourceRollup: ROLLUP_ID,
             scope: new uint256[](0)
         });
 
