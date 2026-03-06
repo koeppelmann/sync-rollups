@@ -26,6 +26,9 @@ contract CrossChainManagerL2 {
     /// @notice Mapping of authorized CrossChainProxy contracts to their identity
     mapping(address proxy => ProxyInfo info) public authorizedProxies;
 
+    /// @notice Number of pending (unconsumed) execution entries in the table
+    uint256 public pendingEntryCount;
+
     /// @notice Error when caller is not the system address
     error Unauthorized();
 
@@ -41,6 +44,9 @@ contract CrossChainManagerL2 {
     /// @notice Error used to unwind scope during revert handling, carrying the continuation action
     /// @param nextAction The ABI-encoded continuation action to resume with after the revert
     error ScopeReverted(bytes nextAction);
+
+    /// @notice Error when revert data from a child scope is too short to decode
+    error InvalidRevertData();
 
     /// @notice Emitted when a new CrossChainProxy is deployed and registered
     event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId);
@@ -67,6 +73,7 @@ contract CrossChainManagerL2 {
         for (uint256 i = 0; i < entries.length; i++) {
             _executions[entries[i].actionHash].push(entries[i]);
         }
+        pendingEntryCount += entries.length;
     }
 
     // ──────────────────────────────────────────────
@@ -228,6 +235,7 @@ contract CrossChainManagerL2 {
         uint256 lastIndex = executions.length - 1;
         nextAction = executions[lastIndex].nextAction;
         executions.pop();
+        pendingEntryCount--;
 
         return nextAction;
     }
@@ -262,7 +270,7 @@ contract CrossChainManagerL2 {
         uint256[] memory currentScope,
         Action memory action
     ) internal returns (uint256[] memory scope, Action memory nextAction) {
-        address sourceProxy = this.computeCrossChainProxyAddress(
+        address sourceProxy = computeCrossChainProxyAddress(
             action.sourceAddress,
             action.sourceRollup,
             block.chainid
@@ -298,12 +306,16 @@ contract CrossChainManagerL2 {
     /// @param revertData The raw revert bytes (includes the 4-byte selector)
     /// @return nextAction The decoded continuation action
     function _handleScopeRevert(bytes memory revertData) internal pure returns (Action memory nextAction) {
-        require(revertData.length > 4, "Invalid revert data");
-        bytes memory withoutSelector = new bytes(revertData.length - 4);
-        for (uint256 i = 4; i < revertData.length; i++) {
-            withoutSelector[i - 4] = revertData[i];
+        if (revertData.length <= 4) revert InvalidRevertData();
+
+        // Strip 4-byte selector by advancing the memory pointer
+        assembly {
+            let len := mload(revertData)
+            revertData := add(revertData, 4)
+            mstore(revertData, sub(len, 4))
         }
-        (bytes memory actionBytes) = abi.decode(withoutSelector, (bytes));
+
+        (bytes memory actionBytes) = abi.decode(revertData, (bytes));
         return abi.decode(actionBytes, (Action));
     }
 
@@ -368,7 +380,7 @@ contract CrossChainManagerL2 {
         address originalAddress,
         uint256 originalRollupId,
         uint256 domain
-    ) external view returns (address) {
+    ) public view returns (address) {
         bytes32 salt = keccak256(abi.encodePacked(domain, originalRollupId, originalAddress));
         bytes32 bytecodeHash = keccak256(
             abi.encodePacked(

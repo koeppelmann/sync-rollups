@@ -129,6 +129,9 @@ contract Rollups {
     /// @notice Error when a call execution fails
     error CallExecutionFailed();
 
+    /// @notice Error when revert data from a child scope is too short to decode
+    error InvalidRevertData();
+
     /// @notice Error when a scope reverts, carrying the next action to continue with
     /// @param nextAction The ABI-encoded next action to continue with
     /// @param stateRoot The state root to restore when catching the revert
@@ -405,7 +408,7 @@ contract Rollups {
         Action memory action
     ) internal returns (uint256[] memory scope, Action memory nextAction) {
         // Execute the CALL through source proxy
-        address sourceProxy = this.computeCrossChainProxyAddress(
+        address sourceProxy = computeCrossChainProxyAddress(
             action.sourceAddress,
             action.sourceRollup,
             block.chainid
@@ -550,18 +553,17 @@ contract Rollups {
     /// @param revertData The raw revert data (includes 4-byte selector)
     /// @return nextAction The decoded continuation action
     function _handleScopeRevert(bytes memory revertData) internal returns (Action memory nextAction) {
-        // Skip 4-byte selector, decode parameters
-        require(revertData.length > 4, "Invalid revert data");
-        bytes memory withoutSelector = new bytes(revertData.length - 4);
-        for (uint256 i = 4; i < revertData.length; i++) {
-            withoutSelector[i - 4] = revertData[i];
+        if (revertData.length <= 4) revert InvalidRevertData();
+
+        // Strip 4-byte selector by advancing the memory pointer
+        assembly {
+            let len := mload(revertData)
+            revertData := add(revertData, 4)
+            mstore(revertData, sub(len, 4))
         }
-        // Decode: (bytes nextAction, bytes32 stateRoot, uint256 rollupId)
-        (bytes memory actionBytes, bytes32 stateRoot, uint256 rollupId) = abi.decode(withoutSelector, (bytes, bytes32, uint256));
 
-        // Restore state root
+        (bytes memory actionBytes, bytes32 stateRoot, uint256 rollupId) = abi.decode(revertData, (bytes, bytes32, uint256));
         rollups[rollupId].stateRoot = stateRoot;
-
         return abi.decode(actionBytes, (Action));
     }
 
@@ -679,7 +681,7 @@ contract Rollups {
     /// @param originalRollupId The original rollup ID
     /// @param domain The domain (chain ID) for the address computation
     /// @return The computed proxy address
-    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) external view returns (address) {
+    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) public view returns (address) {
         bytes32 salt = keccak256(abi.encodePacked(domain, originalRollupId, originalAddress));
         bytes32 bytecodeHash = keccak256(
             abi.encodePacked(
@@ -687,7 +689,6 @@ contract Rollups {
                 abi.encode(address(this), originalAddress, originalRollupId)
             )
         );
-
         return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
     }
 }
