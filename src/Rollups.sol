@@ -183,7 +183,7 @@ contract Rollups is ICrossChainManager {
                 abi.encodePacked(
                     abi.encode(entries[i].stateDeltas),
                     abi.encode(vks),
-                    entries[i].actionHash, // TODO ?¿
+                    entries[i].actionHash,
                     abi.encode(entries[i].nextAction)
                 )
             );

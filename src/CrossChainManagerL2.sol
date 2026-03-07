@@ -228,7 +228,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         if (executions.length == 0) revert ExecutionNotFound();
 
         uint256 lastIndex = executions.length - 1;
-        nextAction = executions[lastIndex].nextAction;
+        nextAction = executions[lastIndex].nextAction; // TODO
         executions.pop();
         pendingEntryCount--;
 
