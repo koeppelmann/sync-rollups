@@ -735,6 +735,10 @@
         <input type="text" id="builderUrl" value="http://localhost:3200" />
         <span class="status-indicator" id="builderUrlStatus">-</span>
 
+        <span>Blockscout L2 API</span>
+        <input type="text" id="blockscoutL2Url" value="http://localhost:4011" />
+        <span class="status-indicator" id="blockscoutL2Status">-</span>
+
         <span>Rollups Contract</span>
         <input type="text" id="rollupsAddress" value="0xe7f1725e7734ce288f8367e1bb143e90bb3f0512" />
         <span></span>
@@ -941,6 +945,7 @@
       l2Rpc: "http://localhost:9547",
       l2EvmRpc: "http://localhost:9548",
       builderUrl: "http://localhost:3200",
+      blockscoutL2Url: "http://localhost:4011",
       rollupsAddress: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
       rollupId: "0",
       deploymentBlock: "0"
@@ -1022,8 +1027,71 @@
       { name: 'lastCaller', sig: 'lastCaller()', selector: '0x2113522a', params: [], returns: ['address'], view: true },
     ];
 
+    // Cache for Blockscout ABI lookups: address (lowercase) -> { functions, contractName } | null
+    const blockscoutAbiCache = {};
+
+    // Fetch contract info from Blockscout L2 API.
+    // Returns { contractName, functions[] } or null if not a contract / no ABI.
+    async function fetchBlockscoutAbi(address) {
+      const key = address.toLowerCase();
+      if (key in blockscoutAbiCache) return blockscoutAbiCache[key];
+
+      const baseUrl = document.getElementById('blockscoutL2Url').value.replace(/\/+$/, '');
+      if (!baseUrl) { blockscoutAbiCache[key] = null; return null; }
+
+      try {
+        // First check if it's a contract
+        const addrResp = await fetch(`${baseUrl}/api/v2/addresses/${address}`);
+        if (!addrResp.ok) { blockscoutAbiCache[key] = null; return null; }
+        const addrData = await addrResp.json();
+        if (!addrData.is_contract) { blockscoutAbiCache[key] = null; return null; }
+
+        // Fetch smart-contract details (includes ABI if verified)
+        const scResp = await fetch(`${baseUrl}/api/v2/smart-contracts/${address}`);
+        if (!scResp.ok) { blockscoutAbiCache[key] = null; return null; }
+        const scData = await scResp.json();
+
+        const abi = scData.abi;
+        if (!abi || !Array.isArray(abi) || abi.length === 0) {
+          // Contract exists but no ABI — cache as contract with no functions
+          blockscoutAbiCache[key] = { contractName: scData.name || addrData.name || null, functions: [], isContract: true };
+          return blockscoutAbiCache[key];
+        }
+
+        // Parse ABI entries into our function format
+        const functions = [];
+        for (const item of abi) {
+          if (item.type !== 'function') continue;
+          const name = item.name;
+          const paramTypes = (item.inputs || []).map(i => i.type);
+          const returnTypes = (item.outputs || []).map(o => o.type);
+          const sig = `${name}(${paramTypes.join(',')})`;
+          const selector = ethers.id(sig).slice(0, 10);
+          const isView = item.stateMutability === 'view' || item.stateMutability === 'pure';
+          functions.push({
+            name,
+            sig,
+            selector,
+            params: paramTypes,
+            paramNames: (item.inputs || []).map(i => i.name || i.type),
+            returns: returnTypes,
+            view: isView,
+          });
+        }
+
+        const result = { contractName: scData.name || addrData.name || null, functions, isContract: true };
+        blockscoutAbiCache[key] = result;
+        return result;
+      } catch (e) {
+        // Don't cache network errors — Blockscout URL might be wrong, user can fix and retry
+        console.warn(`[Blockscout] Failed to fetch ${address}: ${e.message}`);
+        return null;
+      }
+    }
+
     // Default user wallets (development only). Can be overridden by ui/wallets.dev.json.
-    const DEFAULT_USER_WALLETS = [
+    // For Gnosis/production chains, use random dev keys.
+    const GNOSIS_USER_WALLETS = [
       {
         privateKey: "0x1c6bdebe45b85aa62d7170a8e43aa0fbf5c51ffc168ec5f58ae377b115f68d31",
         label: "User #1"
@@ -1033,6 +1101,18 @@
         label: "User #2"
       }
     ];
+    // For local Anvil (chain 31337), use Anvil's pre-funded accounts #1 and #2.
+    const ANVIL_USER_WALLETS = [
+      {
+        privateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+        label: "User #1 (Anvil #1)"
+      },
+      {
+        privateKey: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+        label: "User #2 (Anvil #2)"
+      }
+    ];
+    let DEFAULT_USER_WALLETS = GNOSIS_USER_WALLETS;
     let USER_WALLETS = [];
 
     function normalizeUserWallets(entries) {
@@ -1051,18 +1131,32 @@
     }
 
     async function loadUserWalletConfig() {
-      USER_WALLETS = normalizeUserWallets(DEFAULT_USER_WALLETS);
+      // Detect L1 chain ID to choose the right default wallets
+      let isAnvil = false;
       try {
-        const resp = await fetch('wallets.dev.json', { cache: 'no-store' });
-        if (resp.ok) {
-          const cfg = await resp.json();
-          const fileWallets = normalizeUserWallets(cfg?.users || cfg);
-          if (fileWallets.length >= 2) {
-            USER_WALLETS = fileWallets;
-          }
-        }
+        const l1Rpc = document.getElementById('l1Rpc').value;
+        const provider = new ethers.JsonRpcProvider(l1Rpc);
+        const network = await provider.getNetwork();
+        isAnvil = (network.chainId === 31337n);
+        DEFAULT_USER_WALLETS = isAnvil ? ANVIL_USER_WALLETS : GNOSIS_USER_WALLETS;
       } catch {
-        // Keep defaults if runtime config is unavailable.
+        // If we can't detect, keep current default
+      }
+      USER_WALLETS = normalizeUserWallets(DEFAULT_USER_WALLETS);
+      // Only load wallets.dev.json on non-Anvil chains (Gnosis etc.)
+      if (!isAnvil) {
+        try {
+          const resp = await fetch('wallets.dev.json', { cache: 'no-store' });
+          if (resp.ok) {
+            const cfg = await resp.json();
+            const fileWallets = normalizeUserWallets(cfg?.users || cfg);
+            if (fileWallets.length >= 2) {
+              USER_WALLETS = fileWallets;
+            }
+          }
+        } catch {
+          // Keep defaults if runtime config is unavailable.
+        }
       }
       refreshKnownAddressLabels();
     }
@@ -1093,7 +1187,7 @@
 
     function applyRuntimeSettings(settings) {
       if (!settings || typeof settings !== 'object') return;
-      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'rollupsAddress', 'rollupId'];
+      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
       for (const key of keys) {
         if (typeof settings[key] === 'string' && settings[key].length > 0) {
           const input = document.getElementById(key);
@@ -1150,9 +1244,28 @@
     const COPY_ICON = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
     const CHECK_ICON = `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
 
+    function fallbackCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+
+    function clipboardWrite(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      fallbackCopy(text);
+      return Promise.resolve();
+    }
+
     function copyText(btn, text) {
       event.stopPropagation();
-      navigator.clipboard.writeText(text);
+      clipboardWrite(text);
       btn.innerHTML = CHECK_ICON;
       btn.classList.add('copied');
       setTimeout(() => {
@@ -1164,7 +1277,7 @@
     // ============ Utility Functions ============
     function copyToClipboard(element) {
       const text = element.title || element.textContent;
-      navigator.clipboard.writeText(text).then(() => {
+      clipboardWrite(text).then(() => {
         let tooltip = element.querySelector('.copy-tooltip');
         if (!tooltip) {
           tooltip = document.createElement('span');
@@ -1536,34 +1649,63 @@
     }
 
     // Update function selector dropdown based on selected address
-    function updateFunctionSelector() {
-      const toAddress = document.getElementById('txToAddress').value.toLowerCase();
+    async function updateFunctionSelector() {
+      const toAddress = document.getElementById('txToAddress').value.trim();
       const selectorGroup = document.getElementById('functionSelectorGroup');
       const selector = document.getElementById('functionSelector');
 
-      // Check if this is a deployed contract
-      const contract = deployedContracts.find(c => c.address.toLowerCase() === toAddress);
+      if (!toAddress || !toAddress.startsWith('0x') || toAddress.length !== 42) {
+        selectorGroup.style.display = 'none';
+        return;
+      }
+
+      // Check if this is a locally-known deployed contract
+      const contract = deployedContracts.find(c => c.address.toLowerCase() === toAddress.toLowerCase());
 
       if (contract) {
-        // Show function selector for deployed contracts
-        selectorGroup.style.display = 'block';
-
-        // Get functions for this contract type (default to Counter functions for now)
         const functions = contract.contractType
           ? (CONTRACT_TYPES[contract.contractType]?.functions || DEFAULT_CONTRACT_FUNCTIONS)
           : DEFAULT_CONTRACT_FUNCTIONS;
+        showFunctionSelector(functions, null);
+        return;
+      }
 
-        selector.innerHTML = `
-          <option value="">-- Select function or enter data manually --</option>
-          ${functions.map(f => `
-            <option value="${f.selector}" data-params='${JSON.stringify(f.params)}' data-view="${f.view || false}">
-              ${f.sig}${f.view ? ' (view)' : ''}
-            </option>
-          `).join('')}
-        `;
+      // Not a locally-known contract — try Blockscout
+      selectorGroup.style.display = 'none';
+      const bsData = await fetchBlockscoutAbi(toAddress);
+      // Re-check the address hasn't changed while we were fetching
+      if (document.getElementById('txToAddress').value.trim().toLowerCase() !== toAddress.toLowerCase()) return;
+
+      if (bsData && bsData.isContract) {
+        if (bsData.functions.length > 0) {
+          showFunctionSelector(bsData.functions, bsData.contractName);
+        } else {
+          // It's a contract but no ABI — show the selector group with a hint
+          selectorGroup.style.display = 'block';
+          selector.innerHTML = `<option value="">Contract detected${bsData.contractName ? ' (' + bsData.contractName + ')' : ''} — not verified, enter data manually</option>`;
+        }
       } else {
         selectorGroup.style.display = 'none';
       }
+    }
+
+    function showFunctionSelector(functions, contractName) {
+      const selectorGroup = document.getElementById('functionSelectorGroup');
+      const selector = document.getElementById('functionSelector');
+      selectorGroup.style.display = 'block';
+
+      const label = contractName ? ` (${contractName})` : '';
+      selector.innerHTML = `
+        <option value="">-- Select function${label} --</option>
+        ${functions.map(f => `
+          <option value="${f.selector}"
+            data-params='${JSON.stringify(f.params)}'
+            data-param-names='${JSON.stringify(f.paramNames || f.params)}'
+            data-view="${f.view || false}">
+            ${f.sig}${f.view ? ' (view)' : ''}
+          </option>
+        `).join('')}
+      `;
     }
 
     // Handle function selection - encode calldata
@@ -1585,9 +1727,13 @@
         dataInput.value = funcSelector;
       } else {
         // Need to prompt for params
+        const paramNames = JSON.parse(selectedOption.dataset.paramNames || '[]');
         const paramValues = [];
-        for (const param of params) {
-          const value = prompt(`Enter value for ${param}:`);
+        for (let i = 0; i < params.length; i++) {
+          const label = paramNames[i] && paramNames[i] !== params[i]
+            ? `${paramNames[i]} (${params[i]})`
+            : params[i];
+          const value = prompt(`Enter value for ${label}:`);
           if (value === null) {
             // User cancelled
             selector.value = '';
@@ -2121,6 +2267,24 @@
       const builderEl = document.getElementById('builderUrlStatus');
       builderEl.textContent = builderOnline ? 'Online' : 'Offline';
       builderEl.className = `status-indicator ${builderOnline ? 'online' : 'offline'}`;
+
+      // Check Blockscout L2
+      const bsUrl = document.getElementById('blockscoutL2Url').value.replace(/\/+$/, '');
+      const bsEl = document.getElementById('blockscoutL2Status');
+      try {
+        const bsResp = await fetch(`${bsUrl}/api/v2/main-page/indexing-status`, { signal: AbortSignal.timeout(3000) });
+        if (bsResp.ok) {
+          const bsData = await bsResp.json();
+          bsEl.textContent = bsData.finished_indexing ? 'Online' : 'Indexing...';
+          bsEl.className = 'status-indicator online';
+        } else {
+          bsEl.textContent = 'Error';
+          bsEl.className = 'status-indicator offline';
+        }
+      } catch {
+        bsEl.textContent = 'Offline';
+        bsEl.className = 'status-indicator offline';
+      }
     }
 
     // ============ Refresh Status ============
@@ -3354,16 +3518,23 @@
     document.getElementById('chainL2Btn').addEventListener('click', () => selectChain('L2'));
 
     // Proxy checkbox and address input
+    let functionSelectorTimer = null;
     document.getElementById('targetIsOtherChain').addEventListener('change', updateProxyAddress);
-    document.getElementById('txToAddress').addEventListener('input', updateProxyAddress);
-    document.getElementById('txToAddress').addEventListener('input', updateFunctionSelector);
+    function onToAddressChange() {
+      updateProxyAddress();
+      // Debounce Blockscout lookup (300ms) to avoid spamming while typing
+      clearTimeout(functionSelectorTimer);
+      functionSelectorTimer = setTimeout(updateFunctionSelector, 300);
+    }
+    document.getElementById('txToAddress').addEventListener('input', onToAddressChange);
+    document.getElementById('txToAddress').addEventListener('change', onToAddressChange);
 
     // Address select dropdown
     document.getElementById('addressSelect').addEventListener('change', (e) => {
       if (e.target.value) {
         document.getElementById('txToAddress').value = e.target.value;
         updateProxyAddress();
-        updateFunctionSelector();
+        updateFunctionSelector(); // Immediate lookup on select
         e.target.value = ''; // Reset select to show dropdown arrow
       }
     });

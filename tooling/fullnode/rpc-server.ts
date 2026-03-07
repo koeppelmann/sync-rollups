@@ -330,19 +330,26 @@ export class RpcServer {
     const value = BigInt(params.value);
     let returnData = "0x";
     let failed = false;
+    let preSimBlock: number | null = null;
 
     try {
-      // Ensure the source proxy is deployed on L2 using the original sender address
+      // Ensure the source proxy is deployed on L2 using the original sender address.
+      // This is done BEFORE recording preSimBlock so the proxy deployment persists
+      // even if we rollback the simulation (event processor will also deploy it).
       const originalSender = params.originalSender || params.from;
       const l1ChainId = await this.getL1ChainId();
-      await this.stateManager.ensureProxyDeployed(
+      const proxyAddress = await this.stateManager.ensureProxyDeployed(
         originalSender,
         rollupId,
         BigInt(l1ChainId)
       );
 
-      // Execute the call via systemCall: sourceProxy.executeOnBehalf(target, data)
-      const { Interface } = await import("ethers");
+      // Record L2 block AFTER proxy deployment so we only rollback simulation blocks,
+      // not the proxy deployment itself. This prevents losing persisted state.
+      preSimBlock = await this.stateManager.getL2BlockNumber();
+
+      // Build the executeOnBehalf calldata
+      const { Interface, AbiCoder } = await import("ethers");
       const proxyIface = new Interface([
         "function executeOnBehalf(address destination, bytes calldata data) payable returns (bool, bytes)"
       ]);
@@ -351,15 +358,60 @@ export class RpcServer {
         params.data,
       ]);
 
-      const txHash = await this.stateManager.systemCall(
-        params.from,   // sourceProxy address on L2
-        execCalldata,
-        "0x" + value.toString(16)
-      );
-      console.log(`[RpcServer] L1→L2 call pre-executed: ${txHash}`);
+      // First, dry-run via eth_call to check if the inner call succeeds.
+      // Use state overrides to give the source proxy enough balance for the value,
+      // since in the real execution the operator funds the call via systemCall.
+      const provider = this.stateManager.getL2Provider();
+      const stateOverrides: Record<string, { balance: string }> = {};
+      if (value > 0n) {
+        // Give the proxy enough balance to cover the call value
+        stateOverrides[proxyAddress] = {
+          balance: "0x" + (value * 2n).toString(16),
+        };
+      }
+      const callArgs: any[] = [
+        {
+          from: proxyAddress,
+          to: proxyAddress,  // sourceProxy calls executeOnBehalf on itself
+          value: "0x" + value.toString(16),
+          data: execCalldata,
+        },
+        "latest",
+      ];
+      if (Object.keys(stateOverrides).length > 0) {
+        callArgs.push(stateOverrides);
+      }
+      let innerSuccess = false;
+      try {
+        const callResult = await provider.send("eth_call", callArgs);
 
-      // Read the return data from the receipt logs if needed
-      // For now, return "0x" as returnData — the important thing is the state root
+        // Decode the (bool success, bytes returnData) result
+        const decoded = AbiCoder.defaultAbiCoder().decode(
+          ["bool", "bytes"],
+          callResult
+        );
+        innerSuccess = decoded[0] as boolean;
+        returnData = decoded[1] as string;
+      } catch (dryRunErr: any) {
+        // eth_call reverted (e.g. L2Proxy reverts on failed value call)
+        // or returned data that can't be decoded — treat as failed
+        console.log(`[RpcServer] L1→L2 dry-run reverted: ${dryRunErr.message?.slice(0, 120)}`);
+        innerSuccess = false;
+      }
+
+      if (!innerSuccess) {
+        // Inner call would fail — mark as failed, don't execute state-changing call
+        console.log(`[RpcServer] L1→L2 inner call would fail, marking as failed`);
+        failed = true;
+      } else {
+        // Inner call succeeds — execute the state-changing call to get state root
+        const txHash = await this.stateManager.systemCall(
+          proxyAddress,
+          execCalldata,
+          "0x" + value.toString(16)
+        );
+        console.log(`[RpcServer] L1→L2 call simulated: ${txHash}`);
+      }
     } catch (e: any) {
       console.error("[RpcServer] L1→L2 call execution error:", e.message);
       failed = true;
@@ -372,6 +424,17 @@ export class RpcServer {
     const newState = failed
       ? currentState
       : await this.stateManager.getActualStateRoot();
+
+    // Rollback the L2 EVM to undo simulation state changes.
+    // The event processor will replay these operations when the L1 event arrives,
+    // producing the same state root on ALL fullnodes (not just the builder).
+    if (preSimBlock !== null) {
+      try {
+        await this.stateManager.rollbackToBlock(preSimBlock);
+      } catch (e: any) {
+        console.error(`[RpcServer] Failed to rollback simulation: ${e.message}`);
+      }
+    }
 
     const stateDeltas: { rollupId: string; currentState: string; newState: string; etherDelta: string }[] = [];
     stateDeltas.push({
@@ -432,15 +495,14 @@ export class RpcServer {
 
     if (action.actionType === ActionType.L2TX) {
       // Actually execute the L2TX on the builder's L2 (not read-only).
-      // This gives us the real post-execution state root.
+      // We decode the signed tx and replay via zero-gas system call instead
+      // of sendRawTransaction, because reth --dev mode uses a random coinbase
+      // per instance and any non-zero gas fee would produce different state roots.
       try {
-        const txHash = await this.stateManager.sendRawTransaction(action.data);
-        const receipt = await this.stateManager.waitForReceipt(txHash);
-
-        if (receipt.status === 0) {
-          success = false;
-          error = `L2 transaction reverted (tx: ${txHash})`;
-        }
+        const { Transaction } = await import("ethers");
+        const parsedTx = Transaction.from(action.data);
+        const txHash = await this.stateManager.replayL2TX(parsedTx);
+        console.log(`[RpcServer] L2TX simulated via system call: ${txHash}`);
       } catch (e: any) {
         success = false;
         error = e.message;

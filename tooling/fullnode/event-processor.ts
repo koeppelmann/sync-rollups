@@ -96,6 +96,9 @@ export class EventProcessor {
     this.config.startBlock = resumeBlock;
     this.lastProcessedBlock = syncState.lastProcessedL1Block;
 
+    // Restore tracked state root and ether balance
+    this.stateManager.restoreState(syncState.stateRoot, syncState.etherBalance || "0");
+
     // Restore block hash history
     if (syncState.blockHashHistory) {
       this.blockHashHistory.clear();
@@ -379,17 +382,17 @@ export class EventProcessor {
       const decoded = this.rollupsInterface.parseTransaction({ data: l1Tx.data });
 
       if (decoded && decoded.name === 'executeL2TX') {
-        // This is a direct L2TX execution — an already-signed L2 transaction
-        const rlpEncodedTx = decoded.args[1]; // Second arg is rlpEncodedTx
-        console.log(`[EventProcessor] Decoded executeL2TX, sending to L2 EVM...`);
+        // This is a direct L2TX execution — an already-signed L2 transaction.
+        // Instead of sending the raw signed tx (which pays gas to reth's random
+        // coinbase, causing non-determinism), we decode it and replay via the
+        // operator's zero-gas system call.
+        const rlpEncodedTx = decoded.args[1];
+        const { Transaction } = await import("ethers");
+        const parsedTx = Transaction.from(rlpEncodedTx);
+        console.log(`[EventProcessor] Decoded executeL2TX: ${parsedTx.from?.slice(0, 10)}... -> ${parsedTx.to ? parsedTx.to.slice(0, 10) + '...' : 'CREATE'}, value=${parsedTx.value}`);
 
-        // Send the raw L2 transaction to local reth (auto-mines with --dev.block-time)
-        const txHash = await this.stateManager.sendRawTransaction(rlpEncodedTx);
-        console.log(`[EventProcessor] L2 tx sent: ${txHash}`);
-
-        // Wait for auto-mining to include the transaction
-        const receipt = await this.stateManager.waitForReceipt(txHash);
-        console.log(`[EventProcessor] L2 tx mined in block ${receipt.blockNumber}`);
+        const txHash = await this.stateManager.replayL2TX(parsedTx);
+        console.log(`[EventProcessor] L2TX replayed: ${txHash}`);
       } else {
         // This is an L1→L2 call via L2Proxy (L1 user called proxy on L1)
         // We replay it on L2 using system calls + proxy deployment

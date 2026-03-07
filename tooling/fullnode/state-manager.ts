@@ -270,6 +270,7 @@ export class StateManager {
         "--authrpc.port", authRpcPort.toString(), // Unique auth RPC port per instance
         "--txpool.minimal-protocol-fee", "0",   // Allow 0-gas txs for deterministic state
         "--txpool.minimum-priority-fee", "0",   // No minimum tip required
+        "--dev.mnemonic", "test test test test test test test test test test test junk",  // Fixed mnemonic = same coinbase across instances
       ],
       {
         stdio: ["ignore", "ignore", "pipe"],
@@ -444,6 +445,31 @@ export class StateManager {
     }
     const blockHex = await this.l2Provider.send("eth_blockNumber", []);
     return parseInt(blockHex, 16);
+  }
+
+  /**
+   * Roll back the L2 EVM to a specific block number.
+   * Stops reth, unwinds to the target block, and restarts reth.
+   * Used to undo simulation state changes that shouldn't persist.
+   */
+  async rollbackToBlock(targetBlock: number): Promise<void> {
+    const currentBlock = await this.getL2BlockNumber();
+    if (currentBlock <= targetBlock) {
+      return; // Nothing to rollback
+    }
+    console.log(`[StateManager] Rolling back L2 from block ${currentBlock} to ${targetBlock}...`);
+    await this.stopEngine();
+    try {
+      await this.unwindToBlock(targetBlock);
+    } catch (e: any) {
+      // Unwind can fail if simulation blocks weren't persisted to reth's DB
+      // (e.g. target block > reth's latest persisted block after stop).
+      // The unpersisted blocks are already gone after stopEngine(), so this is safe to ignore.
+      console.warn(`[StateManager] Unwind failed (non-fatal): ${e.message}`);
+    }
+    await this.startEngine();
+    const newBlock = await this.getL2BlockNumber();
+    console.log(`[StateManager] Rollback complete, now at block ${newBlock}`);
   }
 
   /**
@@ -722,6 +748,38 @@ export class StateManager {
     }
 
     return tx.hash;
+  }
+
+  /**
+   * Replay an L2TX via zero-gas operator system call.
+   * Decodes the signed tx and re-sends its effects (to, data, value) from the operator
+   * with zero gas price. This avoids non-determinism from reth's random coinbase.
+   * For contract creates (to=null), sends to address(0) with the creation bytecode as data.
+   */
+  async replayL2TX(parsedTx: { to: string | null; data: string; value: bigint }): Promise<string> {
+    if (parsedTx.to) {
+      // Regular call
+      return this.systemCall(parsedTx.to, parsedTx.data, "0x" + parsedTx.value.toString(16));
+    } else {
+      // Contract creation — use CREATE2 or just send the initcode via operator
+      // We send a CREATE tx from the operator (to=null)
+      if (!this.operatorWallet) {
+        throw new Error("Operator wallet not initialized");
+      }
+      const tx = await this.operatorWallet.sendTransaction({
+        data: parsedTx.data,
+        value: parsedTx.value,
+        gasLimit: 10_000_000n,
+        maxFeePerGas: 0n,
+        maxPriorityFeePerGas: 0n,
+        type: 2,
+      });
+      const receipt = await this.waitForReceipt(tx.hash);
+      if (receipt.status === 0) {
+        throw new Error(`L2TX CREATE reverted (tx: ${tx.hash})`);
+      }
+      return tx.hash;
+    }
   }
 
   /**
