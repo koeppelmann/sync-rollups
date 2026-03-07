@@ -1,5 +1,5 @@
 {
-  "name": "sync-rollups-builder",
+  "name": "sync-rollups-tooling",
   "version": "0.1.0",
   "description": "Fullnode and Builder for sync-rollups contracts",
   "type": "module",

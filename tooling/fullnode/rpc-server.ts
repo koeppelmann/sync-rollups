@@ -243,25 +243,28 @@ export class RpcServer {
             break;
 
           case "syncrollups_takeSnapshot":
-            result = await this.stateManager.takeSnapshot();
+            // Returns current block number as hex string (replaces anvil_snapshot)
+            result = await this.stateManager.saveHead();
             break;
 
           case "syncrollups_revertToSnapshot":
-            const snapshotId = params?.[0] as string;
-            if (!snapshotId) {
-              throw new Error("Missing snapshotId parameter");
+            // Accepts a block number hex string (replaces anvil_revert)
+            const blockHex = params?.[0] as string;
+            if (!blockHex) {
+              throw new Error("Missing block number parameter");
             }
-            await this.stateManager.revertToSnapshot(snapshotId);
+            await this.stateManager.revertToBlock(blockHex);
             result = true;
             break;
 
           case "syncrollups_simulateL1Call":
-            // Simulate an L1→L2 call (used by /prepare-l1-call endpoint)
+            // Execute an L1→L2 call on the builder's L2 (used by /prepare-l1-call endpoint)
             const callParams = params?.[0] as {
               from: string;
               to: string;
               value: string;
               data: string;
+              originalSender?: string;
             };
             if (!callParams) {
               throw new Error("Missing call parameters");
@@ -300,195 +303,259 @@ export class RpcServer {
   }
 
   /**
-   * Simulate an L1→L2 call
-   * Impersonates the proxy address and executes on Anvil
+   * Execute an L1→L2 call on the builder's private L2 and return the actual
+   * post-execution state root.
+   *
+   * This MODIFIES the L2 state (not read-only). The builder's fullnode
+   * pre-executes the call so the planner can include the correct newState
+   * in the execution plan loaded on L1. When the L1 event is later replayed,
+   * the event processor detects the L2 state already matches and skips
+   * re-execution.
    */
   private async simulateL1ToL2Call(params: {
     from: string;
     to: string;
     value: string;
     data: string;
+    originalSender?: string;
   }): Promise<{
     returnData: string;
     failed: boolean;
     stateDeltas: { rollupId: string; currentState: string; newState: string; etherDelta: string }[];
     newState: string;
   }> {
-    const provider = this.stateManager.getL2Provider();
     const currentState = this.stateManager.getStateRoot();
     const rollupId = this.stateManager.getRollupId();
 
-    // Take snapshot before simulation
-    const snapshotId = await this.stateManager.takeSnapshot();
+    const value = BigInt(params.value);
+    let returnData = "0x";
+    let failed = false;
+    let preSimBlock: number | null = null;
 
     try {
-      // Fund the from address (proxy) so it can send the value
-      const value = BigInt(params.value);
-      const fundAmount = value + BigInt("1000000000000000000"); // value + 1 ETH for gas
-      await provider.send("anvil_setBalance", [
-        params.from,
-        "0x" + fundAmount.toString(16),
+      // Ensure the source proxy is deployed on L2 using the original sender address.
+      // This is done BEFORE recording preSimBlock so the proxy deployment persists
+      // even if we rollback the simulation (event processor will also deploy it).
+      const originalSender = params.originalSender || params.from;
+      const l1ChainId = await this.getL1ChainId();
+      const proxyAddress = await this.stateManager.ensureProxyDeployed(
+        originalSender,
+        rollupId,
+        BigInt(l1ChainId)
+      );
+
+      // Record L2 block AFTER proxy deployment so we only rollback simulation blocks,
+      // not the proxy deployment itself. This prevents losing persisted state.
+      preSimBlock = await this.stateManager.getL2BlockNumber();
+
+      // Build the executeOnBehalf calldata
+      const { Interface, AbiCoder } = await import("ethers");
+      const proxyIface = new Interface([
+        "function executeOnBehalf(address destination, bytes calldata data) payable returns (bool, bytes)"
+      ]);
+      const execCalldata = proxyIface.encodeFunctionData("executeOnBehalf", [
+        params.to,
+        params.data,
       ]);
 
-      let returnData = "0x";
-      let failed = false;
-
+      // First, dry-run via eth_call to check if the inner call succeeds.
+      // Use state overrides to give the source proxy enough balance for the value,
+      // since in the real execution the operator funds the call via systemCall.
+      const provider = this.stateManager.getL2Provider();
+      const stateOverrides: Record<string, { balance: string }> = {};
+      if (value > 0n) {
+        // Give the proxy enough balance to cover the call value
+        stateOverrides[proxyAddress] = {
+          balance: "0x" + (value * 2n).toString(16),
+        };
+      }
+      const callArgs: any[] = [
+        {
+          from: proxyAddress,
+          to: proxyAddress,  // sourceProxy calls executeOnBehalf on itself
+          value: "0x" + value.toString(16),
+          data: execCalldata,
+        },
+        "latest",
+      ];
+      if (Object.keys(stateOverrides).length > 0) {
+        callArgs.push(stateOverrides);
+      }
+      let innerSuccess = false;
       try {
-        // First try as eth_call to get return data
-        returnData = await provider.send("eth_call", [
-          {
-            from: params.from,
-            to: params.to,
-            value: params.value,
-            data: params.data,
-          },
-          "latest",
-        ]);
+        const callResult = await provider.send("eth_call", callArgs);
 
-        // Then execute as transaction to get actual state changes
-        await provider.send("anvil_impersonateAccount", [params.from]);
+        // Decode the (bool success, bytes returnData) result
+        const decoded = AbiCoder.defaultAbiCoder().decode(
+          ["bool", "bytes"],
+          callResult
+        );
+        innerSuccess = decoded[0] as boolean;
+        returnData = decoded[1] as string;
+      } catch (dryRunErr: any) {
+        // eth_call reverted (e.g. L2Proxy reverts on failed value call)
+        // or returned data that can't be decoded — treat as failed
+        console.log(`[RpcServer] L1→L2 dry-run reverted: ${dryRunErr.message?.slice(0, 120)}`);
+        innerSuccess = false;
+      }
 
-        const txHash = await provider.send("eth_sendTransaction", [
-          {
-            from: params.from,
-            to: params.to,
-            value: params.value,
-            data: params.data,
-            gas: "0x1000000", // High gas limit
-          },
-        ]);
-
-        await provider.send("anvil_stopImpersonatingAccount", [params.from]);
-
-        // Mine the block
-        await this.stateManager.mineBlock();
-
-        // Check receipt
-        const receipt = await provider.getTransactionReceipt(txHash);
-        failed = receipt?.status !== 1;
-
-      } catch (e: any) {
-        console.error("[RpcServer] L1→L2 call simulation error:", e.message);
+      if (!innerSuccess) {
+        // Inner call would fail — mark as failed, don't execute state-changing call
+        console.log(`[RpcServer] L1→L2 inner call would fail, marking as failed`);
         failed = true;
-        // Try to extract revert data
-        if (e.data) {
-          returnData = e.data;
-        }
+      } else {
+        // Inner call succeeds — execute the state-changing call to get state root
+        const txHash = await this.stateManager.systemCall(
+          proxyAddress,
+          execCalldata,
+          "0x" + value.toString(16)
+        );
+        console.log(`[RpcServer] L1→L2 call simulated: ${txHash}`);
       }
-
-      // Get new state after execution
-      const newState = await this.stateManager.getActualStateRoot();
-
-      // Build state deltas
-      const stateDeltas: { rollupId: string; currentState: string; newState: string; etherDelta: string }[] = [];
-      if (newState !== currentState || value > 0n) {
-        stateDeltas.push({
-          rollupId: "0x" + rollupId.toString(16),
-          currentState,
-          newState,
-          etherDelta: "0x" + value.toString(16), // Positive = ETH deposited
-        });
+    } catch (e: any) {
+      console.error("[RpcServer] L1→L2 call execution error:", e.message);
+      failed = true;
+      if (e.data) {
+        returnData = e.data;
       }
-
-      return {
-        returnData,
-        failed,
-        stateDeltas,
-        newState,
-      };
-
-    } finally {
-      // Revert to snapshot (simulation only, don't persist)
-      await this.stateManager.revertToSnapshot(snapshotId);
     }
+
+    // Get the actual L2 state root after execution
+    const newState = failed
+      ? currentState
+      : await this.stateManager.getActualStateRoot();
+
+    // Rollback the L2 EVM to undo simulation state changes.
+    // The event processor will replay these operations when the L1 event arrives,
+    // producing the same state root on ALL fullnodes (not just the builder).
+    if (preSimBlock !== null) {
+      try {
+        await this.stateManager.rollbackToBlock(preSimBlock);
+      } catch (e: any) {
+        console.error(`[RpcServer] Failed to rollback simulation: ${e.message}`);
+      }
+    }
+
+    const stateDeltas: { rollupId: string; currentState: string; newState: string; etherDelta: string }[] = [];
+    stateDeltas.push({
+      rollupId: "0x" + rollupId.toString(16),
+      currentState,
+      newState,
+      etherDelta: "0x0", // etherDelta is 0 for L1→L2 calls (L2Proxy.depositEther handles it)
+    });
+
+    return {
+      returnData,
+      failed,
+      stateDeltas,
+      newState,
+    };
   }
 
   /**
-   * Simulate an action on the L2 EVM
-   * This is a simplified simulation - full implementation would trace calls
+   * Get the L1 chain ID (cached after first call)
+   */
+  private l1ChainIdCache: string | null = null;
+  private async getL1ChainId(): Promise<string> {
+    if (!this.l1ChainIdCache) {
+      const l1RpcUrl = this.eventProcessor?.getL1RpcUrl?.() ||
+        (this.stateManager as any).config?.l1RpcUrl;
+      if (l1RpcUrl) {
+        const { JsonRpcProvider } = await import("ethers");
+        const l1Provider = new JsonRpcProvider(l1RpcUrl);
+        const network = await l1Provider.getNetwork();
+        this.l1ChainIdCache = network.chainId.toString();
+      } else {
+        this.l1ChainIdCache = "31337"; // fallback for local dev
+      }
+    }
+    return this.l1ChainIdCache;
+  }
+
+  /**
+   * Simulate an action on the L2 EVM.
+   *
+   * For L2TX actions: Actually sends the raw transaction to reth (state-changing).
+   * This gives us the real post-execution state root, which is then included in
+   * the execution plan loaded on L1. Same pattern as simulateL1ToL2Call.
+   * Only the builder's private fullnode runs this, so state mutation is safe.
+   * When the L1 event is later replayed, the event processor detects that the
+   * L2 state already matches and skips re-execution.
+   *
+   * For CALL actions: Uses eth_call (read-only). CALL simulations are only used
+   * for return data; actual L1→L2 call execution goes through simulateL1ToL2Call.
    */
   private async simulateAction(action: Action): Promise<SimulationResult> {
     const provider = this.stateManager.getL2Provider();
     const currentState = this.stateManager.getStateRoot();
 
-    // Take snapshot before simulation
-    const snapshotId = await this.stateManager.takeSnapshot();
+    let success = true;
+    let error: string | undefined;
+    let returnData = "0x";
 
-    try {
-      let success = true;
-      let error: string | undefined;
-      let returnData = "0x";
-
-      if (action.actionType === ActionType.L2TX) {
-        // Execute L2 transaction
-        try {
-          const txHash = await provider.send("eth_sendRawTransaction", [
-            action.data,
-          ]);
-          await this.stateManager.mineBlock();
-          const receipt = await provider.getTransactionReceipt(txHash);
-          success = receipt?.status === 1;
-          if (!success) {
-            error = "Transaction reverted";
-          }
-        } catch (e: any) {
-          success = false;
-          error = e.message;
-        }
-      } else if (action.actionType === ActionType.CALL) {
-        // Simulate a call
-        try {
-          returnData = await provider.send("eth_call", [
-            {
-              from: action.sourceAddress,
-              to: action.destination,
-              value: "0x" + action.value.toString(16),
-              data: action.data,
-            },
-            "latest",
-          ]);
-        } catch (e: any) {
-          success = false;
-          error = e.message;
-        }
+    if (action.actionType === ActionType.L2TX) {
+      // Actually execute the L2TX on the builder's L2 (not read-only).
+      // We decode the signed tx and replay via zero-gas system call instead
+      // of sendRawTransaction, because reth --dev mode uses a random coinbase
+      // per instance and any non-zero gas fee would produce different state roots.
+      try {
+        const { Transaction } = await import("ethers");
+        const parsedTx = Transaction.from(action.data);
+        const txHash = await this.stateManager.replayL2TX(parsedTx);
+        console.log(`[RpcServer] L2TX simulated via system call: ${txHash}`);
+      } catch (e: any) {
+        success = false;
+        error = e.message;
       }
-
-      // Get new state after simulation
-      const newState = await this.stateManager.getActualStateRoot();
-
-      // Build state delta
-      const stateDeltas: StateDelta[] = [];
-      if (newState !== currentState) {
-        stateDeltas.push({
-          rollupId: action.rollupId,
-          currentState,
-          newState,
-          etherDelta: 0n, // Would need to track actual ETH changes
-        });
+    } else if (action.actionType === ActionType.CALL) {
+      // Simulate a call using eth_call (read-only, no state changes)
+      try {
+        returnData = await provider.send("eth_call", [
+          {
+            from: action.sourceAddress,
+            to: action.destination,
+            value: "0x" + action.value.toString(16),
+            data: action.data,
+          },
+          "latest",
+        ]);
+      } catch (e: any) {
+        success = false;
+        error = e.message;
       }
-
-      // Build next action (RESULT)
-      const nextAction: Action = {
-        actionType: ActionType.RESULT,
-        rollupId: action.rollupId,
-        destination: "0x0000000000000000000000000000000000000000",
-        value: 0n,
-        data: returnData,
-        failed: !success,
-        sourceAddress: "0x0000000000000000000000000000000000000000",
-        sourceRollup: 0n,
-        scope: [],
-      };
-
-      return {
-        nextAction,
-        stateDeltas,
-        success,
-        error,
-      };
-    } finally {
-      // Revert to snapshot (simulation only, don't persist changes)
-      await this.stateManager.revertToSnapshot(snapshotId);
     }
+
+    // Build state deltas
+    const stateDeltas: StateDelta[] = [];
+    if (success) {
+      // Read actual state root after execution
+      const actualNewState = await this.stateManager.getActualStateRoot();
+      stateDeltas.push({
+        rollupId: action.rollupId,
+        currentState,
+        newState: actualNewState,
+        etherDelta: 0n,
+      });
+    }
+
+    // Build next action (RESULT)
+    const nextAction: Action = {
+      actionType: ActionType.RESULT,
+      rollupId: action.rollupId,
+      destination: "0x0000000000000000000000000000000000000000",
+      value: 0n,
+      data: returnData,
+      failed: !success,
+      sourceAddress: "0x0000000000000000000000000000000000000000",
+      sourceRollup: 0n,
+      scope: [],
+    };
+
+    return {
+      nextAction,
+      stateDeltas,
+      success,
+      error,
+    };
   }
 }

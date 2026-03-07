@@ -27,6 +27,13 @@ export interface FullnodeConfig {
 
   // Polling interval for L1 events (ms)
   pollingInterval?: number;
+
+  // L2 genesis alloc — contract addresses to mirror on L2
+  l2ProxyImplAddress?: string; // L1 L2Proxy implementation address
+  contractsOutDir?: string;    // Path to sync-rollups/out/ for compiled bytecode
+
+  // Data directory for persistent state
+  dataDir?: string;
 }
 
 export class Fullnode {
@@ -45,6 +52,10 @@ export class Fullnode {
       initialStateRoot: config.initialStateRoot,
       l2ChainId: config.l2ChainId,
       l2EvmPort: config.l2EvmPort,
+      dataDir: config.dataDir,
+      rollupsAddress: config.rollupsAddress,
+      l2ProxyImplAddress: config.l2ProxyImplAddress,
+      contractsOutDir: config.contractsOutDir,
     };
     this.stateManager = new StateManager(stateConfig);
 
@@ -81,11 +92,31 @@ export class Fullnode {
     console.log(`Start block: ${this.config.startBlock}`);
     console.log("");
 
-    // Start Anvil for L2 EVM
-    console.log("[Fullnode] Starting L2 EVM (Anvil)...");
-    await this.stateManager.startAnvil();
+    // Start reth for L2 EVM
+    console.log("[Fullnode] Starting L2 EVM (reth)...");
+    await this.stateManager.startEngine();
 
-    // Start event processor (replays historical events)
+    // Check for persisted sync state (resume without full replay)
+    const syncState = this.stateManager.loadSyncState();
+    if (syncState) {
+      console.log(`[Fullnode] Found persisted state: block ${syncState.lastProcessedL1Block}, root ${syncState.stateRoot.slice(0, 10)}...`);
+
+      // Verify that the actual EVM state matches the persisted tracked state.
+      // If reth was restarted from genesis (e.g. data cleared), the EVM state
+      // won't match and we must replay from scratch instead of resuming.
+      const actualEvmState = await this.stateManager.getActualStateRoot();
+      if (actualEvmState === syncState.stateRoot) {
+        const hashCount = syncState.blockHashHistory?.length || 0;
+        const cpCount = syncState.checkpoints?.length || 0;
+        console.log(`[Fullnode] EVM state matches, resuming from block ${syncState.lastProcessedL1Block + 1} (${hashCount} block hashes, ${cpCount} checkpoints)`);
+        this.eventProcessor.setResumeState(syncState);
+      } else {
+        console.warn(`[Fullnode] EVM state mismatch: persisted ${syncState.stateRoot.slice(0, 10)}... vs actual ${actualEvmState.slice(0, 10)}...`);
+        console.warn(`[Fullnode] Discarding persisted state, replaying from block ${this.config.startBlock}`);
+      }
+    }
+
+    // Start event processor (replays historical events or resumes)
     console.log("[Fullnode] Starting event processor...");
     await this.eventProcessor.start();
 
@@ -116,7 +147,7 @@ export class Fullnode {
 
     this.eventProcessor.stop();
     await this.rpcServer.stop();
-    await this.stateManager.stopAnvil();
+    await this.stateManager.stopEngine();
 
     this.running = false;
     console.log("[Fullnode] Stopped");
@@ -172,6 +203,9 @@ async function main() {
       "0x0000000000000000000000000000000000000000000000000000000000000000"
     ),
     pollingInterval: parseInt(getArg("poll-interval", "2000")),
+    l2ProxyImplAddress: args.indexOf("--l2-proxy-impl") !== -1 ? getArg("l2-proxy-impl") : undefined,
+    contractsOutDir: args.indexOf("--contracts-out") !== -1 ? getArg("contracts-out") : undefined,
+    dataDir: args.indexOf("--data-dir") !== -1 ? getArg("data-dir") : undefined,
   };
 
   const fullnode = new Fullnode(config);

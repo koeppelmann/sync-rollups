@@ -113,8 +113,8 @@ stop_existing_services() {
   pkill -f "python3 -m http.server ${UI_PORT}" 2>/dev/null || true
   pkill -f "python -m http.server ${UI_PORT}" 2>/dev/null || true
   pkill -f "http.server ${UI_PORT} --directory ui" 2>/dev/null || true
-  pkill -f "anvil --port ${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
   sleep 2
 }
 
@@ -199,6 +199,15 @@ start_services() {
   log "Building services..."
   npm run build >/dev/null
 
+  # Read L2Proxy implementation address from Rollups contract
+  local L2PROXY_IMPL
+  L2PROXY_IMPL="$(cast call "${ROLLUPS_ADDR}" "l2ProxyImplementation()(address)" --rpc-url "${L1_RPC_URL}")"
+  log "L2Proxy impl: ${L2PROXY_IMPL}"
+
+  # Path to compiled contract artifacts
+  local CONTRACTS_OUT
+  CONTRACTS_OUT="$(realpath "$(dirname "$0")/../out")"
+
   log "Starting PUBLIC fullnode (${PUBLIC_L2_EVM_PORT}/${PUBLIC_FULLNODE_RPC_PORT})..."
   nohup "${NODE_BIN}" dist/fullnode/fullnode.js -- \
     --rollups "${ROLLUPS_ADDR}" \
@@ -208,6 +217,8 @@ start_services() {
     --l2-port "${PUBLIC_L2_EVM_PORT}" \
     --rpc-port "${PUBLIC_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
+    --l2-proxy-impl "${L2PROXY_IMPL}" \
+    --contracts-out "${CONTRACTS_OUT}" \
     > logs/fullnode-public.log 2>&1 &
   echo $! > logs/pid-fullnode-public.txt
   wait_for_rpc_method "${PUBLIC_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 120 || {
@@ -224,6 +235,8 @@ start_services() {
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
+    --l2-proxy-impl "${L2PROXY_IMPL}" \
+    --contracts-out "${CONTRACTS_OUT}" \
     > logs/fullnode-builder.log 2>&1 &
   echo $! > logs/pid-fullnode-builder.txt
   wait_for_rpc_method "${BUILDER_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 120 || {

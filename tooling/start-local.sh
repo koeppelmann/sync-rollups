@@ -26,6 +26,7 @@ pkill -f "builder/builder.ts" 2>/dev/null || true
 pkill -f "rpc-proxy.ts" 2>/dev/null || true
 pkill -f "l2-rpc-proxy.ts" 2>/dev/null || true
 pkill -f "python3 -m http.server 8080" 2>/dev/null || true
+pkill -f "reth node" 2>/dev/null || true
 lsof -i :$L1_RPC_PORT 2>/dev/null | grep LISTEN | awk '{print $2}' | xargs kill 2>/dev/null || true
 sleep 2
 
@@ -53,19 +54,36 @@ echo "  AdminZKVerifier: $VERIFIER_ADDR"
 
 # Deploy Rollups
 echo "  Deploying Rollups..."
-cd ../sync-rollups
+cd ..
 ROLLUPS_BYTECODE=$(forge inspect Rollups bytecode)
 ENCODED_ARGS=$(cast abi-encode "constructor(address,uint256)" "$VERIFIER_ADDR" 0)
 ROLLUPS_ADDR=$(cast send --private-key "$ADMIN_KEY" --rpc-url http://localhost:$L1_RPC_PORT --create "${ROLLUPS_BYTECODE}${ENCODED_ARGS:2}" --json | jq -r '.contractAddress')
 echo "  Rollups: $ROLLUPS_ADDR"
-cd ../sync-rollups-builder
+cd tooling
 
-# Create rollup 0
-echo "  Creating rollup 0..."
+# Read L2Proxy implementation address from Rollups contract (deployed in constructor)
+L2PROXY_IMPL=$(cast call "$ROLLUPS_ADDR" "l2ProxyImplementation()(address)" --rpc-url http://localhost:$L1_RPC_PORT)
+echo "  L2Proxy impl: $L2PROXY_IMPL"
+
+# Path to compiled contract artifacts
+CONTRACTS_OUT=$(realpath ../out)
+
+# Compute L2 genesis state root (operator key is derived deterministically from
+# rollupsAddress + rollupId + chainId — no secrets needed)
+echo ""
+echo "Computing L2 genesis state root..."
+GENESIS_STATE=$(npx tsx scripts/compute-genesis-root.ts \
+  --rollups "$ROLLUPS_ADDR" \
+  --l2-proxy-impl "$L2PROXY_IMPL" \
+  --contracts-out "$CONTRACTS_OUT")
+echo "  Genesis state root: $GENESIS_STATE"
+
+# Create rollup 0 with the correct genesis state
+echo "  Creating rollup 0 (initialState = genesis state root)..."
 cast send --private-key "$ADMIN_KEY" \
   "$ROLLUPS_ADDR" \
   "createRollup(bytes32,bytes32,address)" \
-  "0x0000000000000000000000000000000000000000000000000000000000000000" \
+  "$GENESIS_STATE" \
   "0x0000000000000000000000000000000000000000000000000000000000000001" \
   "$ADMIN" \
   --rpc-url http://localhost:$L1_RPC_PORT > /dev/null
@@ -73,6 +91,7 @@ cast send --private-key "$ADMIN_KEY" \
 DEPLOYMENT_BLOCK=$(cast block-number --rpc-url http://localhost:$L1_RPC_PORT)
 
 # Start public fullnode (read-only for users/UI)
+# No private keys needed — operator key is derived from public config
 echo "Starting PUBLIC fullnode (read-only)..."
 npm exec tsx fullnode/fullnode.ts -- \
   --rollups "$ROLLUPS_ADDR" \
@@ -81,9 +100,11 @@ npm exec tsx fullnode/fullnode.ts -- \
   --start-block "$DEPLOYMENT_BLOCK" \
   --l2-port $PUBLIC_L2_EVM_PORT \
   --rpc-port $PUBLIC_FULLNODE_RPC_PORT \
-  --initial-state 0x0000000000000000000000000000000000000000000000000000000000000000 \
+  --initial-state "$GENESIS_STATE" \
+  --l2-proxy-impl "$L2PROXY_IMPL" \
+  --contracts-out "$CONTRACTS_OUT" \
   > logs/fullnode-public.log 2>&1 &
-sleep 4
+sleep 10  # reth needs more startup time than Anvil
 
 # Start private builder fullnode (builder-only)
 echo "Starting PRIVATE builder fullnode..."
@@ -94,9 +115,11 @@ npm exec tsx fullnode/fullnode.ts -- \
   --start-block "$DEPLOYMENT_BLOCK" \
   --l2-port $BUILDER_L2_EVM_PORT \
   --rpc-port $BUILDER_FULLNODE_RPC_PORT \
-  --initial-state 0x0000000000000000000000000000000000000000000000000000000000000000 \
+  --initial-state "$GENESIS_STATE" \
+  --l2-proxy-impl "$L2PROXY_IMPL" \
+  --contracts-out "$CONTRACTS_OUT" \
   > logs/fullnode-builder.log 2>&1 &
-sleep 4
+sleep 10  # reth needs more startup time than Anvil
 
 # Start builder (wired only to private builder fullnode)
 echo "Starting builder..."
@@ -145,6 +168,9 @@ echo "  AdminZKVerifier: $VERIFIER_ADDR"
 echo "  Rollups:         $ROLLUPS_ADDR"
 echo "  Deployment block: $DEPLOYMENT_BLOCK"
 echo ""
+echo "L2 Genesis:"
+echo "  State root: $GENESIS_STATE"
+echo ""
 echo "Services:"
 echo "  L1 Anvil:               http://localhost:$L1_RPC_PORT"
 echo "  L1 RPC Proxy:           http://localhost:$L1_PROXY_PORT  ← Connect wallet here for L1"
@@ -168,4 +194,4 @@ echo "Note: L2 balances start at 0. Bridge ETH from L1 to get funds on L2."
 echo ""
 echo "Logs: ./logs/"
 echo ""
-echo "To stop: pkill -f 'fullnode|builder|anvil|http.server|rpc-proxy'"
+echo "To stop: pkill -f 'fullnode|builder|reth|anvil|http.server|rpc-proxy'"

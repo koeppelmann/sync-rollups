@@ -105,7 +105,7 @@ restart_private_builder_stack() {
   pkill -f "dist/builder/builder.js" 2>/dev/null || true
   pkill -f "dist/builder/l2-rpc-proxy.js" 2>/dev/null || true
   pkill -f "dist/fullnode/fullnode.js -- --rollups ${ROLLUPS_ADDR} --rollup-id 0 --l1-rpc ${L1_RPC_URL} --start-block ${DEPLOYMENT_BLOCK} --l2-port ${BUILDER_L2_EVM_PORT} --rpc-port ${BUILDER_FULLNODE_RPC_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
   sleep 2
 
   nohup "${NODE_BIN}" dist/fullnode/fullnode.js -- \
@@ -116,6 +116,8 @@ restart_private_builder_stack() {
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
+    --l2-proxy-impl "${L2_PROXY_IMPL}" \
+    --contracts-out "../out" \
     > logs/fullnode-builder.log 2>&1 &
   echo $! > logs/pid-fullnode-builder.txt
   wait_for_rpc_method "${BUILDER_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 80 || {
@@ -210,8 +212,8 @@ stop_existing_services() {
   pkill -f "l2-rpc-proxy.ts" 2>/dev/null || true
   pkill -f "python3 -m http.server ${UI_PORT}" 2>/dev/null || true
   pkill -f "anvil --port ${L1_RPC_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
   sleep 2
 }
 
@@ -219,7 +221,7 @@ start_services() {
   log "Building contracts and services..."
   forge build >/dev/null
   (
-    cd ../sync-rollups
+    cd ..
     forge build >/dev/null
   )
   npm run build >/dev/null
@@ -227,6 +229,8 @@ start_services() {
   log "Starting L1 Anvil on ${L1_RPC_PORT}..."
   # Fresh setup intentionally starts a new L1 chain.
   rm -f "${L1_ACTIVE_STATE_FILE}"
+  # Clean L2 state directories from previous runs to prevent stale reth data.
+  rm -rf state/l2-*/reth state/l2-*/sync-state.json
   nohup anvil \
     --port "${L1_RPC_PORT}" \
     --state "${L1_ACTIVE_STATE_FILE}" \
@@ -239,34 +243,42 @@ start_services() {
     exit 1
   }
 
-  log "Deploying AdminZKVerifier..."
-  local verifier_bytecode
-  verifier_bytecode="$(forge inspect AdminZKVerifier bytecode)"
-  local encoded_admin
-  encoded_admin="$(cast abi-encode "constructor(address)" "${ADMIN_ADDR}")"
-  VERIFIER_ADDR="$(
-    cast send --private-key "${ADMIN_KEY}" \
+  log "Deploying contracts via Deploy.s.sol..."
+  local deploy_output
+  deploy_output="$(
+    cd ..
+    PRIVATE_KEY="${ADMIN_KEY}" STARTING_ROLLUP_ID=0 \
+      forge script script/Deploy.s.sol:Deploy \
       --rpc-url "${L1_RPC_URL}" \
-      --create "${verifier_bytecode}${encoded_admin:2}" \
-      --json | jq -r '.contractAddress'
+      --broadcast \
+      --private-key "${ADMIN_KEY}" \
+      2>&1
   )"
-  log "AdminZKVerifier: ${VERIFIER_ADDR}"
+  echo "${deploy_output}"
 
-  log "Deploying Rollups..."
-  local rollups_bytecode
-  rollups_bytecode="$(
-    cd ../sync-rollups
-    forge inspect Rollups bytecode
-  )"
-  local encoded_rollups_args
-  encoded_rollups_args="$(cast abi-encode "constructor(address,uint256)" "${VERIFIER_ADDR}" 0)"
-  ROLLUPS_ADDR="$(
-    cast send --private-key "${ADMIN_KEY}" \
-      --rpc-url "${L1_RPC_URL}" \
-      --create "${rollups_bytecode}${encoded_rollups_args:2}" \
-      --json | jq -r '.contractAddress'
-  )"
+  VERIFIER_ADDR="$(echo "${deploy_output}" | rg 'MockZKVerifier deployed at:' | rg -o '0x[0-9a-fA-F]{40}')"
+  ROLLUPS_ADDR="$(echo "${deploy_output}" | rg 'Rollups deployed at:' | rg -o '0x[0-9a-fA-F]{40}')"
+  L2_PROXY_IMPL="$(echo "${deploy_output}" | rg 'L2Proxy implementation:' | rg -o '0x[0-9a-fA-F]{40}')"
+  if [ -z "${VERIFIER_ADDR}" ] || [ -z "${ROLLUPS_ADDR}" ] || [ -z "${L2_PROXY_IMPL}" ]; then
+    echo "Error: could not parse deployment addresses"
+    exit 1
+  fi
+  log "MockZKVerifier: ${VERIFIER_ADDR}"
   log "Rollups: ${ROLLUPS_ADDR}"
+  log "L2Proxy impl: ${L2_PROXY_IMPL}"
+
+  log "Computing genesis state root for reth..."
+  INITIAL_STATE="$(
+    npx tsx scripts/compute-genesis-root.ts \
+      --rollups "${ROLLUPS_ADDR}" \
+      --l2-proxy-impl "${L2_PROXY_IMPL}" \
+      --contracts-out ../out
+  )"
+  if [ -z "${INITIAL_STATE}" ]; then
+    echo "Error: could not compute genesis state root"
+    exit 1
+  fi
+  log "Genesis state root: ${INITIAL_STATE}"
 
   log "Creating rollup 0..."
   cast send --private-key "${ADMIN_KEY}" \
@@ -276,24 +288,6 @@ start_services() {
     "${VK_PLACEHOLDER}" \
     "${ADMIN_ADDR}" \
     --rpc-url "${L1_RPC_URL}" >/dev/null
-
-  log "Deploying advanced Counter on L1..."
-  local l1_counter_bytecode
-  l1_counter_bytecode="$(jq -r '.bytecode.object' out/Counter.sol/Counter.json)"
-  if [ -z "${l1_counter_bytecode}" ] || [ "${l1_counter_bytecode}" = "null" ]; then
-    echo "Error: Counter bytecode not found"
-    exit 1
-  fi
-  if [[ "${l1_counter_bytecode}" != 0x* ]]; then
-    l1_counter_bytecode="0x${l1_counter_bytecode}"
-  fi
-  L1_COUNTER_ADDR="$(
-    cast send --private-key "${ADMIN_KEY}" \
-      --rpc-url "${L1_RPC_URL}" \
-      --create "${l1_counter_bytecode}" \
-      --json | jq -r '.contractAddress'
-  )"
-  log "L1 Counter: ${L1_COUNTER_ADDR}"
 
   DEPLOYMENT_BLOCK="$(cast block-number --rpc-url "${L1_RPC_URL}")"
   log "Deployment block: ${DEPLOYMENT_BLOCK}"
@@ -307,7 +301,6 @@ ADMIN_KEY=${ADMIN_KEY}
 ROLLUP_ID=0
 L1_RPC=${L1_RPC_URL}
 L2_CHAIN_ID=10200200
-L1_COUNTER_ADDRESS=${L1_COUNTER_ADDR}
 EOF
 
   log "Starting PUBLIC fullnode (9546/9547)..."
@@ -319,6 +312,8 @@ EOF
     --l2-port "${PUBLIC_L2_EVM_PORT}" \
     --rpc-port "${PUBLIC_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
+    --l2-proxy-impl "${L2_PROXY_IMPL}" \
+    --contracts-out "../out" \
     > logs/fullnode-public.log 2>&1 &
   echo $! > logs/pid-fullnode-public.txt
   wait_for_rpc_method "${PUBLIC_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 80 || {
@@ -335,6 +330,8 @@ EOF
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
+    --l2-proxy-impl "${L2_PROXY_IMPL}" \
+    --contracts-out "../out" \
     > logs/fullnode-builder.log 2>&1 &
   echo $! > logs/pid-fullnode-builder.txt
   wait_for_rpc_method "${BUILDER_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 80 || {
@@ -541,11 +538,6 @@ print_summary() {
   builder_root="$(echo "${builder_status}" | jq -r '.fullnodeStateRoot')"
   local builder_l1_root
   builder_l1_root="$(echo "${builder_status}" | jq -r '.l1StateRoot')"
-  local l1_counter_count
-  l1_counter_count="$(cast call "${L1_COUNTER_ADDR}" "getCount()(uint256)" --rpc-url "${L1_RPC_URL}")"
-  local l1_counter_last_caller
-  l1_counter_last_caller="$(cast call "${L1_COUNTER_ADDR}" "lastCaller()(address)" --rpc-url "${L1_RPC_URL}")"
-
   echo ""
   echo "============================================"
   echo "Fresh setup complete"
@@ -559,15 +551,6 @@ print_summary() {
   echo "  Funding tx:       ${FUND_L1_TX_HASH}"
   echo "  L1 proxy used:    ${FUND_PROXY_ADDR}"
   echo "  L2 balance (wei): ${L2_FUNDED_BALANCE_WEI}"
-  echo ""
-  echo "Counter deployment:"
-  echo "  L1 counter addr:  ${L1_COUNTER_ADDR}"
-  echo "  L1 getCount():    ${l1_counter_count}"
-  echo "  L1 lastCaller():  ${l1_counter_last_caller}"
-  echo "  Counter address:  ${COUNTER_ADDR}"
-  echo "  L1 tx hash:       ${COUNTER_L1_TX_HASH}"
-  echo "  getCount():       ${COUNTER_COUNT}"
-  echo "  lastCaller():     ${COUNTER_LAST_CALLER}"
   echo ""
   echo "Sync verification:"
   echo "  Public fullnode syncrollups_isSynced: ${public_sync}"
@@ -587,12 +570,11 @@ print_summary() {
   echo "  Builder:          ${BUILDER_URL}"
   echo ""
   echo "Logs: ./logs/"
-  echo "To stop: pkill -f 'dist/fullnode/fullnode.js|dist/builder/builder.js|dist/builder/rpc-proxy.js|dist/builder/l2-rpc-proxy.js|anvil --port ${L1_RPC_PORT}|anvil --port ${PUBLIC_L2_EVM_PORT}|anvil --port ${BUILDER_L2_EVM_PORT}|http.server ${UI_PORT}'"
+  echo "To stop: pkill -f 'dist/fullnode/fullnode.js|dist/builder/builder.js|dist/builder/rpc-proxy.js|dist/builder/l2-rpc-proxy.js|anvil --port ${L1_RPC_PORT}|reth.*${PUBLIC_L2_EVM_PORT}|reth.*${BUILDER_L2_EVM_PORT}|http.server ${UI_PORT}'"
 }
 
 # ---------- Run ----------
 stop_existing_services
 start_services
 fund_l2_account_via_l1_to_l2
-deploy_advanced_counter_on_l2
 print_summary

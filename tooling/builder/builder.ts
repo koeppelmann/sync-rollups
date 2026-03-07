@@ -57,6 +57,7 @@ interface SubmitRequest {
 interface SubmitResponse {
   success: boolean;
   l1TxHash?: string;
+  l2TxHash?: string;   // Hash of the user's L2 transaction (for L2 proxy to return to ethers)
   executionsLoaded?: number;
   stateRoot?: string;
   error?: string;
@@ -273,8 +274,10 @@ export class Builder {
    * Get builder status
    */
   private async getStatus(): Promise<StatusResponse> {
+    // Use tracked-state sync check (not EVM state) to avoid false "not synced"
+    // during L1→L2 call preparation when the builder's L2 EVM is temporarily ahead.
+    const synced = await this.planner.isTrackedStateSynced();
     const states = await this.planner.getStates();
-    const synced = states.fullnodeState === states.l1State.stateRoot;
 
     return {
       rollupId: this.config.rollupId.toString(),
@@ -293,8 +296,10 @@ export class Builder {
 
     console.log(`[Builder] Received ${sourceChain} transaction`);
 
-    // Check sync status
-    const synced = await this.planner.isFullnodeSynced();
+    // Check sync status (tracked state only — not the EVM state check).
+    // The builder's L2 EVM may be temporarily ahead during L1→L2 call preparation.
+    // See isTrackedStateSynced() for details.
+    const synced = await this.planner.isTrackedStateSynced();
     if (!synced) {
       return {
         success: false,
@@ -396,9 +401,14 @@ export class Builder {
     // Get new state
     const rollupData = await this.rollupsContract.rollups(this.config.rollupId);
 
+    // Compute the L2 tx hash from the signed transaction — this is what ethers
+    // expects as the result of eth_sendRawTransaction on the L2 proxy.
+    const l2TxHash = Transaction.from(signedTx).hash;
+
     return {
       success: true,
       l1TxHash: execReceipt.hash,
+      l2TxHash: l2TxHash || undefined,
       executionsLoaded: plan.executions.length,
       stateRoot: rollupData.stateRoot,
     };
@@ -547,8 +557,9 @@ export class Builder {
     try {
       this.prunePrepareL1Cache();
 
-      // Check sync status
-      const synced = await this.planner.isFullnodeSynced();
+      // Check sync status (tracked state only — the builder's L2 EVM may be
+      // temporarily ahead from a previous simulateL1ToL2Call pre-execution).
+      const synced = await this.planner.isTrackedStateSynced();
       if (!synced) {
         return {
           success: false,
@@ -617,7 +628,8 @@ export class Builder {
         data,
         BigInt(value),
         proxyAddress,
-        sourceProxyAddress
+        sourceProxyAddress,
+        sourceAddress   // Original L1 sender for L2 proxy deployment
       );
       console.log(`[Builder] Planned ${plan.executions.length} execution(s)`);
 
@@ -645,8 +657,9 @@ export class Builder {
       await this.planner.notifyExecutions(plan.executions);
       console.log("[Builder] Fullnode notified");
 
-      // 6. Load executions on L1
-      const l1TxHash = await this.loadExecutionsOnL1(plan.executions, proof);
+      // 6. Load executions on L1 (get fresh nonce in case deployProxy used one)
+      const nonce = await this.adminWallet.getNonce();
+      const l1TxHash = await this.loadExecutionsOnL1(plan.executions, proof, nonce);
       console.log(`[Builder] Executions loaded on L1: ${l1TxHash}`);
 
       this.prepareL1Cache.set(prepareCacheKey, {

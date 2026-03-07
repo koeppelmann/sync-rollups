@@ -310,7 +310,8 @@ export class ExecutionPlanner {
     callData: string,
     value: bigint,
     targetProxyAddress: string, // L1 proxy representing the L2 target
-    sourceProxyAddress: string  // L2 proxy representing the original L1 caller
+    sourceProxyAddress: string, // L2 proxy representing the original L1 caller
+    originalSender: string      // Original L1 sender address (for L2 proxy deployment)
   ): Promise<ExecutionPlan> {
     const executions: Execution[] = [];
 
@@ -334,12 +335,13 @@ export class ExecutionPlanner {
     const rootActionHash = this.computeActionHash(callAction);
     console.log(`[Planner] Action hash: ${rootActionHash.slice(0, 18)}...`);
 
-    // Simulate the L1→L2 call
+    // Simulate (actually pre-execute) the L1→L2 call on the builder's L2
     const simulation = await this.simulateL1ToL2Call(
       l2Target,
       callData,
       value,
-      sourceProxyAddress
+      sourceProxyAddress,
+      originalSender
     );
     console.log(`[Planner] Simulation success: ${simulation.success}, returnData: ${simulation.returnData.slice(0, 18)}...`);
 
@@ -392,7 +394,8 @@ export class ExecutionPlanner {
     destination: string,
     data: string,
     value: bigint,
-    fromProxy: string
+    fromProxy: string,
+    originalSender: string
   ): Promise<{
     returnData: string;
     failed: boolean;
@@ -406,6 +409,7 @@ export class ExecutionPlanner {
         to: destination,
         value: "0x" + value.toString(16),
         data: data,
+        originalSender: originalSender,
       }]);
 
       return {
@@ -512,10 +516,33 @@ export class ExecutionPlanner {
   }
 
   /**
-   * Check if fullnode is synced
+   * Check if fullnode is synced (comprehensive — includes EVM state check).
+   * Use isTrackedStateSynced() for builder operations that only need to know
+   * whether the fullnode has processed all L1 events.
    */
   async isFullnodeSynced(): Promise<boolean> {
     return await this.fullnodeProvider.send("syncrollups_isSynced", []);
+  }
+
+  /**
+   * Check if the fullnode's tracked state matches L1 (does NOT check actual EVM state).
+   *
+   * The builder's L2 EVM may be temporarily ahead of L1 during L1→L2 call
+   * preparation (simulateL1ToL2Call pre-executes on the builder's L2 to obtain
+   * the correct post-execution state root). This divergence is self-healing:
+   * once the user's L1 tx is mined and the fullnode replays the event, the
+   * event processor detects "L2 state already matches" and converges.
+   *
+   * For builder operations, we only need to know that the fullnode has processed
+   * all L1 events — not that the EVM state matches. Using the comprehensive
+   * isSynced() would block builder operations during the preparation window.
+   */
+  async isTrackedStateSynced(): Promise<boolean> {
+    const [trackedState, l1State] = await Promise.all([
+      this.fullnodeProvider.send("syncrollups_getStateRoot", []),
+      this.fullnodeProvider.send("syncrollups_getL1State", []),
+    ]);
+    return trackedState === l1State.stateRoot;
   }
 
   /**

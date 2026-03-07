@@ -189,32 +189,64 @@ async function handleSendRawTransaction(
     const tx = Transaction.from(signedTx);
     log("L1Proxy", `Intercepted tx from ${tx.from} to ${tx.to}`);
     log("L1Proxy", `  Value: ${ethers.formatEther(tx.value)} ETH`);
-    log("L1Proxy", `  Routing through builder...`);
 
     // Check if we have a hint for the destination (L2 target for direct calls)
     const l2Target = tx.to ? proxyToL2Cache.get(tx.to.toLowerCase()) : null;
 
-    // Build hints object
-    const hints: BuilderSubmitRequest["hints"] = {};
     if (l2Target) {
-      hints.l2TargetAddress = l2Target;
-      hints.description = `L1→L2 transaction to ${l2Target}`;
+      // Route through builder — builder needs to prepare L1→L2 execution
+      log("L1Proxy", `  Hint found: L2 target ${l2Target}, routing through builder...`);
+
+      const hints: BuilderSubmitRequest["hints"] = {
+        l2TargetAddress: l2Target,
+        description: `L1→L2 transaction to ${l2Target}`,
+      };
+
+      const result = await submitToBuilder({
+        signedTx,
+        hints,
+        sourceChain: "L1",
+      });
+
+      if (!result.success) {
+        log("L1Proxy", `  Builder rejected: ${result.error}`);
+        return {
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32000,
+            message: result.error || "Builder rejected transaction",
+          },
+        };
+      }
+
+      log("L1Proxy", `  Builder accepted: ${result.l1TxHash}`);
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: result.l1TxHash,
+      };
+    } else {
+      // No hint — forward directly to L1 node.
+      // This handles the common case where /prepare-l1-call already loaded
+      // executions on L1. The user's tx just needs to reach Anvil directly.
+      log("L1Proxy", `  No hint, forwarding directly to L1...`);
+
+      const rpcResult = await forwardToRpc({
+        jsonrpc: "2.0",
+        method: "eth_sendRawTransaction",
+        params: [signedTx],
+        id,
+      });
+
+      if (rpcResult.result) {
+        log("L1Proxy", `  L1 accepted: ${rpcResult.result}`);
+      } else if (rpcResult.error) {
+        log("L1Proxy", `  L1 error: ${rpcResult.error.message}`);
+      }
+
+      return rpcResult;
     }
-
-    const result = await submitToBuilder({
-      signedTx,
-      hints: Object.keys(hints).length > 0 ? hints : undefined,
-      sourceChain: "L1",
-    });
-
-    log("L1Proxy", `  Builder accepted: ${result.l1TxHash}`);
-
-    // Return the L1 tx hash as the result
-    return {
-      jsonrpc: "2.0",
-      id,
-      result: result.l1TxHash,
-    };
   } catch (err: any) {
     log("L1Proxy", `Error handling tx: ${err.message}`);
     return {

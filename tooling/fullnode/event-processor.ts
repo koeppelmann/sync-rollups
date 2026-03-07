@@ -3,8 +3,8 @@
  * Watches L1 for Rollups contract events and processes them
  */
 
-import { Contract, JsonRpcProvider, Interface, EventLog, Log, Transaction } from "ethers";
-import { StateManager } from "./state-manager.js";
+import { Contract, JsonRpcProvider, Interface, EventLog, Log, Transaction, AbiCoder } from "ethers";
+import { StateManager, SyncState, L1L2Checkpoint } from "./state-manager.js";
 import { ROLLUPS_EVENTS, Execution, ActionType } from "./types.js";
 
 export interface EventProcessorConfig {
@@ -58,11 +58,25 @@ export class EventProcessor {
   private eventQueue: ProcessedEvent[] = [];
   private processing = false;
 
+  // L1 reorg detection and recovery
+  private blockHashHistory: Map<number, string> = new Map();
+  private checkpoints: L1L2Checkpoint[] = [];
+  private readonly MAX_REORG_HISTORY = 128;  // Max blocks of hash history to keep
+  private readonly REORG_CHECK_DEPTH = 8;    // Blocks to check per poll cycle
+  private reorgInProgress = false;
+  private readonly deploymentBlock: number;  // Original deployment block (never changes)
+
+  /** Expose L1 RPC URL for use by other components (e.g. RpcServer) */
+  getL1RpcUrl(): string {
+    return this.config.l1RpcUrl;
+  }
+
   constructor(config: EventProcessorConfig, stateManager: StateManager) {
     this.config = config;
     this.stateManager = stateManager;
     this.lastProcessedBlock = config.startBlock - 1;
     this.pollingInterval = config.pollingInterval || 2000;
+    this.deploymentBlock = config.startBlock; // Remember original deployment block
 
     this.l1Provider = new JsonRpcProvider(config.l1RpcUrl);
     this.rollupsInterface = new Interface(ROLLUPS_ABI);
@@ -71,6 +85,34 @@ export class EventProcessor {
       ROLLUPS_ABI,
       this.l1Provider
     );
+  }
+
+  /**
+   * Restore state from persisted sync state, including reorg data.
+   * Called when persisted sync state is found on startup.
+   */
+  setResumeState(syncState: SyncState): void {
+    const resumeBlock = syncState.lastProcessedL1Block + 1;
+    this.config.startBlock = resumeBlock;
+    this.lastProcessedBlock = syncState.lastProcessedL1Block;
+
+    // Restore tracked state root and ether balance
+    this.stateManager.restoreState(syncState.stateRoot, syncState.etherBalance || "0");
+
+    // Restore block hash history
+    if (syncState.blockHashHistory) {
+      this.blockHashHistory.clear();
+      for (const entry of syncState.blockHashHistory) {
+        this.blockHashHistory.set(entry.blockNumber, entry.blockHash);
+      }
+      console.log(`[EventProcessor] Restored ${this.blockHashHistory.size} block hash entries`);
+    }
+
+    // Restore checkpoints
+    if (syncState.checkpoints) {
+      this.checkpoints = [...syncState.checkpoints];
+      console.log(`[EventProcessor] Restored ${this.checkpoints.length} checkpoints`);
+    }
   }
 
   /**
@@ -151,6 +193,9 @@ export class EventProcessor {
     fromBlock: number,
     toBlock: number
   ): Promise<void> {
+    // Record block hashes for reorg detection
+    await this.recordBlockHashes(fromBlock, toBlock);
+
     // Fetch StateUpdated events for our rollup
     const stateUpdatedFilter =
       this.rollupsContract.filters.StateUpdated(this.config.rollupId);
@@ -234,12 +279,21 @@ export class EventProcessor {
       return a.logIndex - b.logIndex;
     });
 
-    // Process each event
+    // Save checkpoint before processing events for each distinct L1 block
+    // This gives us precise rollback targets for reorg recovery
+    let lastCheckpointedBlock = -1;
     for (const event of allEvents) {
+      if (event.blockNumber !== lastCheckpointedBlock) {
+        lastCheckpointedBlock = event.blockNumber;
+        await this.saveCheckpoint(event.blockNumber);
+      }
       await this.processEvent(event);
     }
 
     this.lastProcessedBlock = toBlock;
+
+    // Persist sync state after each batch (including reorg data)
+    this.stateManager.saveSyncState(toBlock, this.getReorgData());
   }
 
   /**
@@ -299,6 +353,24 @@ export class EventProcessor {
       );
     }
 
+    // Check if the L2 EVM already has the correct post-execution state.
+    // This happens when the builder's fullnode pre-executed the call during
+    // planL1ToL2CallWithProxy. In that case, skip re-execution.
+    try {
+      const actualL2State = await this.stateManager.getActualStateRoot();
+      if (actualL2State === newState && currentState !== newState) {
+        console.log(
+          `[EventProcessor] L2 state already matches newState (pre-executed), skipping replay`
+        );
+        this.stateManager.updateState(newState, BigInt(blockNumber));
+        console.log(`[EventProcessor] State updated to: ${newState.slice(0, 10)}...`);
+        return;
+      }
+    } catch (e: any) {
+      // If we can't check, proceed with normal replay
+      console.warn(`[EventProcessor] Could not check L2 state: ${e.message}`);
+    }
+
     try {
       // Get the L1 transaction that triggered this execution
       const l1Tx = await this.l1Provider.getTransaction(l1TxHash);
@@ -310,20 +382,20 @@ export class EventProcessor {
       const decoded = this.rollupsInterface.parseTransaction({ data: l1Tx.data });
 
       if (decoded && decoded.name === 'executeL2TX') {
-        // This is a direct L2TX execution
-        const rlpEncodedTx = decoded.args[1]; // Second arg is rlpEncodedTx
-        console.log(`[EventProcessor] Decoded executeL2TX, sending to L2 EVM...`);
+        // This is a direct L2TX execution — an already-signed L2 transaction.
+        // Instead of sending the raw signed tx (which pays gas to reth's random
+        // coinbase, causing non-determinism), we decode it and replay via the
+        // operator's zero-gas system call.
+        const rlpEncodedTx = decoded.args[1];
+        const { Transaction } = await import("ethers");
+        const parsedTx = Transaction.from(rlpEncodedTx);
+        console.log(`[EventProcessor] Decoded executeL2TX: ${parsedTx.from?.slice(0, 10)}... -> ${parsedTx.to ? parsedTx.to.slice(0, 10) + '...' : 'CREATE'}, value=${parsedTx.value}`);
 
-        // Send the raw L2 transaction to local Anvil
-        const txHash = await this.stateManager.sendRawTransaction(rlpEncodedTx);
-        console.log(`[EventProcessor] L2 tx sent: ${txHash}`);
-
-        // Mine a block to include the transaction
-        await this.stateManager.mineBlock();
-        console.log(`[EventProcessor] L2 block mined`);
+        const txHash = await this.stateManager.replayL2TX(parsedTx);
+        console.log(`[EventProcessor] L2TX replayed: ${txHash}`);
       } else {
-        // This is likely an L2Proxy fallback call (L1→L2)
-        // The L1 tx target should be the proxy address
+        // This is an L1→L2 call via L2Proxy (L1 user called proxy on L1)
+        // We replay it on L2 using system calls + proxy deployment
         const proxyAddress = l1Tx.to;
         if (!proxyAddress) {
           throw new Error("L1 transaction has no 'to' address");
@@ -348,37 +420,31 @@ export class EventProcessor {
           `[EventProcessor] L2 source proxy: ${sourceProxy} (from L1 sender ${l1Tx.from})`
         );
 
-        // Execute the call on local Anvil from the derived source proxy
-        const provider = this.stateManager.getL2Provider();
+        // Step 1: Ensure the source proxy is deployed on L2
+        // This deploys an L2Proxy at the same CREATE2 address as on L1
+        await this.stateManager.ensureProxyDeployed(
+          l1Tx.from,
+          this.config.rollupId,
+          BigInt(l1ChainId)
+        );
 
-        // Impersonate source proxy on L2
-        await provider.send("anvil_impersonateAccount", [sourceProxy]);
+        // Step 2: Call sourceProxy.executeOnBehalf(l2Target, calldata) via system call
+        // The proxy will forward the call to l2Target, making msg.sender = sourceProxy
+        const proxyIface = new Interface([
+          "function executeOnBehalf(address destination, bytes calldata data) payable returns (bool, bytes)"
+        ]);
+        const execCalldata = proxyIface.encodeFunctionData("executeOnBehalf", [
+          l2Target,
+          l1Tx.data,
+        ]);
 
-        // Set sufficient balance for source proxy on L2 to cover value + gas
         const value = l1Tx.value;
-        const balanceNeeded = value + 10n ** 18n; // Add 1 ETH buffer for gas
-        await provider.send("anvil_setBalance", [sourceProxy, "0x" + balanceNeeded.toString(16)]);
-
-        // Execute the transaction
-        const l2TxParams: any = {
-          from: sourceProxy,
-          to: l2Target,
-          value: "0x" + value.toString(16),
-          data: l1Tx.data,
-        };
-
-        const txHash = await provider.send("eth_sendTransaction", [l2TxParams]);
-        console.log(`[EventProcessor] L2 tx sent: ${txHash}`);
-
-        // Stop impersonating
-        await provider.send("anvil_stopImpersonatingAccount", [sourceProxy]);
-
-        // Reset proxy balance to 0 — the 1 ETH gas buffer was only needed for execution
-        await provider.send("anvil_setBalance", [sourceProxy, "0x0"]);
-
-        // Mine a block
-        await this.stateManager.mineBlock();
-        console.log(`[EventProcessor] L2 block mined`);
+        const result = await this.stateManager.systemCall(
+          sourceProxy,
+          execCalldata,
+          "0x" + value.toString(16)
+        );
+        console.log(`[EventProcessor] System call executed, result: ${result.slice(0, 20)}...`);
       }
 
       // Verify the state matches what L1 expects
@@ -411,7 +477,29 @@ export class EventProcessor {
 
     const poll = async () => {
       try {
+        // Step 1: Check for L1 reorgs BEFORE processing new events
+        if (!this.reorgInProgress) {
+          const forkBlock = await this.detectReorg();
+          if (forkBlock !== null) {
+            await this.handleReorg(forkBlock);
+            // Schedule next poll immediately to continue processing
+            this.pollTimer = setTimeout(poll, 100);
+            return;
+          }
+        }
+
+        // Step 2: Check for chain shrinkage (also a reorg signal)
         const currentBlock = await this.l1Provider.getBlockNumber();
+        if (currentBlock < this.lastProcessedBlock) {
+          console.warn(
+            `[EventProcessor] Chain tip moved backward: ${this.lastProcessedBlock} -> ${currentBlock}`
+          );
+          await this.handleReorg(currentBlock + 1);
+          this.pollTimer = setTimeout(poll, 100);
+          return;
+        }
+
+        // Step 3: Normal event processing
         if (currentBlock > this.lastProcessedBlock) {
           await this.fetchAndProcessEvents(
             this.lastProcessedBlock + 1,
@@ -444,13 +532,337 @@ export class EventProcessor {
     };
   }
 
+  // ============ L1 Reorg Detection & Recovery ============
+
   /**
-   * Check if fullnode is synced with L1
+   * Record block hashes for a range of L1 blocks.
+   * Must record ALL blocks (not just those with events) because an empty block
+   * can be reorged into one with events.
+   */
+  private async recordBlockHashes(fromBlock: number, toBlock: number): Promise<void> {
+    for (let blockNum = fromBlock; blockNum <= toBlock; blockNum++) {
+      if (!this.blockHashHistory.has(blockNum)) {
+        const block = await this.l1Provider.getBlock(blockNum);
+        if (block && block.hash) {
+          this.blockHashHistory.set(blockNum, block.hash);
+        }
+      }
+    }
+    this.pruneBlockHashHistory();
+  }
+
+  /**
+   * Save a checkpoint before processing events for a specific L1 block.
+   * Records the L2 block number and tracked state BEFORE processing,
+   * giving us a precise rollback target.
+   */
+  private async saveCheckpoint(l1BlockNumber: number): Promise<void> {
+    const l1BlockHash = this.blockHashHistory.get(l1BlockNumber) || "";
+    let l2BlockNumber = 0;
+    try {
+      l2BlockNumber = await this.stateManager.getL2BlockNumber();
+    } catch {
+      // L2 provider might not be ready yet during initial sync
+    }
+
+    this.checkpoints.push({
+      l1BlockNumber,
+      l1BlockHash,
+      l2BlockNumber,
+      trackedStateRoot: this.stateManager.getStateRoot(),
+      trackedEtherBalance: this.stateManager.getEtherBalance().toString(),
+    });
+
+    // Keep checkpoints bounded to MAX_REORG_HISTORY
+    while (this.checkpoints.length > this.MAX_REORG_HISTORY) {
+      this.checkpoints.shift();
+    }
+  }
+
+  /**
+   * Prune block hash history to keep only the most recent MAX_REORG_HISTORY entries.
+   */
+  private pruneBlockHashHistory(): void {
+    if (this.blockHashHistory.size <= this.MAX_REORG_HISTORY) return;
+
+    // Find the cutoff: keep only entries within MAX_REORG_HISTORY of the latest
+    const sortedKeys = Array.from(this.blockHashHistory.keys()).sort((a, b) => a - b);
+    const cutoff = sortedKeys.length - this.MAX_REORG_HISTORY;
+    for (let i = 0; i < cutoff; i++) {
+      this.blockHashHistory.delete(sortedKeys[i]);
+    }
+  }
+
+  /**
+   * Detect if an L1 reorg has occurred by checking recent block hashes.
+   * Returns the first reorged block number, or null if no reorg detected.
+   *
+   * Efficient: checks only REORG_CHECK_DEPTH recent blocks per poll.
+   * Full binary search only when a mismatch is found (rare).
+   */
+  private async detectReorg(): Promise<number | null> {
+    if (this.blockHashHistory.size === 0) return null;
+
+    const checkDepth = Math.min(this.REORG_CHECK_DEPTH, this.blockHashHistory.size);
+    const blocksToCheck: number[] = [];
+
+    // Check the most recent blocks
+    for (let i = 0; i < checkDepth; i++) {
+      const blockNum = this.lastProcessedBlock - i;
+      if (this.blockHashHistory.has(blockNum)) {
+        blocksToCheck.push(blockNum);
+      }
+    }
+
+    for (const blockNum of blocksToCheck) {
+      try {
+        const block = await this.l1Provider.getBlock(blockNum);
+        if (!block) {
+          // Block no longer exists — deep reorg or chain shrinkage
+          console.warn(`[EventProcessor] Block ${blockNum} no longer exists on L1!`);
+          return await this.findForkPoint(blockNum);
+        }
+        const storedHash = this.blockHashHistory.get(blockNum);
+        if (block.hash !== storedHash) {
+          console.warn(
+            `[EventProcessor] Block hash mismatch at block ${blockNum}: ` +
+            `stored=${storedHash?.slice(0, 10)}..., actual=${block.hash?.slice(0, 10)}...`
+          );
+          return await this.findForkPoint(blockNum);
+        }
+      } catch (e: any) {
+        console.warn(`[EventProcessor] Error checking block ${blockNum}: ${e.message}`);
+        // Don't treat RPC errors as reorgs — just skip this check
+      }
+    }
+
+    return null; // No reorg detected
+  }
+
+  /**
+   * Binary search to find the exact fork point (first reorged block).
+   */
+  private async findForkPoint(knownBadBlock: number): Promise<number> {
+    // Get the oldest block we have history for
+    const oldestTracked = Math.min(...Array.from(this.blockHashHistory.keys()));
+    let lo = oldestTracked;
+    let hi = knownBadBlock;
+
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const storedHash = this.blockHashHistory.get(mid);
+      if (!storedHash) {
+        // No history for this block — assume it's fine
+        lo = mid + 1;
+        continue;
+      }
+
+      try {
+        const block = await this.l1Provider.getBlock(mid);
+        if (block && block.hash === storedHash) {
+          lo = mid + 1; // mid is still canonical
+        } else {
+          hi = mid; // mid was reorged
+        }
+      } catch {
+        lo = mid + 1; // Can't check, assume fine
+      }
+    }
+
+    return lo;
+  }
+
+  /**
+   * Find the latest checkpoint before (or at) the given L1 block.
+   * Returns the checkpoint to roll back to, or null if none found.
+   */
+  private findCheckpointBefore(l1Block: number): L1L2Checkpoint | null {
+    // Checkpoints are in chronological order
+    let best: L1L2Checkpoint | null = null;
+    for (const cp of this.checkpoints) {
+      if (cp.l1BlockNumber < l1Block) {
+        best = cp;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Prune block hash history and checkpoints from a given L1 block onward.
+   */
+  private pruneFromBlock(l1Block: number): void {
+    // Remove block hashes from forkBlock onward
+    for (const key of Array.from(this.blockHashHistory.keys())) {
+      if (key >= l1Block) {
+        this.blockHashHistory.delete(key);
+      }
+    }
+
+    // Remove checkpoints from forkBlock onward
+    this.checkpoints = this.checkpoints.filter(cp => cp.l1BlockNumber < l1Block);
+  }
+
+  /**
+   * Get reorg data for persistence
+   */
+  private getReorgData(): {
+    blockHashHistory: Array<{ blockNumber: number; blockHash: string }>;
+    checkpoints: L1L2Checkpoint[];
+  } {
+    return {
+      blockHashHistory: Array.from(this.blockHashHistory.entries()).map(
+        ([blockNumber, blockHash]) => ({ blockNumber, blockHash })
+      ),
+      checkpoints: this.checkpoints,
+    };
+  }
+
+  /**
+   * Handle an L1 reorg by unwinding reth to a checkpoint and re-processing events.
+   *
+   * Strategy:
+   * 1. Find the checkpoint just before the fork point
+   * 2. Stop reth → unwind to checkpoint's L2 block → restart reth
+   * 3. Restore tracked state from checkpoint
+   * 4. Re-process events from the fork point on the new canonical chain
+   *
+   * If no checkpoint is found (reorg deeper than history), falls back to
+   * full wipe and replay from deployment block.
+   */
+  private async handleReorg(forkBlock: number): Promise<void> {
+    if (this.reorgInProgress) {
+      console.warn("[EventProcessor] Reorg already in progress, skipping");
+      return;
+    }
+
+    this.reorgInProgress = true;
+    console.log(`[EventProcessor] ========================================`);
+    console.log(`[EventProcessor] REORG DETECTED at L1 block ${forkBlock}`);
+    console.log(`[EventProcessor] Current lastProcessedBlock: ${this.lastProcessedBlock}`);
+    console.log(`[EventProcessor] ========================================`);
+
+    try {
+      const checkpoint = this.findCheckpointBefore(forkBlock);
+
+      if (checkpoint) {
+        // Precise unwind using checkpoint
+        console.log(
+          `[EventProcessor] Found checkpoint: L1 block ${checkpoint.l1BlockNumber} → L2 block ${checkpoint.l2BlockNumber}`
+        );
+        console.log(
+          `[EventProcessor] Will unwind L2 to block ${checkpoint.l2BlockNumber} and re-process from L1 block ${checkpoint.l1BlockNumber}`
+        );
+
+        // Step 1: Stop reth
+        await this.stateManager.stopEngine();
+
+        // Step 2: Unwind reth to checkpoint's L2 block
+        try {
+          await this.stateManager.unwindToBlock(checkpoint.l2BlockNumber);
+        } catch (err: any) {
+          console.error(`[EventProcessor] Unwind failed: ${err.message}`);
+          console.log(`[EventProcessor] Falling back to full wipe and replay`);
+          this.stateManager.clearRethData();
+        }
+
+        // Step 3: Restart reth
+        await this.stateManager.startEngine();
+
+        // Step 4: Restore tracked state from checkpoint
+        this.stateManager.restoreState(
+          checkpoint.trackedStateRoot,
+          checkpoint.trackedEtherBalance
+        );
+
+        // Step 5: Prune reorg data from the checkpoint's block onward
+        // (the checkpoint itself recorded state BEFORE that block, so prune from there)
+        this.pruneFromBlock(checkpoint.l1BlockNumber);
+
+        // Step 6: Reset lastProcessedBlock to BEFORE the checkpoint's block
+        // Because the checkpoint records state BEFORE processing that block,
+        // we need to re-process from checkpoint.l1BlockNumber onward
+        this.lastProcessedBlock = checkpoint.l1BlockNumber - 1;
+
+      } else {
+        // No checkpoint found — full replay from deployment block
+        console.warn(
+          `[EventProcessor] No checkpoint found before block ${forkBlock}. Full replay required.`
+        );
+
+        // Stop reth, wipe data, restart
+        await this.stateManager.stopEngine();
+        this.stateManager.clearRethData();
+        await this.stateManager.startEngine();
+
+        // Reset everything
+        this.stateManager.resetState();
+        this.blockHashHistory.clear();
+        this.checkpoints = [];
+        this.stateManager.clearExecutionCache();
+        this.lastProcessedBlock = this.deploymentBlock - 1;
+      }
+
+      // Re-process events from the fork point (or deployment block)
+      const currentBlock = await this.l1Provider.getBlockNumber();
+      if (currentBlock > this.lastProcessedBlock) {
+        console.log(
+          `[EventProcessor] Re-processing events from block ${this.lastProcessedBlock + 1} to ${currentBlock}`
+        );
+        const batchSize = 10000;
+        let fromBlock = this.lastProcessedBlock + 1;
+        while (fromBlock <= currentBlock) {
+          const toBlock = Math.min(fromBlock + batchSize - 1, currentBlock);
+          await this.fetchAndProcessEvents(fromBlock, toBlock);
+          fromBlock = toBlock + 1;
+        }
+      }
+
+      // Always persist state after reorg recovery (even if no new events were processed)
+      this.stateManager.saveSyncState(this.lastProcessedBlock, this.getReorgData());
+      console.log(`[EventProcessor] Reorg recovery complete. Now at L1 block ${this.lastProcessedBlock}`);
+
+    } catch (err: any) {
+      console.error(`[EventProcessor] Reorg recovery failed: ${err.message}`);
+    } finally {
+      this.reorgInProgress = false;
+    }
+  }
+
+  /**
+   * Check if fullnode is synced with L1.
+   *
+   * Checks two things:
+   * 1. Has the fullnode processed all L1 events up to the latest block?
+   *    (tracked state root matches L1 contract's state root)
+   * 2. Does the actual L2 EVM state agree with what L1 claims?
+   *    (reth's state root matches the L1 state root)
+   *
+   * If (1) passes but (2) fails, it means L1 has a fraudulent state root
+   * that doesn't match independent local execution — i.e. a malicious builder/prover.
    */
   async isSynced(): Promise<boolean> {
     const l1State = await this.getL1State();
     const trackedState = this.stateManager.getStateRoot();
-    const actualState = await this.stateManager.getActualStateRoot();
-    return l1State.stateRoot === trackedState && trackedState === actualState;
+
+    // Check 1: Have we processed all L1 events?
+    if (l1State.stateRoot !== trackedState) {
+      return false;
+    }
+
+    // Check 2: Does our actual L2 EVM state match what L1 claims?
+    try {
+      const actualL2State = await this.stateManager.getActualStateRoot();
+      if (actualL2State !== l1State.stateRoot) {
+        console.warn(
+          `[EventProcessor] FRAUD DETECTED: L1 state ${l1State.stateRoot.slice(0, 10)}... ` +
+          `does not match actual L2 EVM state ${actualL2State.slice(0, 10)}...`
+        );
+        return false;
+      }
+    } catch (e: any) {
+      console.warn(`[EventProcessor] Could not verify L2 EVM state: ${e.message}`);
+    }
+
+    return true;
   }
 }

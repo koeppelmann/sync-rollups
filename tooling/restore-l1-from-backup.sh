@@ -123,8 +123,8 @@ stop_existing_services() {
   pkill -f "l2-rpc-proxy.ts" 2>/dev/null || true
   pkill -f "python3 -m http.server ${UI_PORT}" 2>/dev/null || true
   pkill -f "anvil --port ${L1_RPC_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
   sleep 2
 }
 

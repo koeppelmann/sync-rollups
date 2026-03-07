@@ -178,14 +178,28 @@ async function handleSendRawTransaction(
       ...(hints ? { hints } : {}),
     });
 
-    log("L2Proxy", `  L1 tx hash: ${result.l1TxHash}`);
+    if (!result.success) {
+      log("L2Proxy", `  Builder rejected: ${result.error}`);
+      return {
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32000,
+          message: result.error || "Builder rejected transaction",
+        },
+      };
+    }
 
-    // Return the L1 tx hash (represents the L2 tx being included)
-    // The wallet will see this as the tx hash
+    // Return the L2 tx hash — this is the hash ethers computes locally from the
+    // signed transaction. The L1 tx hash (executeL2TX wrapper) is different and
+    // would cause ethers to throw "the returned hash did not match".
+    const txHash = result.l2TxHash || result.l1TxHash;
+    log("L2Proxy", `  L2 tx hash: ${txHash} (L1 wrapper: ${result.l1TxHash})`);
+
     return {
       jsonrpc: "2.0",
       id,
-      result: result.l1TxHash,
+      result: txHash,
     };
   } catch (err: any) {
     log("L2Proxy", `Error handling L2 tx: ${err.message}`);

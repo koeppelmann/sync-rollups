@@ -1,0 +1,14 @@
+{
+  "users": [
+    {
+      "label": "User #1",
+      "address": "0x423d1450439326725a18E1765D8897533e020385",
+      "privateKey": "0x1c6bdebe45b85aa62d7170a8e43aa0fbf5c51ffc168ec5f58ae377b115f68d31"
+    },
+    {
+      "label": "User #2",
+      "address": "0xC7e616E0dc8786C34Fac9EEd1975Bb23bC26920C",
+      "privateKey": "0xa71547650a593008aa8d778643883b78dfad7cecb4e935e61530c6af38220802"
+    }
+  ]
+}

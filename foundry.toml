@@ -17,5 +17,7 @@ quote_style = "double"
 number_underscore = "preserve"
 
 [rpc_endpoints]
+gnosis = "https://rpc.gnosischain.com"
 
 [etherscan]
+gnosis = { key = "${GNOSISSCAN_API_KEY}", url = "https://api.etherscan.io/v2/api?chainid=100", chain = 100 }

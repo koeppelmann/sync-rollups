@@ -188,8 +188,8 @@ stop_existing_services() {
   pkill -f "python3 -m http.server ${UI_PORT}" 2>/dev/null || true
   pkill -f "python -m http.server ${UI_PORT}" 2>/dev/null || true
   pkill -f "http.server ${UI_PORT} --directory ui" 2>/dev/null || true
-  pkill -f "anvil --port ${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
-  pkill -f "anvil --port ${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
   sleep 2
 }
 
@@ -197,7 +197,7 @@ deploy_l1_contracts() {
   log "Building contracts and services..."
   forge build >/dev/null
   (
-    cd ../sync-rollups
+    cd ..
     forge build >/dev/null
   )
   npm run build >/dev/null
@@ -218,7 +218,7 @@ deploy_l1_contracts() {
   log "Deploying Rollups..."
   local rollups_bytecode
   rollups_bytecode="$(
-    cd ../sync-rollups
+    cd ..
     forge inspect Rollups bytecode
   )"
   local encoded_rollups_args

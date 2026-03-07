@@ -114,8 +114,8 @@ contract L2Proxy {
         }
     }
 
-    /// @notice Allows the proxy to receive ETH
-    receive() external payable {}
+    // NOTE: No receive() function - all calls (including plain ETH transfers) go to fallback()
+    // This ensures the bridging logic is always triggered.
 
     /// @notice Executes a call on behalf of another authorized proxy
     /// @dev Only callable by the Rollups contract or other authorized proxies
@@ -136,6 +136,14 @@ contract L2Proxy {
 
         // Execute the call from this proxy using msg.value
         (success, returnData) = destination.call{value: msg.value}(data);
+
+        // If the inner call failed and ETH was sent, revert so the value
+        // is returned to the caller rather than getting stuck in the proxy.
+        if (!success && msg.value > 0) {
+            assembly {
+                revert(add(returnData, 32), mload(returnData))
+            }
+        }
     }
 
     /// @notice Decodes the nextAction from ScopeReverted error data
