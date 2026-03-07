@@ -1299,4 +1299,101 @@ contract CrossChainManagerL2Test is Test {
         vm.expectRevert(CrossChainProxy.Unauthorized.selector);
         p.executeOnBehalf(address(target), abi.encodeCall(L2TestTarget.setValue, (42)));
     }
+
+    // ── RESULT with uint256 return data ──
+
+    function test_ExecuteIncomingCrossChainCall_ResultWithUint256() public {
+        address sourceAddr = address(0xBEEF);
+        uint256 sourceRollup = 1;
+        // setAndReturn(42) returns uint256(42)
+        bytes memory callData = abi.encodeCall(L2TestTarget.setAndReturn, (42));
+        uint256[] memory scope = new uint256[](0);
+
+        // After executeOnBehalf, raw return = abi.encode(uint256(42))
+        Action memory resultFromCall = Action({
+            actionType: ActionType.RESULT,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(42)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        // Final result also carries the uint256
+        Action memory finalResult = _resultAction(abi.encode(uint256(42)));
+        _loadEntry(keccak256(abi.encode(resultFromCall)), finalResult);
+
+        vm.prank(SYSTEM_ADDRESS);
+        bytes memory result =
+            manager.executeIncomingCrossChainCall(address(target), 0, callData, sourceAddr, sourceRollup, scope);
+
+        assertEq(target.value(), 42);
+        uint256 decoded = abi.decode(result, (uint256));
+        assertEq(decoded, 42);
+    }
+
+    function test_ExecuteCrossChainCall_ResultWithUint256() public {
+        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        bytes memory callData = abi.encodeCall(L2TestTarget.setAndReturn, (99));
+
+        Action memory callAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // After executeOnBehalf calls setAndReturn(99), raw return = abi.encode(uint256(99))
+        Action memory nestedCall = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        Action memory resultFromCall = Action({
+            actionType: ActionType.RESULT,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(99)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        Action memory finalResult = _resultAction(abi.encode(uint256(99)));
+
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = emptyDeltas;
+        entries[0].actionHash = keccak256(abi.encode(callAction));
+        entries[0].nextAction = nestedCall;
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = keccak256(abi.encode(resultFromCall));
+        entries[1].nextAction = finalResult;
+        vm.prank(SYSTEM_ADDRESS);
+        manager.loadExecutionTable(entries);
+
+        (bool success, bytes memory ret) = proxy.call(callData);
+        assertTrue(success);
+        assertEq(target.value(), 99);
+        bytes memory decoded = abi.decode(ret, (bytes));
+        uint256 val = abi.decode(decoded, (uint256));
+        assertEq(val, 99);
+    }
 }

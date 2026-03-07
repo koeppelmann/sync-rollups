@@ -2489,4 +2489,95 @@ contract RollupsTest is Test {
         emit Rollups.CrossChainProxyCreated(expectedProxy, address(target), rollupId);
         rollups.createCrossChainProxy(address(target), rollupId);
     }
+
+    // ──────────────────────────────────────────────
+    //  RESULT with uint256 return data
+    // ──────────────────────────────────────────────
+
+    function test_ScopeCall_ResultWithUint256Return() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+
+        rollups.createCrossChainProxy(address(this), 0);
+
+        bytes32 state1 = keccak256("u1");
+        bytes32 state2 = keccak256("u2");
+
+        uint256[] memory callScope = new uint256[](1);
+        callScope[0] = 0;
+
+        // CALL getValue() which returns uint256
+        Action memory scopedCall = Action({
+            actionType: ActionType.CALL,
+            rollupId: rollupId,
+            destination: address(target),
+            value: 0,
+            data: abi.encodeCall(TestTarget.getValue, ()),
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: 0,
+            scope: callScope
+        });
+
+        // getValue() returns uint256(0) — raw return is abi.encode(uint256(0))
+        Action memory expectedResult = Action({
+            actionType: ActionType.RESULT,
+            rollupId: rollupId,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(0)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 resultHash = keccak256(abi.encode(expectedResult));
+
+        // Final result carries the uint256 value back
+        Action memory finalResult = Action({
+            actionType: ActionType.RESULT,
+            rollupId: 0,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(0)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        bytes memory rlpTx = hex"20";
+        Action memory l2tx = Action({
+            actionType: ActionType.L2TX,
+            rollupId: rollupId,
+            destination: address(0),
+            value: 0,
+            data: rlpTx,
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 l2txHash = keccak256(abi.encode(l2tx));
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+
+        StateDelta[] memory d1 = new StateDelta[](1);
+        d1[0] = StateDelta({rollupId: rollupId, currentState: bytes32(0), newState: state1, etherDelta: 0});
+        entries[0].stateDeltas = d1;
+        entries[0].actionHash = l2txHash;
+        entries[0].nextAction = scopedCall;
+
+        StateDelta[] memory d2 = new StateDelta[](1);
+        d2[0] = StateDelta({rollupId: rollupId, currentState: state1, newState: state2, etherDelta: 0});
+        entries[1].stateDeltas = d2;
+        entries[1].actionHash = resultHash;
+        entries[1].nextAction = finalResult;
+
+        rollups.postBatch(entries, 0, "", "proof");
+
+        bytes memory result = rollups.executeL2TX(rollupId, rlpTx);
+        uint256 decoded = abi.decode(result, (uint256));
+        assertEq(decoded, 0);
+        assertEq(_getRollupState(rollupId), state2);
+    }
 }
