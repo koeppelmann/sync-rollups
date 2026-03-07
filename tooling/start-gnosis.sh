@@ -199,11 +199,6 @@ start_services() {
   log "Building services..."
   npm run build >/dev/null
 
-  # Read L2Proxy implementation address from Rollups contract
-  local L2PROXY_IMPL
-  L2PROXY_IMPL="$(cast call "${ROLLUPS_ADDR}" "l2ProxyImplementation()(address)" --rpc-url "${L1_RPC_URL}")"
-  log "L2Proxy impl: ${L2PROXY_IMPL}"
-
   # Path to compiled contract artifacts
   local CONTRACTS_OUT
   CONTRACTS_OUT="$(realpath "$(dirname "$0")/../out")"
@@ -217,7 +212,6 @@ start_services() {
     --l2-port "${PUBLIC_L2_EVM_PORT}" \
     --rpc-port "${PUBLIC_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
-    --l2-proxy-impl "${L2PROXY_IMPL}" \
     --contracts-out "${CONTRACTS_OUT}" \
     > logs/fullnode-public.log 2>&1 &
   echo $! > logs/pid-fullnode-public.txt
@@ -235,7 +229,6 @@ start_services() {
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
-    --l2-proxy-impl "${L2PROXY_IMPL}" \
     --contracts-out "${CONTRACTS_OUT}" \
     > logs/fullnode-builder.log 2>&1 &
   echo $! > logs/pid-fullnode-builder.txt

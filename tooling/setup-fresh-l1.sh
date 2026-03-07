@@ -116,7 +116,6 @@ restart_private_builder_stack() {
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
-    --l2-proxy-impl "${L2_PROXY_IMPL}" \
     --contracts-out "../out" \
     > logs/fullnode-builder.log 2>&1 &
   echo $! > logs/pid-fullnode-builder.txt
@@ -258,20 +257,17 @@ start_services() {
 
   VERIFIER_ADDR="$(echo "${deploy_output}" | rg 'MockZKVerifier deployed at:' | rg -o '0x[0-9a-fA-F]{40}')"
   ROLLUPS_ADDR="$(echo "${deploy_output}" | rg 'Rollups deployed at:' | rg -o '0x[0-9a-fA-F]{40}')"
-  L2_PROXY_IMPL="$(echo "${deploy_output}" | rg 'L2Proxy implementation:' | rg -o '0x[0-9a-fA-F]{40}')"
-  if [ -z "${VERIFIER_ADDR}" ] || [ -z "${ROLLUPS_ADDR}" ] || [ -z "${L2_PROXY_IMPL}" ]; then
+  if [ -z "${VERIFIER_ADDR}" ] || [ -z "${ROLLUPS_ADDR}" ]; then
     echo "Error: could not parse deployment addresses"
     exit 1
   fi
   log "MockZKVerifier: ${VERIFIER_ADDR}"
   log "Rollups: ${ROLLUPS_ADDR}"
-  log "L2Proxy impl: ${L2_PROXY_IMPL}"
 
   log "Computing genesis state root for reth..."
   INITIAL_STATE="$(
     npx tsx scripts/compute-genesis-root.ts \
       --rollups "${ROLLUPS_ADDR}" \
-      --l2-proxy-impl "${L2_PROXY_IMPL}" \
       --contracts-out ../out
   )"
   if [ -z "${INITIAL_STATE}" ]; then
@@ -312,7 +308,6 @@ EOF
     --l2-port "${PUBLIC_L2_EVM_PORT}" \
     --rpc-port "${PUBLIC_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
-    --l2-proxy-impl "${L2_PROXY_IMPL}" \
     --contracts-out "../out" \
     > logs/fullnode-public.log 2>&1 &
   echo $! > logs/pid-fullnode-public.txt
@@ -330,7 +325,6 @@ EOF
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
     --initial-state "${INITIAL_STATE}" \
-    --l2-proxy-impl "${L2_PROXY_IMPL}" \
     --contracts-out "../out" \
     > logs/fullnode-builder.log 2>&1 &
   echo $! > logs/pid-fullnode-builder.txt

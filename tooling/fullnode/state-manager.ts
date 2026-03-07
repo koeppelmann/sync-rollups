@@ -10,7 +10,7 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import {
   RollupState,
-  Execution,
+  ExecutionEntry,
   StateDelta,
   Action,
   ActionType,
@@ -23,8 +23,7 @@ export interface StateManagerConfig {
   l2EvmPort: number;
   dataDir?: string; // Persistent data directory for reth state
   // L1 contract addresses needed for L2 genesis alloc
-  rollupsAddress?: string; // L1 Rollups contract address (L2Authority deployed here on L2)
-  l2ProxyImplAddress?: string; // L1 L2Proxy implementation address (mirrored on L2)
+  rollupsAddress?: string; // L1 Rollups contract address (CrossChainManagerL2 deployed here on L2)
   // Path to compiled contract artifacts
   contractsOutDir?: string; // Path to sync-rollups/out/ directory
 }
@@ -56,8 +55,8 @@ export class StateManager {
   private config: StateManagerConfig;
   private state: RollupState;
 
-  // Cache of loaded executions: actionHash -> Execution[]
-  private executionCache: Map<string, Execution[]> = new Map();
+  // Cache of loaded executions: actionHash -> ExecutionEntry[]
+  private executionCache: Map<string, ExecutionEntry[]> = new Map();
 
   // reth process and provider
   private engineProcess: ChildProcess | null = null;
@@ -66,7 +65,7 @@ export class StateManager {
   // Operator wallet — used to sign system call transactions on the local L2.
   // This is a randomly generated key (NOT a well-known dev account), stored in the
   // data directory. Only this fullnode process knows the key, preventing interference.
-  // Since L2Authority has no access control, any address can perform protocol operations.
+  // Since CrossChainManagerL2 has no access control, any address can perform protocol operations.
   private operatorWallet: Wallet | null = null;
 
   // Cached genesis path for reuse in unwindToBlock
@@ -90,7 +89,7 @@ export class StateManager {
    * identical genesis alloc and state root — no key sharing or storage needed.
    *
    * The key is purely a local implementation detail: reth requires signed transactions,
-   * so we need SOME private key. Since L2Authority has no access control, the specific
+   * so we need SOME private key. Since CrossChainManagerL2 has no access control, the specific
    * address doesn't matter — only that all fullnodes agree on the same genesis state.
    */
   private deriveOperatorKey(): string {
@@ -115,9 +114,9 @@ export class StateManager {
   }
 
   /**
-   * Load compiled contract bytecode from Forge artifacts
+   * Load compiled contract artifact from Forge
    */
-  private loadContractBytecode(contractName: string, fileName: string): string | null {
+  private loadContractArtifact(contractName: string, fileName: string): any | null {
     const outDir = this.config.contractsOutDir;
     if (!outDir) return null;
 
@@ -128,9 +127,7 @@ export class StateManager {
     }
 
     try {
-      const artifact = JSON.parse(readFileSync(artifactPath, "utf-8"));
-      // Forge artifacts have deployedBytecode.object for runtime bytecode
-      return artifact.deployedBytecode?.object || null;
+      return JSON.parse(readFileSync(artifactPath, "utf-8"));
     } catch (e: any) {
       console.warn(`[StateManager] Failed to load artifact ${artifactPath}: ${e.message}`);
       return null;
@@ -138,8 +135,69 @@ export class StateManager {
   }
 
   /**
+   * Get deployed bytecode with immutables spliced in.
+   * Forge artifacts store immutable reference locations; we replace them with actual values.
+   */
+  private getDeployedBytecodeWithImmutables(
+    artifact: any,
+    immutableValues: Record<string, string> // name -> hex value (no 0x prefix, 64-char padded)
+  ): string | null {
+    const bytecodeHex = artifact.deployedBytecode?.object;
+    if (!bytecodeHex) return null;
+
+    // Remove 0x prefix for manipulation
+    let code = bytecodeHex.startsWith("0x") ? bytecodeHex.slice(2) : bytecodeHex;
+
+    const immutableRefs = artifact.deployedBytecode?.immutableReferences;
+    if (!immutableRefs) return "0x" + code;
+
+    // immutableRefs is { "<ast_id>": [{ start: number, length: number }, ...] }
+    // We need to map AST IDs to names. The AST is in artifact.ast.
+    // Simpler: match by searching the AST for variable declarations with the given names.
+    const astIdToName: Record<string, string> = {};
+    const ast = artifact.ast;
+    if (ast) {
+      const findImmutables = (node: any) => {
+        if (!node || typeof node !== "object") return;
+        if (node.nodeType === "VariableDeclaration" && node.mutability === "immutable") {
+          astIdToName[node.id.toString()] = node.name;
+        }
+        for (const value of Object.values(node)) {
+          if (Array.isArray(value)) {
+            value.forEach((item: any) => findImmutables(item));
+          } else if (value && typeof value === "object") {
+            findImmutables(value);
+          }
+        }
+      };
+      findImmutables(ast);
+    }
+
+    for (const [astId, refs] of Object.entries(immutableRefs) as Array<[string, any[]]>) {
+      const name = astIdToName[astId];
+      if (!name) {
+        console.warn(`[StateManager] Unknown immutable AST ID ${astId}`);
+        continue;
+      }
+      const value = immutableValues[name];
+      if (!value) {
+        console.warn(`[StateManager] No value provided for immutable ${name}`);
+        continue;
+      }
+      for (const ref of refs) {
+        const startByte = ref.start;
+        const length = ref.length;
+        const paddedValue = value.padStart(length * 2, "0");
+        code = code.slice(0, startByte * 2) + paddedValue + code.slice((startByte + length) * 2);
+      }
+    }
+
+    return "0x" + code;
+  }
+
+  /**
    * Generate a custom genesis JSON for reth
-   * Includes L2Authority, L2Proxy contracts, and operator funding in alloc
+   * Includes CrossChainManagerL2 and operator funding in alloc
    */
   private generateGenesis(): string {
     const { l2ChainId } = this.config;
@@ -159,36 +217,25 @@ export class StateManager {
       console.log(`[StateManager] Genesis: Operator funded at ${this.operatorWallet.address}`);
     }
 
-    // Deploy L2Authority at the L1 Rollups contract address on L2
+    // Deploy CrossChainManagerL2 at the L1 Rollups contract address on L2.
+    // The contract has immutables (ROLLUP_ID, SYSTEM_ADDRESS) that must be
+    // spliced into the deployed bytecode since the constructor doesn't run at genesis.
     if (this.config.rollupsAddress && this.config.contractsOutDir) {
-      const l2AuthBytecode = this.loadContractBytecode("L2Authority", "L2Authority.sol");
-      if (l2AuthBytecode) {
-        // Storage layout: slot 0 = l2ProxyImplementation address
-        const storage: Record<string, string> = {};
-        if (this.config.l2ProxyImplAddress) {
-          // slot 0: l2ProxyImplementation
-          storage["0x0000000000000000000000000000000000000000000000000000000000000000"] =
-            "0x000000000000000000000000" + this.config.l2ProxyImplAddress.slice(2).toLowerCase();
+      const artifact = this.loadContractArtifact("CrossChainManagerL2", "CrossChainManagerL2.sol");
+      if (artifact) {
+        const operatorAddr = this.operatorWallet?.address || "0x0000000000000000000000000000000000000000";
+        const bytecode = this.getDeployedBytecodeWithImmutables(artifact, {
+          ROLLUP_ID: this.config.rollupId.toString(16).padStart(64, "0"),
+          SYSTEM_ADDRESS: operatorAddr.slice(2).toLowerCase().padStart(64, "0"),
+        });
+
+        if (bytecode) {
+          alloc[this.config.rollupsAddress.toLowerCase()] = {
+            code: bytecode,
+            balance: "0x0",
+          };
+          console.log(`[StateManager] Genesis: CrossChainManagerL2 at ${this.config.rollupsAddress} (SYSTEM_ADDRESS=${operatorAddr})`);
         }
-
-        alloc[this.config.rollupsAddress.toLowerCase()] = {
-          code: l2AuthBytecode,
-          storage,
-          balance: "0x0",
-        };
-        console.log(`[StateManager] Genesis: L2Authority at ${this.config.rollupsAddress}`);
-      }
-    }
-
-    // Deploy L2Proxy implementation at the same address as on L1
-    if (this.config.l2ProxyImplAddress && this.config.contractsOutDir) {
-      const l2ProxyBytecode = this.loadContractBytecode("L2Proxy", "L2Proxy.sol");
-      if (l2ProxyBytecode) {
-        alloc[this.config.l2ProxyImplAddress.toLowerCase()] = {
-          code: l2ProxyBytecode,
-          balance: "0x0",
-        };
-        console.log(`[StateManager] Genesis: L2Proxy impl at ${this.config.l2ProxyImplAddress}`);
       }
     }
 
@@ -553,6 +600,17 @@ export class StateManager {
   }
 
   /**
+   * Get the L1 Rollups / L2 CrossChainManagerL2 contract address
+   */
+  getRollupsAddress(): string {
+    return this.config.rollupsAddress || "0x0000000000000000000000000000000000000000";
+  }
+
+  getOperatorAddress(): string {
+    return this.operatorWallet?.address || "0x0000000000000000000000000000000000000000";
+  }
+
+  /**
    * Update state from L1 event
    */
   updateState(newStateRoot: string, blockNumber: bigint): void {
@@ -578,7 +636,7 @@ export class StateManager {
    * Cache executions for later lookup
    * Called when builder notifies us of loaded executions
    */
-  cacheExecutions(executions: Execution[]): void {
+  cacheExecutions(executions: ExecutionEntry[]): void {
     for (const exec of executions) {
       const existing = this.executionCache.get(exec.actionHash) || [];
       existing.push(exec);
@@ -596,7 +654,7 @@ export class StateManager {
   findAndConsumeExecution(
     actionHash: string,
     currentState: string
-  ): Execution | null {
+  ): ExecutionEntry | null {
     const executions = this.executionCache.get(actionHash);
     if (!executions || executions.length === 0) {
       return null;
@@ -633,7 +691,7 @@ export class StateManager {
   /**
    * Get cached executions for an action hash (without consuming)
    */
-  getExecutions(actionHash: string): Execution[] {
+  getExecutions(actionHash: string): ExecutionEntry[] {
     return this.executionCache.get(actionHash) || [];
   }
 
@@ -710,7 +768,7 @@ export class StateManager {
    * Execute a "system call" — a protocol-level transaction on the local L2.
    *
    * Uses a randomly-generated operator account (not a well-known dev account)
-   * to sign and submit the transaction. Since L2Authority has no access control
+   * to sign and submit the transaction. Since CrossChainManagerL2 has no access control
    * and authorizedProxies() always returns true, any caller can perform these
    * operations. The operator key is stored in the data directory and is only
    * known to this fullnode process.
@@ -803,8 +861,8 @@ export class StateManager {
   }
 
   /**
-   * Ensure an L2Proxy is deployed at the correct address on L2.
-   * If the proxy doesn't exist yet, deploys it via L2Authority.deployProxy().
+   * Ensure a CrossChainProxy is deployed at the correct address on L2.
+   * If the proxy doesn't exist yet, deploys it via CrossChainManagerL2.createCrossChainProxy().
    * @param originalAddress The original address (L1 sender)
    * @param rollupId The rollup ID
    * @param domain The chain ID domain (L1 chain ID)
@@ -818,15 +876,14 @@ export class StateManager {
       throw new Error("rollupsAddress not configured - cannot deploy proxy on L2");
     }
 
-    // Compute the expected proxy address (same as L1's computeL2ProxyAddress)
-    // We ask the L2Authority contract (deployed at rollupsAddress on L2) to compute it
-    const l2AuthIface = new Interface([
-      "function computeProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
-      "function deployProxy(address originalAddress, uint256 originalRollupId, uint256 domain) returns (address)",
+    // Compute the expected proxy address via CrossChainManagerL2
+    const managerIface = new Interface([
+      "function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
+      "function createCrossChainProxy(address originalAddress, uint256 originalRollupId) returns (address)",
     ]);
 
     // Compute expected address
-    const computeCalldata = l2AuthIface.encodeFunctionData("computeProxyAddress", [
+    const computeCalldata = managerIface.encodeFunctionData("computeCrossChainProxyAddress", [
       originalAddress, rollupId, domain
     ]);
     const proxyAddrResult = await this.l2Provider.send("eth_call", [
@@ -841,10 +898,10 @@ export class StateManager {
       return proxyAddress; // Already deployed
     }
 
-    // Deploy via system call to L2Authority
-    console.log(`[StateManager] Deploying L2 proxy for ${originalAddress} at ${proxyAddress}`);
-    const deployCalldata = l2AuthIface.encodeFunctionData("deployProxy", [
-      originalAddress, rollupId, domain
+    // Deploy via system call to CrossChainManagerL2
+    console.log(`[StateManager] Deploying CrossChainProxy for ${originalAddress} at ${proxyAddress}`);
+    const deployCalldata = managerIface.encodeFunctionData("createCrossChainProxy", [
+      originalAddress, rollupId
     ]);
     await this.systemCall(this.config.rollupsAddress, deployCalldata);
 
@@ -854,7 +911,7 @@ export class StateManager {
       throw new Error(`Failed to deploy proxy at ${proxyAddress}`);
     }
 
-    console.log(`[StateManager] L2 proxy deployed at ${proxyAddress}`);
+    console.log(`[StateManager] CrossChainProxy deployed at ${proxyAddress}`);
     return proxyAddress;
   }
 

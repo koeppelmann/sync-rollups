@@ -6,7 +6,7 @@
 import { JsonRpcProvider, keccak256, AbiCoder } from "ethers";
 import {
   Action,
-  Execution,
+  ExecutionEntry,
   ExecutionPlan,
   StateDelta,
   SimulationResult,
@@ -17,7 +17,7 @@ import {
   actionToJson,
   actionFromJson,
   stateDeltaFromJson,
-  executionToJson,
+  executionEntryToJson,
 } from "../fullnode/types.js";
 
 export interface ExecutionPlannerConfig {
@@ -64,7 +64,7 @@ export class ExecutionPlanner {
    * Returns all executions needed to process the transaction
    */
   async planL2Transaction(rlpEncodedTx: string): Promise<ExecutionPlan> {
-    const executions: Execution[] = [];
+    const entries: ExecutionEntry[] = [];
 
     // Get current state from L1 directly (this is what the contract will check)
     const states = await this.getStates();
@@ -97,7 +97,7 @@ export class ExecutionPlanner {
     console.log(`[Planner] New state: ${newState.slice(0, 18)}...`);
 
     // Create execution for L2TX -> RESULT
-    const execution: Execution = {
+    const execution: ExecutionEntry = {
       stateDeltas: [
         {
           rollupId: this.config.rollupId,
@@ -110,10 +110,10 @@ export class ExecutionPlanner {
       nextAction: resultAction,
     };
 
-    executions.push(execution);
+    entries.push(execution);
 
     return {
-      executions,
+      entries,
       rootActionHash,
       proof: "", // Will be filled by proof-generator
     };
@@ -131,7 +131,7 @@ export class ExecutionPlanner {
     l2Sender: string,
     sourceProxyOnL1: string
   ): Promise<ExecutionPlan> {
-    const executions: Execution[] = [];
+    const entries: ExecutionEntry[] = [];
 
     // Root action: L2TX
     const states = await this.getStates();
@@ -172,7 +172,7 @@ export class ExecutionPlanner {
     );
 
     // Execution #1: L2TX -> CALL(L1)
-    const rootExecution: Execution = {
+    const rootExecutionEntry: ExecutionEntry = {
       stateDeltas:
         l2txSimulation.stateDeltas.length > 0
           ? l2txSimulation.stateDeltas
@@ -187,7 +187,7 @@ export class ExecutionPlanner {
       actionHash: rootActionHash,
       nextAction: callAction,
     };
-    executions.push(rootExecution);
+    entries.push(rootExecutionEntry);
 
     // Result action hash is what Rollups._processCallAtScope computes after CALL.
     const callResultAction = createResultAction(
@@ -199,7 +199,7 @@ export class ExecutionPlanner {
 
     // Execution #2: RESULT(call) -> final RESULT.
     // No rollup state change here; this continuation only finalizes the call chain.
-    const continuationExecution: Execution = {
+    const continuationExecutionEntry: ExecutionEntry = {
       stateDeltas: [],
       actionHash: callResultHash,
       nextAction: createResultAction(
@@ -208,10 +208,10 @@ export class ExecutionPlanner {
         l1CallResult.failed
       ),
     };
-    executions.push(continuationExecution);
+    entries.push(continuationExecutionEntry);
 
     return {
-      executions,
+      entries,
       rootActionHash,
       proof: "",
     };
@@ -235,7 +235,7 @@ export class ExecutionPlanner {
     value: bigint,
     sourceAddress: string
   ): Promise<ExecutionPlan> {
-    const executions: Execution[] = [];
+    const entries: ExecutionEntry[] = [];
 
     // Get current state from fullnode
     const currentState = await this.getFullnodeState();
@@ -266,7 +266,7 @@ export class ExecutionPlanner {
     );
 
     // Create execution for CALL -> RESULT
-    const execution: Execution = {
+    const execution: ExecutionEntry = {
       stateDeltas:
         simulation.stateDeltas.length > 0
           ? simulation.stateDeltas
@@ -282,10 +282,10 @@ export class ExecutionPlanner {
       nextAction: resultAction,
     };
 
-    executions.push(execution);
+    entries.push(execution);
 
     return {
-      executions,
+      entries,
       rootActionHash,
       proof: "", // Will be filled by proof-generator
     };
@@ -313,23 +313,23 @@ export class ExecutionPlanner {
     sourceProxyAddress: string, // L2 proxy representing the original L1 caller
     originalSender: string      // Original L1 sender address (for L2 proxy deployment)
   ): Promise<ExecutionPlan> {
-    const executions: Execution[] = [];
+    const entries: ExecutionEntry[] = [];
 
     // Get current state from L1 (this is what the contract will check)
     const states = await this.getStates();
     const currentState = states.l1State.stateRoot;
     console.log(`[Planner] Current L1 state: ${currentState.slice(0, 18)}...`);
 
-    // Build CALL action exactly as L2Proxy.fallback() does:
-    // - sourceAddress = address(this) = targetProxyAddress
-    // - sourceRollup = rollupId = this.config.rollupId (NOT L1 chain ID!)
+    // Build CALL action matching Rollups.executeCrossChainCall:
+    // - sourceAddress = msg.sender passed by proxy = the original L1 caller
+    // - sourceRollup = MAINNET_ROLLUP_ID = 0
     const callAction = createCallAction(
-      this.config.rollupId,  // rollupId
-      l2Target,              // destination = _getOriginalAddress()
+      this.config.rollupId,  // rollupId = proxyInfo.originalRollupId
+      l2Target,              // destination = proxyInfo.originalAddress
       value,                 // msg.value
-      callData,              // msg.data
-      targetProxyAddress,    // sourceAddress = address(this)
-      this.config.rollupId,  // sourceRollup = rollupId (NOT L1 chain ID!)
+      callData,              // callData from proxy fallback
+      originalSender,        // sourceAddress = msg.sender (user who called proxy)
+      0n,                    // sourceRollup = MAINNET_ROLLUP_ID = 0
       []                     // scope = empty
     );
     const rootActionHash = this.computeActionHash(callAction);
@@ -352,15 +352,13 @@ export class ExecutionPlanner {
       simulation.failed
     );
 
-    // For L1→L2 calls, etherDelta should be 0 because the L2Proxy already calls
-    // depositEther() which increments the rollup's etherBalance on L1.
-    // We don't want to double-count by also adding it via etherDelta.
-    const etherDelta = 0n;
+    // etherDelta must match the actual ETH flow tracked by the Rollups contract.
+    // When the user sends ETH to the proxy, _etherDelta += msg.value.
+    // The execution entry's stateDeltas.etherDelta must sum to the same value.
+    const etherDelta = value;
 
-    // Build state deltas - always use etherDelta=0 for L1→L2 calls because
-    // the L2Proxy already calls depositEther() which handles the balance update
     const stateDeltas: StateDelta[] = simulation.stateDeltas.length > 0
-      ? simulation.stateDeltas.map(sd => ({ ...sd, etherDelta: 0n })) // Override etherDelta to 0
+      ? simulation.stateDeltas.map(sd => ({ ...sd, etherDelta }))
       : [
           {
             rollupId: this.config.rollupId,
@@ -371,17 +369,17 @@ export class ExecutionPlanner {
         ];
 
     // Create execution for CALL -> RESULT
-    const execution: Execution = {
+    const execution: ExecutionEntry = {
       stateDeltas,
       actionHash: rootActionHash,
       nextAction: resultAction,
     };
 
-    executions.push(execution);
+    entries.push(execution);
     console.log(`[Planner] Created execution with etherDelta: ${etherDelta}`);
 
     return {
-      executions,
+      entries,
       rootActionHash,
       proof: "", // Will be filled by proof-generator
     };
@@ -507,11 +505,11 @@ export class ExecutionPlanner {
   /**
    * Notify fullnode of executions to cache
    */
-  async notifyExecutions(executions: Execution[]): Promise<void> {
+  async notifyExecutions(entries: ExecutionEntry[]): Promise<void> {
     // Convert to JSON-safe format
-    const executionsJson = executions.map(executionToJson);
+    const entriesJson = entries.map(executionEntryToJson);
     await this.fullnodeProvider.send("syncrollups_loadExecutions", [
-      executionsJson,
+      entriesJson,
     ]);
   }
 

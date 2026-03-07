@@ -8,17 +8,17 @@ import { StateManager } from "./state-manager.js";
 import { EventProcessor } from "./event-processor.js";
 import {
   Action,
-  Execution,
+  ExecutionEntry,
   SimulationResult,
   StateDelta,
   ActionType,
   ActionJson,
-  ExecutionJson,
+  ExecutionEntryJson,
   actionFromJson,
   actionToJson,
   stateDeltaToJson,
-  executionFromJson,
-  executionToJson,
+  executionEntryFromJson,
+  executionEntryToJson,
 } from "./types.js";
 
 export interface RpcServerConfig {
@@ -205,12 +205,12 @@ export class RpcServer {
 
           case "syncrollups_loadExecutions":
             // Builder notifies us of executions to cache
-            const executionsJson = params?.[0] as ExecutionJson[];
+            const executionsJson = params?.[0] as ExecutionEntryJson[];
             if (!executionsJson || !Array.isArray(executionsJson)) {
               throw new Error("Invalid executions parameter");
             }
             // Convert from JSON to native types
-            const executions = executionsJson.map(executionFromJson);
+            const executions = executionsJson.map(executionEntryFromJson);
             this.stateManager.cacheExecutions(executions);
             result = { cached: executions.length };
             break;
@@ -337,44 +337,36 @@ export class RpcServer {
       // This is done BEFORE recording preSimBlock so the proxy deployment persists
       // even if we rollback the simulation (event processor will also deploy it).
       const originalSender = params.originalSender || params.from;
-      const l1ChainId = await this.getL1ChainId();
+      // Use L2 chain ID as domain — on L2, createCrossChainProxy uses block.chainid
+      const l2ChainId = await this.getL2ChainId();
       const proxyAddress = await this.stateManager.ensureProxyDeployed(
         originalSender,
         rollupId,
-        BigInt(l1ChainId)
+        BigInt(l2ChainId)
       );
 
       // Record L2 block AFTER proxy deployment so we only rollback simulation blocks,
       // not the proxy deployment itself. This prevents losing persisted state.
       preSimBlock = await this.stateManager.getL2BlockNumber();
 
-      // Build the executeOnBehalf calldata
-      const { Interface, AbiCoder } = await import("ethers");
-      const proxyIface = new Interface([
-        "function executeOnBehalf(address destination, bytes calldata data) payable returns (bool, bytes)"
-      ]);
-      const execCalldata = proxyIface.encodeFunctionData("executeOnBehalf", [
-        params.to,
-        params.data,
-      ]);
-
-      // First, dry-run via eth_call to check if the inner call succeeds.
-      // Use state overrides to give the source proxy enough balance for the value,
-      // since in the real execution the operator funds the call via systemCall.
+      const { Interface } = await import("ethers");
       const provider = this.stateManager.getL2Provider();
+
+      // Dry-run: call the target directly via eth_call to check if it would succeed.
+      // Uses the operator address as msg.sender to match the actual system call execution.
+      const operatorAddr = this.stateManager.getOperatorAddress();
       const stateOverrides: Record<string, { balance: string }> = {};
       if (value > 0n) {
-        // Give the proxy enough balance to cover the call value
-        stateOverrides[proxyAddress] = {
+        stateOverrides[operatorAddr] = {
           balance: "0x" + (value * 2n).toString(16),
         };
       }
       const callArgs: any[] = [
         {
-          from: proxyAddress,
-          to: proxyAddress,  // sourceProxy calls executeOnBehalf on itself
+          from: operatorAddr,
+          to: params.to,
           value: "0x" + value.toString(16),
-          data: execCalldata,
+          data: params.data,
         },
         "latest",
       ];
@@ -384,30 +376,24 @@ export class RpcServer {
       let innerSuccess = false;
       try {
         const callResult = await provider.send("eth_call", callArgs);
-
-        // Decode the (bool success, bytes returnData) result
-        const decoded = AbiCoder.defaultAbiCoder().decode(
-          ["bool", "bytes"],
-          callResult
-        );
-        innerSuccess = decoded[0] as boolean;
-        returnData = decoded[1] as string;
+        innerSuccess = true;
+        returnData = callResult;
       } catch (dryRunErr: any) {
-        // eth_call reverted (e.g. L2Proxy reverts on failed value call)
-        // or returned data that can't be decoded — treat as failed
         console.log(`[RpcServer] L1→L2 dry-run reverted: ${dryRunErr.message?.slice(0, 120)}`);
         innerSuccess = false;
       }
 
       if (!innerSuccess) {
-        // Inner call would fail — mark as failed, don't execute state-changing call
         console.log(`[RpcServer] L1→L2 inner call would fail, marking as failed`);
         failed = true;
       } else {
-        // Inner call succeeds — execute the state-changing call to get state root
+        // Inner call succeeds — execute directly via operator system call.
+        // On L2, the operator calls the target directly. msg.sender at the target
+        // will be the operator. This matches the fullnode replay which also uses
+        // the operator for system calls.
         const txHash = await this.stateManager.systemCall(
-          proxyAddress,
-          execCalldata,
+          params.to,
+          params.data,
           "0x" + value.toString(16)
         );
         console.log(`[RpcServer] L1→L2 call simulated: ${txHash}`);
@@ -441,7 +427,7 @@ export class RpcServer {
       rollupId: "0x" + rollupId.toString(16),
       currentState,
       newState,
-      etherDelta: "0x0", // etherDelta is 0 for L1→L2 calls (L2Proxy.depositEther handles it)
+      etherDelta: "0x0", // etherDelta is 0 for L1→L2 calls
     });
 
     return {
@@ -450,6 +436,19 @@ export class RpcServer {
       stateDeltas,
       newState,
     };
+  }
+
+  /**
+   * Get the L2 chain ID (cached after first call)
+   */
+  private l2ChainIdCache: string | null = null;
+  private async getL2ChainId(): Promise<string> {
+    if (!this.l2ChainIdCache) {
+      const provider = this.stateManager.getL2Provider();
+      const chainIdHex = await provider.send("eth_chainId", []);
+      this.l2ChainIdCache = BigInt(chainIdHex).toString();
+    }
+    return this.l2ChainIdCache;
   }
 
   /**

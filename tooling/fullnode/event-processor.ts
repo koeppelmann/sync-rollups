@@ -5,7 +5,7 @@
 
 import { Contract, JsonRpcProvider, Interface, EventLog, Log, Transaction, AbiCoder } from "ethers";
 import { StateManager, SyncState, L1L2Checkpoint } from "./state-manager.js";
-import { ROLLUPS_EVENTS, Execution, ActionType } from "./types.js";
+import { ROLLUPS_EVENTS, ExecutionEntry, ActionType } from "./types.js";
 
 export interface EventProcessorConfig {
   l1RpcUrl: string;
@@ -21,20 +21,20 @@ const ROLLUPS_ABI = [
   "event StateUpdated(uint256 indexed rollupId, bytes32 newStateRoot)",
   "event VerificationKeyUpdated(uint256 indexed rollupId, bytes32 newVerificationKey)",
   "event OwnershipTransferred(uint256 indexed rollupId, address indexed previousOwner, address indexed newOwner)",
-  "event L2ProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
-  "event ExecutionsLoaded(uint256 count)",
+  "event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
   "event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
+  "event ExecutionConsumed(bytes32 indexed actionHash, tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope) action)",
   // Read functions we need
   "function rollups(uint256) view returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)",
-  "function computeL2ProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
+  "function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
   // Functions we need to decode L1 transactions
-  "function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external",
+  "function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes)",
 ];
 
-// L2Proxy ABI for reading original address
-const L2PROXY_ABI = [
-  "function originalAddress() external view returns (address)",
-  "function originalRollupId() external view returns (uint256)",
+// CrossChainProxy ABI for reading identity
+const CROSS_CHAIN_PROXY_ABI = [
+  "function ORIGINAL_ADDRESS() external view returns (address)",
+  "function ORIGINAL_ROLLUP_ID() external view returns (uint256)",
 ];
 
 interface ProcessedEvent {
@@ -215,13 +215,23 @@ export class EventProcessor {
       toBlock
     );
 
-    // Fetch ExecutionsLoaded events (not indexed by rollupId)
-    const loadedFilter = this.rollupsContract.filters.ExecutionsLoaded();
-    const loadedEvents = await this.rollupsContract.queryFilter(
-      loadedFilter,
+    // Fetch ExecutionConsumed events (contains the Action struct with all details)
+    const consumedFilter = this.rollupsContract.filters.ExecutionConsumed();
+    const consumedEvents = await this.rollupsContract.queryFilter(
+      consumedFilter,
       fromBlock,
       toBlock
     );
+
+    // Index ExecutionConsumed events by tx hash for quick lookup
+    const consumedByTxHash = new Map<string, any[]>();
+    for (const event of consumedEvents) {
+      if (event instanceof EventLog) {
+        const existing = consumedByTxHash.get(event.transactionHash) || [];
+        existing.push(event.args);
+        consumedByTxHash.set(event.transactionHash, existing);
+      }
+    }
 
     // Combine and sort by block number and log index
     const allEvents: ProcessedEvent[] = [];
@@ -243,6 +253,9 @@ export class EventProcessor {
 
     for (const event of executionEvents) {
       if (event instanceof EventLog) {
+        // Find the first ExecutionConsumed event from the same tx
+        const consumed = consumedByTxHash.get(event.transactionHash);
+        const firstConsumed = consumed?.[0];
         allEvents.push({
           blockNumber: event.blockNumber,
           logIndex: event.index,
@@ -252,20 +265,17 @@ export class EventProcessor {
             rollupId: event.args[0],
             currentState: event.args[1],
             newState: event.args[2],
-          },
-        });
-      }
-    }
-
-    for (const event of loadedEvents) {
-      if (event instanceof EventLog) {
-        allEvents.push({
-          blockNumber: event.blockNumber,
-          logIndex: event.index,
-          eventName: "ExecutionsLoaded",
-          transactionHash: event.transactionHash,
-          args: {
-            count: event.args[0],
+            // Action from ExecutionConsumed event (if available)
+            consumedAction: firstConsumed ? {
+              actionType: Number(firstConsumed[1][0]),
+              rollupId: firstConsumed[1][1],
+              destination: firstConsumed[1][2],
+              value: firstConsumed[1][3],
+              data: firstConsumed[1][4],
+              failed: firstConsumed[1][5],
+              sourceAddress: firstConsumed[1][6],
+              sourceRollup: firstConsumed[1][7],
+            } : null,
           },
         });
       }
@@ -314,16 +324,8 @@ export class EventProcessor {
         console.log(
           `[EventProcessor] L2ExecutionPerformed at block ${blockNumber}: ${args.currentState.slice(0, 10)}... -> ${args.newState.slice(0, 10)}...`
         );
-        // Replay the execution on L2 EVM by extracting data from L1 tx
-        await this.replayExecution(args.currentState, args.newState, blockNumber, transactionHash);
-        break;
-
-      case "ExecutionsLoaded":
-        console.log(
-          `[EventProcessor] ExecutionsLoaded at block ${blockNumber}: ${args.count} executions`
-        );
-        // Executions are loaded on L1 - fullnode doesn't need to cache them
-        // We will extract execution data from L1 tx when L2ExecutionPerformed is emitted
+        // Replay the execution on L2 EVM using action data from ExecutionConsumed event
+        await this.replayExecution(args.currentState, args.newState, blockNumber, transactionHash, args.consumedAction);
         break;
 
       default:
@@ -339,7 +341,8 @@ export class EventProcessor {
     currentState: string,
     newState: string,
     blockNumber: number,
-    l1TxHash: string
+    l1TxHash: string,
+    consumedAction?: { actionType: number; rollupId: bigint; destination: string; value: bigint; data: string; failed: boolean; sourceAddress: string; sourceRollup: bigint } | null
   ): Promise<void> {
     console.log(
       `[EventProcessor] Replaying execution from L1 tx ${l1TxHash.slice(0, 10)}...`
@@ -393,58 +396,56 @@ export class EventProcessor {
 
         const txHash = await this.stateManager.replayL2TX(parsedTx);
         console.log(`[EventProcessor] L2TX replayed: ${txHash}`);
-      } else {
-        // This is an L1→L2 call via L2Proxy (L1 user called proxy on L1)
-        // We replay it on L2 using system calls + proxy deployment
-        const proxyAddress = l1Tx.to;
-        if (!proxyAddress) {
-          throw new Error("L1 transaction has no 'to' address");
-        }
+      } else if (consumedAction && consumedAction.actionType === 0) {
+        // L1→L2 call: use the ExecutionConsumed event's Action struct
+        // actionType 0 = CALL
+        const l2Target = consumedAction.destination;
+        const sourceAddress = consumedAction.sourceAddress;
+        const callData = consumedAction.data;
+        const value = consumedAction.value;
 
-        console.log(`[EventProcessor] L1→L2 call via proxy ${proxyAddress.slice(0, 10)}...`);
+        console.log(`[EventProcessor] L1→L2 call (from ExecutionConsumed event)`);
+        console.log(`[EventProcessor] L2 target: ${l2Target}, source: ${sourceAddress}`);
 
-        // Read the proxy's original L2 target address
-        const proxyContract = new Contract(proxyAddress, L2PROXY_ABI, this.l1Provider);
-        const l2Target = await proxyContract.originalAddress();
-        console.log(`[EventProcessor] L2 target: ${l2Target}`);
-
-        // Derive caller-side L2 proxy from the original L1 sender.
-        // This is the address that should appear as msg.sender on L2.
-        const l1ChainId = l1Tx.chainId ?? (await this.l1Provider.getNetwork()).chainId;
-        const sourceProxy = await this.rollupsContract.computeL2ProxyAddress(
-          l1Tx.from,
-          this.config.rollupId,
-          l1ChainId
-        );
-        console.log(
-          `[EventProcessor] L2 source proxy: ${sourceProxy} (from L1 sender ${l1Tx.from})`
-        );
-
-        // Step 1: Ensure the source proxy is deployed on L2
-        // This deploys an L2Proxy at the same CREATE2 address as on L1
+        // Ensure the source proxy is deployed on L2
+        const l2Provider = this.stateManager.getL2Provider();
+        const l2ChainIdHex = await l2Provider.send("eth_chainId", []);
+        const l2ChainId = BigInt(l2ChainIdHex);
         await this.stateManager.ensureProxyDeployed(
-          l1Tx.from,
+          sourceAddress,
           this.config.rollupId,
-          BigInt(l1ChainId)
+          l2ChainId
         );
 
-        // Step 2: Call sourceProxy.executeOnBehalf(l2Target, calldata) via system call
-        // The proxy will forward the call to l2Target, making msg.sender = sourceProxy
-        const proxyIface = new Interface([
-          "function executeOnBehalf(address destination, bytes calldata data) payable returns (bool, bytes)"
-        ]);
-        const execCalldata = proxyIface.encodeFunctionData("executeOnBehalf", [
-          l2Target,
-          l1Tx.data,
-        ]);
-
-        const value = l1Tx.value;
+        // Execute the call directly via operator system call.
+        // msg.sender at the target will be the operator (same as builder simulation).
         const result = await this.stateManager.systemCall(
-          sourceProxy,
-          execCalldata,
+          l2Target,
+          callData,
           "0x" + value.toString(16)
         );
-        console.log(`[EventProcessor] System call executed, result: ${result.slice(0, 20)}...`);
+        console.log(`[EventProcessor] System call executed: ${result.slice(0, 20)}...`);
+      } else {
+        // Fallback: try to parse from L1 tx (legacy path)
+        const proxyAddress = l1Tx.to;
+        if (!proxyAddress) {
+          throw new Error("L1 transaction has no 'to' address and no ExecutionConsumed event");
+        }
+
+        console.log(`[EventProcessor] L1→L2 call via proxy ${proxyAddress.slice(0, 10)}... (legacy path)`);
+
+        const proxyContract = new Contract(proxyAddress, CROSS_CHAIN_PROXY_ABI, this.l1Provider);
+        const l2Target = await proxyContract.ORIGINAL_ADDRESS();
+        console.log(`[EventProcessor] L2 target: ${l2Target}`);
+
+        // Execute via operator system call (matches builder simulation)
+        const value = l1Tx.value;
+        const result = await this.stateManager.systemCall(
+          l2Target,
+          l1Tx.data,
+          "0x" + value.toString(16)
+        );
+        console.log(`[EventProcessor] System call executed: ${result.slice(0, 20)}...`);
       }
 
       // Verify the state matches what L1 expects

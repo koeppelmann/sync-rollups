@@ -52,7 +52,7 @@ export interface StateCommitment {
 /**
  * Represents a pre-computed execution that can affect multiple rollups
  */
-export interface Execution {
+export interface ExecutionEntry {
   stateDeltas: StateDelta[];
   actionHash: string; // bytes32
   nextAction: Action;
@@ -82,7 +82,7 @@ export interface RollupState {
  * Execution plan returned by the builder
  */
 export interface ExecutionPlan {
-  executions: Execution[];
+  entries: ExecutionEntry[];
   rootActionHash: string; // Entry point action hash
   proof: string; // Admin signature or ZK proof
 }
@@ -104,7 +104,7 @@ export const ACTION_TUPLE_TYPE =
 export const STATE_DELTA_TUPLE_TYPE =
   "tuple(uint256 rollupId, bytes32 currentState, bytes32 newState, int256 etherDelta)";
 
-export const EXECUTION_TUPLE_TYPE = `tuple(${STATE_DELTA_TUPLE_TYPE}[] stateDeltas, bytes32 actionHash, ${ACTION_TUPLE_TYPE} nextAction)`;
+export const EXECUTION_ENTRY_TUPLE_TYPE = `tuple(${STATE_DELTA_TUPLE_TYPE}[] stateDeltas, bytes32 actionHash, ${ACTION_TUPLE_TYPE} nextAction)`;
 
 // Event signatures for the Rollups contract
 export const ROLLUPS_EVENTS = {
@@ -115,9 +115,8 @@ export const ROLLUPS_EVENTS = {
     "VerificationKeyUpdated(uint256 indexed rollupId, bytes32 newVerificationKey)",
   OwnershipTransferred:
     "OwnershipTransferred(uint256 indexed rollupId, address indexed previousOwner, address indexed newOwner)",
-  L2ProxyCreated:
-    "L2ProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
-  ExecutionsLoaded: "ExecutionsLoaded(uint256 count)",
+  CrossChainProxyCreated:
+    "CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
   L2ExecutionPerformed:
     "L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
 };
@@ -217,7 +216,7 @@ export interface StateDeltaJson {
   etherDelta: string;
 }
 
-export interface ExecutionJson {
+export interface ExecutionEntryJson {
   stateDeltas: StateDeltaJson[];
   actionHash: string;
   nextAction: ActionJson;
@@ -282,7 +281,7 @@ export function stateDeltaFromJson(json: StateDeltaJson): StateDelta {
 }
 
 // Serialize Execution to JSON-safe format
-export function executionToJson(exec: Execution): ExecutionJson {
+export function executionEntryToJson(exec: ExecutionEntry): ExecutionEntryJson {
   return {
     stateDeltas: exec.stateDeltas.map(stateDeltaToJson),
     actionHash: exec.actionHash,
@@ -291,7 +290,7 @@ export function executionToJson(exec: Execution): ExecutionJson {
 }
 
 // Deserialize Execution from JSON
-export function executionFromJson(json: ExecutionJson): Execution {
+export function executionEntryFromJson(json: ExecutionEntryJson): ExecutionEntry {
   return {
     stateDeltas: json.stateDeltas.map(stateDeltaFromJson),
     actionHash: json.actionHash,

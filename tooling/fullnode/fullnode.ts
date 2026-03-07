@@ -28,8 +28,7 @@ export interface FullnodeConfig {
   // Polling interval for L1 events (ms)
   pollingInterval?: number;
 
-  // L2 genesis alloc — contract addresses to mirror on L2
-  l2ProxyImplAddress?: string; // L1 L2Proxy implementation address
+  // L2 genesis alloc
   contractsOutDir?: string;    // Path to sync-rollups/out/ for compiled bytecode
 
   // Data directory for persistent state
@@ -54,7 +53,6 @@ export class Fullnode {
       l2EvmPort: config.l2EvmPort,
       dataDir: config.dataDir,
       rollupsAddress: config.rollupsAddress,
-      l2ProxyImplAddress: config.l2ProxyImplAddress,
       contractsOutDir: config.contractsOutDir,
     };
     this.stateManager = new StateManager(stateConfig);
@@ -203,7 +201,6 @@ async function main() {
       "0x0000000000000000000000000000000000000000000000000000000000000000"
     ),
     pollingInterval: parseInt(getArg("poll-interval", "2000")),
-    l2ProxyImplAddress: args.indexOf("--l2-proxy-impl") !== -1 ? getArg("l2-proxy-impl") : undefined,
     contractsOutDir: args.indexOf("--contracts-out") !== -1 ? getArg("contracts-out") : undefined,
     dataDir: args.indexOf("--data-dir") !== -1 ? getArg("data-dir") : undefined,
   };

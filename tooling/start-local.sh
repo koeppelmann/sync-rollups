@@ -61,10 +61,6 @@ ROLLUPS_ADDR=$(cast send --private-key "$ADMIN_KEY" --rpc-url http://localhost:$
 echo "  Rollups: $ROLLUPS_ADDR"
 cd tooling
 
-# Read L2Proxy implementation address from Rollups contract (deployed in constructor)
-L2PROXY_IMPL=$(cast call "$ROLLUPS_ADDR" "l2ProxyImplementation()(address)" --rpc-url http://localhost:$L1_RPC_PORT)
-echo "  L2Proxy impl: $L2PROXY_IMPL"
-
 # Path to compiled contract artifacts
 CONTRACTS_OUT=$(realpath ../out)
 
@@ -74,7 +70,6 @@ echo ""
 echo "Computing L2 genesis state root..."
 GENESIS_STATE=$(npx tsx scripts/compute-genesis-root.ts \
   --rollups "$ROLLUPS_ADDR" \
-  --l2-proxy-impl "$L2PROXY_IMPL" \
   --contracts-out "$CONTRACTS_OUT")
 echo "  Genesis state root: $GENESIS_STATE"
 
@@ -101,7 +96,6 @@ npm exec tsx fullnode/fullnode.ts -- \
   --l2-port $PUBLIC_L2_EVM_PORT \
   --rpc-port $PUBLIC_FULLNODE_RPC_PORT \
   --initial-state "$GENESIS_STATE" \
-  --l2-proxy-impl "$L2PROXY_IMPL" \
   --contracts-out "$CONTRACTS_OUT" \
   > logs/fullnode-public.log 2>&1 &
 sleep 10  # reth needs more startup time than Anvil
@@ -116,7 +110,6 @@ npm exec tsx fullnode/fullnode.ts -- \
   --l2-port $BUILDER_L2_EVM_PORT \
   --rpc-port $BUILDER_FULLNODE_RPC_PORT \
   --initial-state "$GENESIS_STATE" \
-  --l2-proxy-impl "$L2PROXY_IMPL" \
   --contracts-out "$CONTRACTS_OUT" \
   > logs/fullnode-builder.log 2>&1 &
 sleep 10  # reth needs more startup time than Anvil

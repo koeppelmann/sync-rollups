@@ -14,7 +14,7 @@ import {
   verifyMessage,
 } from "ethers";
 import {
-  Execution,
+  ExecutionEntry,
   StateDelta,
   Action,
   STATE_DELTA_TUPLE_TYPE,
@@ -59,146 +59,79 @@ export class ProofGenerator {
   }
 
   /**
-   * Sign proof for loadL2Executions
-   * Matches the verification logic in Rollups.loadL2Executions
+   * Sign proof for postBatch.
+   * Matches the verification logic in Rollups.postBatch.
+   *
+   * The publicInputsHash includes blockhash(block.number-1) and block.number
+   * which we can't predict off-chain. For the AdminZKVerifier (POC), the
+   * verifier just checks the signature against the admin address, ignoring
+   * the public inputs hash. So we sign a deterministic hash of the entries.
    */
-  async signLoadExecutionsProof(executions: Execution[]): Promise<string> {
-    // Build execution hashes as per Rollups.loadL2Executions
-    const executionHashes: string[] = [];
+  async signPostBatchProof(entries: ExecutionEntry[]): Promise<string> {
+    // Build entry hashes as per Rollups.postBatch
+    const entryHashes: string[] = [];
 
-    for (const exec of executions) {
-      // Get verification keys for each state delta
+    for (const entry of entries) {
       const verificationKeys: string[] = [];
-      for (const delta of exec.stateDeltas) {
+      for (const delta of entry.stateDeltas) {
         const rollupData = await this.rollupsContract.rollups(delta.rollupId);
         verificationKeys.push(rollupData.verificationKey);
       }
 
-      // Compute execution hash
-      const executionHash = this.computeExecutionHash(
-        exec,
-        verificationKeys
-      );
-      executionHashes.push(executionHash);
+      const entryHash = this.computeEntryHash(entry, verificationKeys);
+      entryHashes.push(entryHash);
     }
 
-    // Build public inputs hash
-    // First byte indicates proof type: 0x01 = loadL2Executions
-    const publicInputsHash = keccak256(
-      solidityPacked(
-        ["bytes1", "bytes"],
-        [
-          "0x01",
-          this.abiCoder.encode(["bytes32[]"], [executionHashes]),
-        ]
-      )
+    // For AdminZKVerifier/MockZKVerifier, the proof is just an admin signature.
+    // We sign a hash of the entry hashes so the verifier can validate the admin signed something.
+    const dataHash = keccak256(
+      this.abiCoder.encode(["bytes32[]"], [entryHashes])
     );
 
-    // Sign with admin wallet
     const signature = await this.adminWallet.signMessage(
-      getBytes(publicInputsHash)
+      getBytes(dataHash)
     );
 
     return signature;
   }
 
   /**
-   * Compute execution hash as per Rollups.loadL2Executions
+   * Compute entry hash as per Rollups.postBatch
    */
-  private computeExecutionHash(
-    execution: Execution,
+  private computeEntryHash(
+    entry: ExecutionEntry,
     verificationKeys: string[]
   ): string {
-    // Encode state deltas
-    const stateDeltas = execution.stateDeltas.map((d) => [
+    const stateDeltas = entry.stateDeltas.map((d) => [
       d.rollupId,
       d.currentState,
       d.newState,
       d.etherDelta,
     ]);
 
-    // Encode next action
     const nextAction = [
-      execution.nextAction.actionType,
-      execution.nextAction.rollupId,
-      execution.nextAction.destination,
-      execution.nextAction.value,
-      execution.nextAction.data,
-      execution.nextAction.failed,
-      execution.nextAction.sourceAddress,
-      execution.nextAction.sourceRollup,
-      execution.nextAction.scope,
+      entry.nextAction.actionType,
+      entry.nextAction.rollupId,
+      entry.nextAction.destination,
+      entry.nextAction.value,
+      entry.nextAction.data,
+      entry.nextAction.failed,
+      entry.nextAction.sourceAddress,
+      entry.nextAction.sourceRollup,
+      entry.nextAction.scope,
     ];
 
-    // Build hash matching Solidity
     const encoded = solidityPacked(
       ["bytes", "bytes", "bytes32", "bytes"],
       [
         this.abiCoder.encode([`${STATE_DELTA_TUPLE_TYPE}[]`], [stateDeltas]),
         this.abiCoder.encode(["bytes32[]"], [verificationKeys]),
-        execution.actionHash,
+        entry.actionHash,
         this.abiCoder.encode([ACTION_TUPLE_TYPE], [nextAction]),
       ]
     );
 
     return keccak256(encoded);
-  }
-
-  /**
-   * Sign proof for postBatch (not used in single-tx mode but included for completeness)
-   */
-  async signPostBatchProof(
-    commitments: Array<{
-      rollupId: bigint;
-      newState: string;
-      etherIncrement: bigint;
-    }>,
-    blobCount: number,
-    callData: string,
-    prevBlockHash: string
-  ): Promise<string> {
-    // Collect current states and verification keys
-    const currentStates: string[] = [];
-    const verificationKeys: string[] = [];
-
-    for (const commitment of commitments) {
-      const rollupData = await this.rollupsContract.rollups(commitment.rollupId);
-      currentStates.push(rollupData.stateRoot);
-      verificationKeys.push(rollupData.verificationKey);
-    }
-
-    // Note: We can't access blobhash() off-chain, so this would need
-    // to be computed differently for actual blob transactions
-    const blobHashes: string[] = new Array(blobCount).fill(
-      "0x0000000000000000000000000000000000000000000000000000000000000000"
-    );
-
-    // Build public inputs hash
-    // First byte indicates proof type: 0x00 = postBatch
-    const publicInputsHash = keccak256(
-      solidityPacked(
-        ["bytes1", "bytes32", "bytes", "bytes", "bytes", "bytes", "bytes32"],
-        [
-          "0x00",
-          prevBlockHash,
-          this.abiCoder.encode(
-            ["tuple(uint256,bytes32,int256)[]"],
-            [commitments.map((c) => [c.rollupId, c.newState, c.etherIncrement])]
-          ),
-          this.abiCoder.encode(["bytes32[]"], [currentStates]),
-          this.abiCoder.encode(["bytes32[]"], [verificationKeys]),
-          this.abiCoder.encode(["bytes32[]"], [blobHashes]),
-          keccak256(callData),
-        ]
-      )
-    );
-
-    // Sign with admin wallet
-    const signature = await this.adminWallet.signMessage(
-      getBytes(publicInputsHash)
-    );
-
-    return signature;
   }
 
   /**

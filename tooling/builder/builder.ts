@@ -8,7 +8,7 @@ import { createServer, IncomingMessage, ServerResponse } from "http";
 import { Contract, JsonRpcProvider, Wallet, Transaction } from "ethers";
 import { ExecutionPlanner, ExecutionPlannerConfig } from "./execution-planner.js";
 import { ProofGenerator, ProofGeneratorConfig } from "./proof-generator.js";
-import { ActionType, Execution, ExecutionPlan } from "../fullnode/types.js";
+import { ActionType, ExecutionEntry, ExecutionPlan } from "../fullnode/types.js";
 
 export interface BuilderConfig {
   // L1 connection
@@ -30,20 +30,19 @@ export interface BuilderConfig {
 
 // Rollups contract ABI (functions we call)
 const ROLLUPS_ABI = [
-  "function loadL2Executions((tuple(uint256 rollupId, bytes32 currentState, bytes32 newState, int256 etherDelta)[] stateDeltas, bytes32 actionHash, tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope) nextAction)[] executions, bytes proof)",
+  "function postBatch((tuple(uint256 rollupId, bytes32 currentState, bytes32 newState, int256 etherDelta)[] stateDeltas, bytes32 actionHash, tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope) nextAction)[] entries, uint256 blobCount, bytes callData, bytes proof)",
   "function executeL2TX(uint256 rollupId, bytes rlpEncodedTx) returns (bytes)",
   "function rollups(uint256) view returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)",
-  "function computeL2ProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
-  "function createL2ProxyContract(address originalAddress, uint256 originalRollupId) returns (address)",
-  "function authorizedProxies(address) view returns (bool)",
-  "event ExecutionsLoaded(uint256 count)",
+  "function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
+  "function createCrossChainProxy(address originalAddress, uint256 originalRollupId) returns (address)",
+  "function authorizedProxies(address) view returns (address originalAddress, uint64 originalRollupId)",
   "event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
-  "event L2ProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
+  "event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
 ];
 
-const L2PROXY_VIEW_ABI = [
-  "function originalAddress() view returns (address)",
-  "function originalRollupId() view returns (uint256)",
+const CROSS_CHAIN_PROXY_VIEW_ABI = [
+  "function ORIGINAL_ADDRESS() view returns (address)",
+  "function ORIGINAL_ROLLUP_ID() view returns (uint256)",
 ];
 
 interface SubmitRequest {
@@ -80,7 +79,7 @@ interface PrepareL1CallRequest {
 
 interface PrepareL1CallResponse {
   success: boolean;
-  proxyAddress?: string;     // L2Proxy address user should call on L1
+  proxyAddress?: string;     // CrossChainProxy address user should call on L1
   sourceProxyAddress?: string; // L2 sender proxy derived from original L1 caller
   proxyDeployed?: boolean;   // Whether proxy was newly deployed
   executionsLoaded?: number; // Number of executions pre-loaded
@@ -340,7 +339,7 @@ export class Builder {
         }
         // Use rollup identity for caller mapping:
         // fixed proxy per (address, rollupId) on L1.
-        const sourceProxyOnL1 = await this.rollupsContract.computeL2ProxyAddress(
+        const sourceProxyOnL1 = await this.rollupsContract.computeCrossChainProxyAddress(
           tx.from,
           this.config.rollupId,
           l1ChainId
@@ -367,23 +366,23 @@ export class Builder {
       plan = await this.planner.planL2Transaction(signedTx);
     }
 
-    console.log(`[Builder] Planned ${plan.executions.length} execution(s)`);
+    console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
 
     // Sign the proof
-    const proof = await this.proofGenerator.signLoadExecutionsProof(
-      plan.executions
+    const proof = await this.proofGenerator.signPostBatchProof(
+      plan.entries
     );
     console.log("[Builder] Proof signed");
 
     // Notify fullnode of executions
-    await this.planner.notifyExecutions(plan.executions);
+    await this.planner.notifyExecutions(plan.entries);
     console.log("[Builder] Fullnode notified");
 
     // Load executions on L1 (get fresh nonce)
     let nonce = await this.adminWallet.getNonce();
     console.log(`[Builder] Starting with nonce ${nonce}`);
 
-    const l1TxHash = await this.loadExecutionsOnL1(plan.executions, proof, nonce);
+    const l1TxHash = await this.postBatchOnL1(plan.entries, proof, nonce);
     console.log(`[Builder] Executions loaded: ${l1TxHash}`);
     nonce++;
 
@@ -409,7 +408,7 @@ export class Builder {
       success: true,
       l1TxHash: execReceipt.hash,
       l2TxHash: l2TxHash || undefined,
-      executionsLoaded: plan.executions.length,
+      executionsLoaded: plan.entries.length,
       stateRoot: rollupData.stateRoot,
     };
   }
@@ -428,14 +427,14 @@ export class Builder {
         return null;
       }
 
-      const isAuthorized = await this.rollupsContract.authorizedProxies(proxyAddress);
-      if (!isAuthorized) {
+      const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
+      if (proxyInfo.originalAddress === "0x0000000000000000000000000000000000000000") {
         return null;
       }
 
-      const proxy = new Contract(proxyAddress, L2PROXY_VIEW_ABI, this.l1Provider);
-      const originalAddress = await proxy.originalAddress();
-      const originalRollupId = BigInt(await proxy.originalRollupId());
+      const proxy = new Contract(proxyAddress, CROSS_CHAIN_PROXY_VIEW_ABI, this.l1Provider);
+      const originalAddress = await proxy.ORIGINAL_ADDRESS();
+      const originalRollupId = BigInt(await proxy.ORIGINAL_ROLLUP_ID());
 
       if (originalRollupId !== l1ChainId) {
         return null;
@@ -491,19 +490,19 @@ export class Builder {
       tx.value,
       tx.from || this.adminWallet.address
     );
-    console.log(`[Builder] Planned ${plan.executions.length} execution(s)`);
+    console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
 
     // Sign the proof
-    const proof = await this.proofGenerator.signLoadExecutionsProof(
-      plan.executions
+    const proof = await this.proofGenerator.signPostBatchProof(
+      plan.entries
     );
     console.log("[Builder] Proof signed");
 
     // Notify fullnode
-    await this.planner.notifyExecutions(plan.executions);
+    await this.planner.notifyExecutions(plan.entries);
 
     // Load executions on L1
-    const loadTxHash = await this.loadExecutionsOnL1(plan.executions, proof);
+    const loadTxHash = await this.postBatchOnL1(plan.entries, proof);
     console.log(`[Builder] Executions loaded: ${loadTxHash}`);
 
     // Now broadcast the user's L1 transaction
@@ -535,7 +534,7 @@ export class Builder {
     return {
       success: true,
       l1TxHash: txResponse.hash,
-      executionsLoaded: plan.executions.length,
+      executionsLoaded: plan.entries.length,
       ...(stateRoot ? { stateRoot } : {}),
     };
   }
@@ -573,7 +572,7 @@ export class Builder {
 
       // 1. Compute proxy address for the L2 target
       // The proxy represents the L2 target on L1
-      const proxyAddress = await this.rollupsContract.computeL2ProxyAddress(
+      const proxyAddress = await this.rollupsContract.computeCrossChainProxyAddress(
         l2Target,
         this.config.rollupId,  // Target rollup
         l1ChainId              // Domain is L1 chain ID
@@ -582,7 +581,7 @@ export class Builder {
 
       // Compute the L2 sender proxy from the original L1 caller.
       // This is the address used as msg.sender during L2 execution/replay.
-      const sourceProxyAddress = await this.rollupsContract.computeL2ProxyAddress(
+      const sourceProxyAddress = await this.rollupsContract.computeCrossChainProxyAddress(
         sourceAddress,
         this.config.rollupId,
         l1ChainId
@@ -631,35 +630,38 @@ export class Builder {
         sourceProxyAddress,
         sourceAddress   // Original L1 sender for L2 proxy deployment
       );
-      console.log(`[Builder] Planned ${plan.executions.length} execution(s)`);
+      console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
 
       // Do not load failing plans as "prepared executions" on L1.
       // This prevents spammy PREP txs on repeated invalid attempts.
-      const rootExecution = plan.executions[0];
+      const rootExecution = plan.entries[0];
       if (
         rootExecution &&
         rootExecution.nextAction.actionType === ActionType.RESULT &&
         rootExecution.nextAction.failed
       ) {
         const revertData = rootExecution.nextAction.data || "0x";
+        const hint = (revertData === "0x" && BigInt(value) > 0n)
+          ? " (target function may not be payable)"
+          : "";
         throw new Error(
-          `L1→L2 simulation failed (revert data: ${revertData}); execution plan was not loaded`
+          `L1→L2 simulation failed (revert data: ${revertData})${hint}; execution plan was not loaded`
         );
       }
 
       // 4. Sign the proof
-      const proof = await this.proofGenerator.signLoadExecutionsProof(
-        plan.executions
+      const proof = await this.proofGenerator.signPostBatchProof(
+        plan.entries
       );
       console.log("[Builder] Proof signed");
 
       // 5. Notify fullnode of executions
-      await this.planner.notifyExecutions(plan.executions);
+      await this.planner.notifyExecutions(plan.entries);
       console.log("[Builder] Fullnode notified");
 
       // 6. Load executions on L1 (get fresh nonce in case deployProxy used one)
       const nonce = await this.adminWallet.getNonce();
-      const l1TxHash = await this.loadExecutionsOnL1(plan.executions, proof, nonce);
+      const l1TxHash = await this.postBatchOnL1(plan.entries, proof, nonce);
       console.log(`[Builder] Executions loaded on L1: ${l1TxHash}`);
 
       this.prepareL1Cache.set(prepareCacheKey, {
@@ -674,7 +676,7 @@ export class Builder {
         proxyAddress,
         sourceProxyAddress,
         proxyDeployed,
-        executionsLoaded: plan.executions.length,
+        executionsLoaded: plan.entries.length,
       };
     } catch (error: any) {
       console.error("[Builder] Prepare L1 call error:", error);
@@ -745,7 +747,7 @@ export class Builder {
       const l1ChainId = (await this.l1Provider.getNetwork()).chainId;
 
       // Alias proxy for L1 target (domain = L1, origin = L1).
-      const proxyAddress = await this.rollupsContract.computeL2ProxyAddress(
+      const proxyAddress = await this.rollupsContract.computeCrossChainProxyAddress(
         l1Target,
         l1ChainId,
         l1ChainId
@@ -771,7 +773,7 @@ export class Builder {
       let sourceProxyAddress: string | undefined;
       if (sourceAddress) {
         // Caller identity on L1 is derived from (sourceAddress, rollupId).
-        sourceProxyAddress = await this.rollupsContract.computeL2ProxyAddress(
+        sourceProxyAddress = await this.rollupsContract.computeCrossChainProxyAddress(
           sourceAddress,
           this.config.rollupId,
           l1ChainId
@@ -797,24 +799,24 @@ export class Builder {
   }
 
   /**
-   * Deploy an L2Proxy contract for a given original address
+   * Deploy a CrossChainProxy contract for a given original address
    */
   private async deployProxy(
     originalAddress: string,
     originalRollupId: bigint
   ): Promise<string> {
-    const tx = await this.rollupsContract.createL2ProxyContract(
+    const tx = await this.rollupsContract.createCrossChainProxy(
       originalAddress,
       originalRollupId
     );
     const receipt = await tx.wait();
 
-    // Extract proxy address from L2ProxyCreated event
+    // Extract proxy address from CrossChainProxyCreated event
     const iface = this.rollupsContract.interface;
     for (const log of receipt.logs) {
       try {
         const parsed = iface.parseLog(log);
-        if (parsed && parsed.name === "L2ProxyCreated") {
+        if (parsed && parsed.name === "CrossChainProxyCreated") {
           return parsed.args.proxy;
         }
       } catch {
@@ -822,19 +824,19 @@ export class Builder {
       }
     }
 
-    throw new Error("L2ProxyCreated event not found in receipt");
+    throw new Error("CrossChainProxyCreated event not found in receipt");
   }
 
   /**
-   * Load executions on L1 via Rollups.loadL2Executions
+   * Load execution entries on L1 via Rollups.postBatch
    */
-  private async loadExecutionsOnL1(
-    executions: Execution[],
+  private async postBatchOnL1(
+    entries: ExecutionEntry[],
     proof: string,
     nonce?: number
   ): Promise<string> {
-    // Convert executions to contract format
-    const executionsData = executions.map((e) => ({
+    // Convert entries to contract format
+    const entriesData = entries.map((e) => ({
       stateDeltas: e.stateDeltas.map((d) => ({
         rollupId: d.rollupId,
         currentState: d.currentState,
@@ -856,8 +858,10 @@ export class Builder {
     }));
 
     const txOptions = nonce !== undefined ? { nonce } : {};
-    const tx = await this.rollupsContract.loadL2Executions(
-      executionsData,
+    const tx = await this.rollupsContract.postBatch(
+      entriesData,
+      0,    // blobCount = 0 (no blobs for local dev)
+      "0x", // callData = empty
       proof,
       txOptions
     );

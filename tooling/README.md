@@ -147,13 +147,12 @@ npx tsx fullnode/fullnode.ts \
   --l2-port 9546 \
   --rpc-port 9547 \
   --initial-state <GENESIS_STATE_ROOT> \
-  --l2-proxy-impl <L2PROXY_IMPL_ADDRESS> \
   --contracts-out /path/to/sync-rollups/out
 ```
 
 The fullnode:
 - Starts a reth instance in dev mode (`--dev --dev.block-time 1s`)
-- Generates a custom genesis with L2Authority and L2Proxy contracts
+- Generates a custom genesis with CrossChainManagerL2 contracts
 - Polls L1 for events and replays executions on the local reth
 - Exposes a JSON-RPC server that multiplexes standard Ethereum RPCs (forwarded to reth) with custom `syncrollups_*` methods
 

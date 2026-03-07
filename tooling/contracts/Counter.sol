@@ -2,9 +2,15 @@
 pragma solidity ^0.8.13;
 
 contract Counter {
-    uint256 public number;
+    uint256 public count;
+    address public lastCaller;
 
     function increment() public {
-        number++;
+        count++;
+        lastCaller = msg.sender;
+    }
+
+    function getCount() public view returns (uint256) {
+        return count;
     }
 }

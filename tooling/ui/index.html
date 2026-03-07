@@ -735,9 +735,13 @@
         <input type="text" id="builderUrl" value="http://localhost:3200" />
         <span class="status-indicator" id="builderUrlStatus">-</span>
 
+        <span>Blockscout L1 API</span>
+        <input type="text" id="blockscoutL1Url" value="http://localhost:4010" />
+        <span><span class="status-indicator" id="blockscoutL1Status">-</span> <a id="blockscoutL1Link" href="#" target="_blank" style="font-size:12px; display:none;">Open</a></span>
+
         <span>Blockscout L2 API</span>
         <input type="text" id="blockscoutL2Url" value="http://localhost:4011" />
-        <span class="status-indicator" id="blockscoutL2Status">-</span>
+        <span><span class="status-indicator" id="blockscoutL2Status">-</span> <a id="blockscoutL2Link" href="#" target="_blank" style="font-size:12px; display:none;">Open</a></span>
 
         <span>Rollups Contract</span>
         <input type="text" id="rollupsAddress" value="0xe7f1725e7734ce288f8367e1bb143e90bb3f0512" />
@@ -940,12 +944,14 @@
   <script>
     // ============ Configuration ============
     const L2_CHAIN_ID = 10200200;
+    const _h = window.location.hostname;
     const DEFAULT_RUNTIME_SETTINGS = {
-      l1Rpc: "http://localhost:8546",
-      l2Rpc: "http://localhost:9547",
-      l2EvmRpc: "http://localhost:9548",
-      builderUrl: "http://localhost:3200",
-      blockscoutL2Url: "http://localhost:4011",
+      l1Rpc: `http://${_h}:8546`,
+      l2Rpc: `http://${_h}:9547`,
+      l2EvmRpc: `http://${_h}:9548`,
+      builderUrl: `http://${_h}:3200`,
+      blockscoutL1Url: `http://${_h}:4010`,
+      blockscoutL2Url: `http://${_h}:4011`,
       rollupsAddress: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
       rollupId: "0",
       deploymentBlock: "0"
@@ -960,16 +966,15 @@
 
     const ROLLUPS_ABI = [
       "function rollups(uint256) view returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)",
-      "function authorizedProxies(address) view returns (bool)",
+      "function authorizedProxies(address) view returns (address originalAddress, uint64 originalRollupId)",
       "event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
-      "event ExecutionsLoaded(uint256 count)",
-      "event L2ProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
+      "event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
     ];
 
-    // L2Proxy ABI for fetching original address
-    const L2PROXY_ABI = [
-      "function originalAddress() view returns (address)",
-      "function originalRollupId() view returns (uint256)",
+    // CrossChainProxy ABI for fetching identity
+    const CROSS_CHAIN_PROXY_ABI = [
+      "function ORIGINAL_ADDRESS() view returns (address)",
+      "function ORIGINAL_ROLLUP_ID() view returns (uint256)",
     ];
 
     // Known function selectors for decoding calldata
@@ -1027,16 +1032,19 @@
       { name: 'lastCaller', sig: 'lastCaller()', selector: '0x2113522a', params: [], returns: ['address'], view: true },
     ];
 
-    // Cache for Blockscout ABI lookups: address (lowercase) -> { functions, contractName } | null
+    // Cache for Blockscout ABI lookups: "chain:address" (lowercase) -> { functions, contractName } | null
     const blockscoutAbiCache = {};
 
-    // Fetch contract info from Blockscout L2 API.
+    // Fetch contract info from a Blockscout API.
     // Returns { contractName, functions[] } or null if not a contract / no ABI.
-    async function fetchBlockscoutAbi(address) {
-      const key = address.toLowerCase();
+    async function fetchBlockscoutAbi(address, chain) {
+      chain = chain || selectedChain;
+      const key = `${chain}:${address.toLowerCase()}`;
       if (key in blockscoutAbiCache) return blockscoutAbiCache[key];
 
-      const baseUrl = document.getElementById('blockscoutL2Url').value.replace(/\/+$/, '');
+      const baseUrl = chain === 'L1'
+        ? document.getElementById('blockscoutL1Url').value.replace(/\/+$/, '')
+        : document.getElementById('blockscoutL2Url').value.replace(/\/+$/, '');
       if (!baseUrl) { blockscoutAbiCache[key] = null; return null; }
 
       try {
@@ -1187,7 +1195,7 @@
 
     function applyRuntimeSettings(settings) {
       if (!settings || typeof settings !== 'object') return;
-      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
+      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
       for (const key of keys) {
         if (typeof settings[key] === 'string' && settings[key].length > 0) {
           const input = document.getElementById(key);
@@ -1670,9 +1678,12 @@
         return;
       }
 
-      // Not a locally-known contract — try Blockscout
+      // Not a locally-known contract — try Blockscout for the selected chain
       selectorGroup.style.display = 'none';
-      const bsData = await fetchBlockscoutAbi(toAddress);
+      const targetChain = document.getElementById('targetIsOtherChain')?.checked
+        ? (selectedChain === 'L1' ? 'L2' : 'L1')
+        : selectedChain;
+      const bsData = await fetchBlockscoutAbi(toAddress, targetChain);
       // Re-check the address hasn't changed while we were fetching
       if (document.getElementById('txToAddress').value.trim().toLowerCase() !== toAddress.toLowerCase()) return;
 
@@ -1973,6 +1984,7 @@
       }
 
       updateProxyAddress();
+      updateFunctionSelector();
     }
 
     async function getL1ChainConfig() {
@@ -2126,18 +2138,18 @@
           // L2 -> L1 target alias uses (original=l1Target, origin=L1, domain=L1)
           // L2 -> L1 caller identity uses (original=l2Sender, origin=rollupId, domain=L1)
           const rollups = new ethers.Contract(rollupsAddr, [
-            "function computeL2ProxyAddress(address,uint256,uint256) view returns (address)"
+            "function computeCrossChainProxyAddress(address,uint256,uint256) view returns (address)"
           ], l1Provider);
           if (selectedChain === 'L1') {
-            const proxyAddress = await rollups.computeL2ProxyAddress(toAddress, rollupId, l1ChainId);
+            const proxyAddress = await rollups.computeCrossChainProxyAddress(toAddress, rollupId, l1ChainId);
             proxySpan.textContent = `Target proxy: ${shortHash(proxyAddress)}`;
             proxySpan.title = proxyAddress;
             proxySpan.style.display = 'inline';
             proxySpan.dataset.proxyAddress = proxyAddress;
             sourceProxySpan.style.display = 'none';
           } else {
-            const targetProxyAddress = await rollups.computeL2ProxyAddress(toAddress, l1ChainId, l1ChainId);
-            const callerProxyAddress = await rollups.computeL2ProxyAddress(wallet.address, rollupId, l1ChainId);
+            const targetProxyAddress = await rollups.computeCrossChainProxyAddress(toAddress, l1ChainId, l1ChainId);
+            const callerProxyAddress = await rollups.computeCrossChainProxyAddress(wallet.address, rollupId, l1ChainId);
             proxySpan.textContent = `Target proxy: ${shortHash(targetProxyAddress)}`;
             proxySpan.title = targetProxyAddress;
             proxySpan.style.display = 'inline';
@@ -2268,22 +2280,34 @@
       builderEl.textContent = builderOnline ? 'Online' : 'Offline';
       builderEl.className = `status-indicator ${builderOnline ? 'online' : 'offline'}`;
 
-      // Check Blockscout L2
-      const bsUrl = document.getElementById('blockscoutL2Url').value.replace(/\/+$/, '');
-      const bsEl = document.getElementById('blockscoutL2Status');
-      try {
-        const bsResp = await fetch(`${bsUrl}/api/v2/main-page/indexing-status`, { signal: AbortSignal.timeout(3000) });
-        if (bsResp.ok) {
-          const bsData = await bsResp.json();
-          bsEl.textContent = bsData.finished_indexing ? 'Online' : 'Indexing...';
-          bsEl.className = 'status-indicator online';
-        } else {
-          bsEl.textContent = 'Error';
+      // Check Blockscout L1 & L2
+      const bsFrontendPorts = { L1: '4000', L2: '4001' };
+      for (const layer of ['L1', 'L2']) {
+        const bsUrl = document.getElementById(`blockscout${layer}Url`).value.replace(/\/+$/, '');
+        const bsEl = document.getElementById(`blockscout${layer}Status`);
+        const linkEl = document.getElementById(`blockscout${layer}Link`);
+        try {
+          const bsResp = await fetch(`${bsUrl}/api/v2/main-page/indexing-status`, { signal: AbortSignal.timeout(3000) });
+          if (bsResp.ok) {
+            const bsData = await bsResp.json();
+            bsEl.textContent = bsData.finished_indexing ? 'Online' : 'Indexing...';
+            bsEl.className = 'status-indicator online';
+            // Derive frontend URL: use dashboard hostname with frontend port
+            try {
+              const frontendUrl = `${window.location.protocol}//${window.location.hostname}:${bsFrontendPorts[layer]}`;
+              linkEl.href = frontendUrl;
+              linkEl.style.display = 'inline';
+            } catch { linkEl.style.display = 'none'; }
+          } else {
+            bsEl.textContent = 'Error';
+            bsEl.className = 'status-indicator offline';
+            linkEl.style.display = 'none';
+          }
+        } catch {
+          bsEl.textContent = 'Offline';
           bsEl.className = 'status-indicator offline';
+          linkEl.style.display = 'none';
         }
-      } catch {
-        bsEl.textContent = 'Offline';
-        bsEl.className = 'status-indicator offline';
       }
     }
 
@@ -2834,8 +2858,8 @@
       const cacheKey = proxyAddress.toLowerCase();
       if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
       try {
-        const authorized = await rollupsContract.authorizedProxies(proxyAddress);
-        const result = Boolean(authorized);
+        const proxyInfo = await rollupsContract.authorizedProxies(proxyAddress);
+        const result = proxyInfo.originalAddress !== "0x0000000000000000000000000000000000000000";
         if (cache) cache.set(cacheKey, result);
         return result;
       } catch (e) {
@@ -2888,10 +2912,10 @@
       const cacheKey = proxyAddress.toLowerCase();
       if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
       try {
-        const proxyContract = new ethers.Contract(proxyAddress, L2PROXY_ABI, l1Provider);
+        const proxyContract = new ethers.Contract(proxyAddress, CROSS_CHAIN_PROXY_ABI, l1Provider);
         const [originalAddress, originalRollupIdRaw] = await Promise.all([
-          proxyContract.originalAddress(),
-          proxyContract.originalRollupId()
+          proxyContract.ORIGINAL_ADDRESS(),
+          proxyContract.ORIGINAL_ROLLUP_ID()
         ]);
         const metadata = {
           proxyAddress,
@@ -2940,10 +2964,9 @@
         // Query relevant events in parallel.
         // For L2ExecutionPerformed we fetch unfiltered and then filter by selected rollup
         // to avoid provider/topic edge-cases with user-entered rollup IDs.
-        const [allExecEvents, proxyEvents, loadEvents] = await Promise.all([
+        const [allExecEvents, proxyEvents] = await Promise.all([
           rollups.queryFilter(rollups.filters.L2ExecutionPerformed(), fromBlock, currentBlock),
-          rollups.queryFilter(rollups.filters.L2ProxyCreated(), fromBlock, currentBlock),
-          rollups.queryFilter(rollups.filters.ExecutionsLoaded(), fromBlock, currentBlock)
+          rollups.queryFilter(rollups.filters.CrossChainProxyCreated(), fromBlock, currentBlock),
         ]);
         const execEvents = allExecEvents.filter((e) => {
           try {
@@ -2952,9 +2975,9 @@
             return false;
           }
         });
-        console.log(`[TxHistory] ${allExecEvents.length} raw exec events, ${execEvents.length} after rollupId filter, ${proxyEvents.length} proxy, ${loadEvents.length} load`);
+        console.log(`[TxHistory] ${allExecEvents.length} raw exec events, ${execEvents.length} after rollupId filter, ${proxyEvents.length} proxy`);
 
-        if (execEvents.length === 0 && proxyEvents.length === 0 && loadEvents.length === 0) {
+        if (execEvents.length === 0 && proxyEvents.length === 0) {
           container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">No executions found</div>';
           return;
         }
@@ -2964,25 +2987,17 @@
         for (const event of execEvents) {
           const txHash = event.transactionHash;
           if (!eventsByTxHash.has(txHash)) {
-            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], loadRegistrations: [], blockNumber: event.blockNumber });
+            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], blockNumber: event.blockNumber });
           }
           eventsByTxHash.get(txHash).executions.push(event);
         }
         for (const event of proxyEvents) {
           const txHash = event.transactionHash;
           if (!eventsByTxHash.has(txHash)) {
-            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], loadRegistrations: [], blockNumber: event.blockNumber });
+            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], blockNumber: event.blockNumber });
           }
           eventsByTxHash.get(txHash).proxyCreations.push(event);
         }
-        for (const event of loadEvents) {
-          const txHash = event.transactionHash;
-          if (!eventsByTxHash.has(txHash)) {
-            eventsByTxHash.set(txHash, { executions: [], proxyCreations: [], loadRegistrations: [], blockNumber: event.blockNumber });
-          }
-          eventsByTxHash.get(txHash).loadRegistrations.push(event);
-        }
-
         // Fetch details for the newest L1 transaction groups by block number.
         const txGroupEntries = Array.from(eventsByTxHash.entries())
           .sort((a, b) => b[1].blockNumber - a[1].blockNumber)
@@ -2996,16 +3011,6 @@
             const tx = await l1Provider.getTransaction(txHash);
 
             const l2Transactions = [];
-
-            // Add builder registration entries (loadL2Executions)
-            for (const loadEvent of group.loadRegistrations) {
-              l2Transactions.push({
-                type: 'LOAD_EXECUTIONS',
-                l1TxHash: txHash,
-                from: tx?.from || null,
-                count: Number(loadEvent.args[0] || 0)
-              });
-            }
 
             // Add proxy creation entries
             for (const proxyEvent of group.proxyCreations) {
@@ -3073,7 +3078,7 @@
             } else if (tx && tx.to && tx.to.toLowerCase() === rollupsAddr.toLowerCase()) {
               // Rollups contract admin/coordination calls that are not executeL2TX.
               // Most prep flows are already represented by events above; this row is a fallback for visibility.
-              const hasPrepEvents = group.proxyCreations.length > 0 || group.loadRegistrations.length > 0;
+              const hasPrepEvents = group.proxyCreations.length > 0;
               if (!hasPrepEvents) {
                 const selector = getTxSelector(tx.data);
                 let methodLabel = 'Unknown Rollups call';

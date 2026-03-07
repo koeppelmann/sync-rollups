@@ -8,7 +8,6 @@
  * Usage:
  *   npx tsx scripts/compute-genesis-root.ts \
  *     --rollups 0x... \
- *     --l2-proxy-impl 0x... \
  *     --contracts-out /path/to/sync-rollups/out
  *
  * Prints the genesis state root (hex) to stdout.
@@ -26,14 +25,58 @@ function log(msg: string) {
   process.stderr.write(`[genesis-root] ${msg}\n`);
 }
 
-function loadContractBytecode(outDir: string, contractName: string, fileName: string): string | null {
+function loadContractArtifact(outDir: string, contractName: string, fileName: string): any | null {
   const artifactPath = join(outDir, fileName, `${contractName}.json`);
   if (!existsSync(artifactPath)) {
     log(`WARNING: artifact not found: ${artifactPath}`);
     return null;
   }
-  const artifact = JSON.parse(readFileSync(artifactPath, "utf-8"));
-  return artifact.deployedBytecode?.object || null;
+  return JSON.parse(readFileSync(artifactPath, "utf-8"));
+}
+
+/**
+ * Get deployed bytecode with immutables spliced in.
+ */
+function getDeployedBytecodeWithImmutables(
+  artifact: any,
+  immutableValues: Record<string, string>
+): string | null {
+  const bytecodeHex = artifact.deployedBytecode?.object;
+  if (!bytecodeHex) return null;
+
+  let code = bytecodeHex.startsWith("0x") ? bytecodeHex.slice(2) : bytecodeHex;
+
+  const immutableRefs = artifact.deployedBytecode?.immutableReferences;
+  if (!immutableRefs) return "0x" + code;
+
+  // Map AST IDs to variable names
+  const astIdToName: Record<string, string> = {};
+  const ast = artifact.ast;
+  if (ast) {
+    const findImmutables = (node: any) => {
+      if (node.nodeType === "VariableDeclaration" && node.mutability === "immutable") {
+        astIdToName[node.id.toString()] = node.name;
+      }
+      if (node.nodes) node.nodes.forEach(findImmutables);
+      if (node.body?.statements) node.body.statements.forEach(findImmutables);
+    };
+    findImmutables(ast);
+  }
+
+  for (const [astId, refs] of Object.entries(immutableRefs) as [string, any[]]) {
+    const name = astIdToName[astId];
+    if (!name) { log(`Unknown immutable AST ID ${astId}`); continue; }
+    const value = immutableValues[name];
+    if (!value) { log(`No value for immutable ${name}`); continue; }
+    for (const ref of refs) {
+      const startByte = ref.start;
+      const length = ref.length;
+      const paddedValue = value.padStart(length * 2, "0");
+      code = code.slice(0, startByte * 2) + paddedValue + code.slice((startByte + length) * 2);
+    }
+  }
+
+  return "0x" + code;
 }
 
 /**
@@ -55,7 +98,6 @@ async function main() {
   };
 
   const rollupsAddress = getArg("rollups");
-  const l2ProxyImplAddress = getArg("l2-proxy-impl");
   const contractsOutDir = getArg("contracts-out");
   const rollupId = parseInt(args.indexOf("--rollup-id") !== -1 ? getArg("rollup-id") : "0");
   const l2ChainId = parseInt(args.indexOf("--l2-chain-id") !== -1 ? getArg("l2-chain-id") : "10200200");
@@ -73,28 +115,21 @@ async function main() {
     balance: OPERATOR_INITIAL_BALANCE,
   };
 
-  // L2Authority at Rollups address
-  const l2AuthBytecode = loadContractBytecode(contractsOutDir, "L2Authority", "L2Authority.sol");
-  if (l2AuthBytecode) {
-    const storage: Record<string, string> = {};
-    storage["0x0000000000000000000000000000000000000000000000000000000000000000"] =
-      "0x000000000000000000000000" + l2ProxyImplAddress.slice(2).toLowerCase();
-    alloc[rollupsAddress.toLowerCase()] = {
-      code: l2AuthBytecode,
-      storage,
-      balance: "0x0",
-    };
-    log(`L2Authority at ${rollupsAddress}`);
-  }
+  // CrossChainManagerL2 at Rollups address (with immutables spliced in)
+  const artifact = loadContractArtifact(contractsOutDir, "CrossChainManagerL2", "CrossChainManagerL2.sol");
+  if (artifact) {
+    const bytecode = getDeployedBytecodeWithImmutables(artifact, {
+      ROLLUP_ID: rollupId.toString(16).padStart(64, "0"),
+      SYSTEM_ADDRESS: operatorWallet.address.slice(2).toLowerCase().padStart(64, "0"),
+    });
 
-  // L2Proxy implementation
-  const l2ProxyBytecode = loadContractBytecode(contractsOutDir, "L2Proxy", "L2Proxy.sol");
-  if (l2ProxyBytecode) {
-    alloc[l2ProxyImplAddress.toLowerCase()] = {
-      code: l2ProxyBytecode,
-      balance: "0x0",
-    };
-    log(`L2Proxy impl at ${l2ProxyImplAddress}`);
+    if (bytecode) {
+      alloc[rollupsAddress.toLowerCase()] = {
+        code: bytecode,
+        balance: "0x0",
+      };
+      log(`CrossChainManagerL2 at ${rollupsAddress} (SYSTEM_ADDRESS=${operatorWallet.address})`);
+    }
   }
 
   const genesis = {
@@ -122,7 +157,7 @@ async function main() {
   writeFileSync(genesisPath, JSON.stringify(genesis, null, 2));
 
   // Start a temporary reth instance to compute the state root
-  const httpPort = 19999; // unlikely to conflict
+  const httpPort = 19999;
   const p2pPort = 39999;
   const authPort = 18999;
   const rethBinary = process.env.SYNC_ROLLUPS_RETH || "reth";
