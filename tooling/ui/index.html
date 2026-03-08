@@ -735,6 +735,14 @@
         <input type="text" id="builderUrl" value="http://localhost:3200" />
         <span class="status-indicator" id="builderUrlStatus">-</span>
 
+        <span>Ethrex Fullnode RPC</span>
+        <input type="text" id="ethrexRpc" value="http://localhost:3201" />
+        <span class="status-indicator" id="ethrexStatus">-</span>
+
+        <span>Ethrex L2 EVM</span>
+        <input type="text" id="ethrexEvmRpc" value="http://localhost:9556" />
+        <span class="status-indicator" id="ethrexEvmStatus">-</span>
+
         <span>Blockscout L1 API</span>
         <input type="text" id="blockscoutL1Url" value="http://localhost:4010" />
         <span><span class="status-indicator" id="blockscoutL1Status">-</span> <a id="blockscoutL1Link" href="#" target="_blank" style="font-size:12px; display:none;">Open</a></span>
@@ -792,6 +800,14 @@
           <span class="status-value" id="l1BlockNumber">-</span>
         </div>
         <div class="status-row">
+          <span class="status-label">Genesis Block Age</span>
+          <span class="status-value" id="l1GenesisAge">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Latest Block Age</span>
+          <span class="status-value" id="l1LatestAge">-</span>
+        </div>
+        <div class="status-row">
           <span class="status-label">State Root (Contract)</span>
           <span class="status-value hash" id="l1StateRoot" title="" onclick="copyToClipboard(this)">-</span>
         </div>
@@ -823,6 +839,22 @@
     <div class="status-row" style="margin-top: 15px; padding: 12px; background: #f8f9fa; border-radius: 6px;">
       <span class="status-label">Builder</span>
       <span class="status-value" id="builderStatus">-</span>
+    </div>
+
+    <!-- Ethrex Fullnode Status -->
+    <div style="margin-top: 15px; padding: 12px; background: #f0f4ff; border-radius: 6px; border: 1px solid #d0d8f0;">
+      <div class="status-row" style="margin-bottom: 6px;">
+        <span class="status-label" style="font-weight: 600;">Ethrex Fullnode</span>
+        <span class="status-value" id="ethrexSyncStatus">-</span>
+      </div>
+      <div class="status-row" style="margin-bottom: 4px;">
+        <span class="status-label">Block Number</span>
+        <span class="status-value" id="ethrexBlockNumber">-</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">State Root (EVM)</span>
+        <span class="status-value hash" id="ethrexStateRoot" title="" onclick="copyToClipboard(this)">-</span>
+      </div>
     </div>
   </div>
 
@@ -865,6 +897,7 @@
             <option value="">Select...</option>
           </select>
         </div>
+        <div id="addressStatus" style="font-size: 11px; color: #888; margin-top: 2px; display: none;"></div>
       </div>
       <div class="form-group" style="flex: 1;">
         <label>Value (ETH)</label>
@@ -878,6 +911,8 @@
         <option value="">-- Select function or enter data manually --</option>
       </select>
     </div>
+
+    <div id="functionParamsGroup" style="display: none;"></div>
 
     <div class="form-group">
       <label>Data (hex, optional)</label>
@@ -950,6 +985,8 @@
       l2Rpc: `http://${_h}:9547`,
       l2EvmRpc: `http://${_h}:9548`,
       builderUrl: `http://${_h}:3200`,
+      ethrexRpc: `http://${_h}:3201`,
+      ethrexEvmRpc: `http://${_h}:9556`,
       blockscoutL1Url: `http://${_h}:4010`,
       blockscoutL2Url: `http://${_h}:4011`,
       rollupsAddress: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
@@ -1195,7 +1232,7 @@
 
     function applyRuntimeSettings(settings) {
       if (!settings || typeof settings !== 'object') return;
-      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
+      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'ethrexRpc', 'ethrexEvmRpc', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
       for (const key of keys) {
         if (typeof settings[key] === 'string' && settings[key].length > 0) {
           const input = document.getElementById(key);
@@ -1314,16 +1351,55 @@
       return hash.slice(0, 10) + '...' + hash.slice(-6);
     }
 
-    // Block explorer URL based on L1 chain ID (detected at runtime)
-    let l1ExplorerBaseUrl = '';
-    const CHAIN_EXPLORERS = {
-      100: 'https://gnosisscan.io',
-      1: 'https://etherscan.io',
-      31337: '', // local anvil - no explorer
-    };
+    function formatAge(seconds) {
+      if (seconds < 0) return 'in the future';
+      if (seconds < 60) return seconds + 's ago';
+      if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's ago';
+      if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm ago';
+      return Math.floor(seconds / 86400) + 'd ' + Math.floor((seconds % 86400) / 3600) + 'h ago';
+    }
 
+    // Block explorer URL based on L1 chain ID (detected at runtime)
+    // Blockscout explorer URL helpers — derive frontend URLs from settings
+    const bsFrontendPorts = { L1: '4000', L2: '4001' };
+
+    function getBlockscoutBaseUrl(chain) {
+      try {
+        const url = new URL(document.getElementById(`blockscout${chain}Url`).value);
+        url.port = bsFrontendPorts[chain];
+        return url.origin;
+      } catch {
+        return '';
+      }
+    }
+
+    function bsTxUrl(chain, txHash) {
+      const base = getBlockscoutBaseUrl(chain);
+      return base ? `${base}/tx/${txHash}` : '#';
+    }
+
+    function bsAddrUrl(chain, addr) {
+      const base = getBlockscoutBaseUrl(chain);
+      return base ? `${base}/address/${addr}` : '#';
+    }
+
+    function bsTxLink(chain, txHash, label) {
+      const url = bsTxUrl(chain, txHash);
+      label = label || shortHash(txHash);
+      if (url === '#') return `<code class="hash" title="${txHash}">${label}</code>`;
+      return `<a href="${url}" target="_blank" class="hash" title="${txHash}" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">${label}</a>`;
+    }
+
+    function bsAddrLink(chain, addr, label) {
+      const url = bsAddrUrl(chain, addr);
+      label = label || addrLabel(addr);
+      if (url === '#') return `<code class="hash" title="${addr}">${label}</code>`;
+      return `<a href="${url}" target="_blank" class="hash" title="${addr}" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">${label}</a>`;
+    }
+
+    // Backward compat
     function getL1ExplorerTxUrl(txHash) {
-      return l1ExplorerBaseUrl ? `${l1ExplorerBaseUrl}/tx/${txHash}` : '#';
+      return bsTxUrl('L1', txHash);
     }
 
     // Get address label (known name or truncated hash)
@@ -1661,9 +1737,11 @@
       const toAddress = document.getElementById('txToAddress').value.trim();
       const selectorGroup = document.getElementById('functionSelectorGroup');
       const selector = document.getElementById('functionSelector');
+      const statusEl = document.getElementById('addressStatus');
 
       if (!toAddress || !toAddress.startsWith('0x') || toAddress.length !== 42) {
         selectorGroup.style.display = 'none';
+        statusEl.style.display = 'none';
         return;
       }
 
@@ -1675,23 +1753,49 @@
           ? (CONTRACT_TYPES[contract.contractType]?.functions || DEFAULT_CONTRACT_FUNCTIONS)
           : DEFAULT_CONTRACT_FUNCTIONS;
         showFunctionSelector(functions, null);
+        statusEl.style.display = 'none';
         return;
       }
 
-      // Not a locally-known contract — try Blockscout for the selected chain
+      // Query both L1 and L2 blockscout in parallel
       selectorGroup.style.display = 'none';
+      statusEl.style.display = 'block';
+      statusEl.textContent = 'Checking address...';
+
+      const [l1Data, l2Data] = await Promise.all([
+        fetchBlockscoutAbi(toAddress, 'L1'),
+        fetchBlockscoutAbi(toAddress, 'L2'),
+      ]);
+
+      // Re-check the address hasn't changed while we were fetching
+      if (document.getElementById('txToAddress').value.trim().toLowerCase() !== toAddress.toLowerCase()) return;
+
+      // Build status line
+      const parts = [];
+      for (const [chain, data] of [['L1', l1Data], ['L2', l2Data]]) {
+        if (data && data.isContract) {
+          parts.push(`${chain}: contract${data.contractName ? ' (' + data.contractName + ')' : ''}${data.functions.length > 0 ? ' \u2705' : ' (unverified)'}`);
+        } else {
+          parts.push(`${chain}: EOA`);
+        }
+      }
+      statusEl.textContent = parts.join(' | ');
+      statusEl.style.display = 'block';
+
+      // Pick the best ABI source: prefer the target chain, fall back to the other
       const targetChain = document.getElementById('targetIsOtherChain')?.checked
         ? (selectedChain === 'L1' ? 'L2' : 'L1')
         : selectedChain;
-      const bsData = await fetchBlockscoutAbi(toAddress, targetChain);
-      // Re-check the address hasn't changed while we were fetching
-      if (document.getElementById('txToAddress').value.trim().toLowerCase() !== toAddress.toLowerCase()) return;
+      const primaryData = targetChain === 'L1' ? l1Data : l2Data;
+      const fallbackData = targetChain === 'L1' ? l2Data : l1Data;
+      const bsData = (primaryData?.functions?.length > 0) ? primaryData
+        : (fallbackData?.functions?.length > 0) ? fallbackData
+        : primaryData;
 
       if (bsData && bsData.isContract) {
         if (bsData.functions.length > 0) {
           showFunctionSelector(bsData.functions, bsData.contractName);
         } else {
-          // It's a contract but no ABI — show the selector group with a hint
           selectorGroup.style.display = 'block';
           selector.innerHTML = `<option value="">Contract detected${bsData.contractName ? ' (' + bsData.contractName + ')' : ''} — not verified, enter data manually</option>`;
         }
@@ -1724,9 +1828,12 @@
       const selector = document.getElementById('functionSelector');
       const dataInput = document.getElementById('txData');
       const valueInput = document.getElementById('txValue');
+      const paramsGroup = document.getElementById('functionParamsGroup');
       const selectedOption = selector.options[selector.selectedIndex];
 
       if (!selectedOption || !selectedOption.value) {
+        paramsGroup.style.display = 'none';
+        paramsGroup.innerHTML = '';
         return;
       }
 
@@ -1734,39 +1841,137 @@
       const params = JSON.parse(selectedOption.dataset.params || '[]');
 
       if (params.length === 0) {
-        // No params needed, just use the selector
+        paramsGroup.style.display = 'none';
+        paramsGroup.innerHTML = '';
         dataInput.value = funcSelector;
       } else {
-        // Need to prompt for params
         const paramNames = JSON.parse(selectedOption.dataset.paramNames || '[]');
-        const paramValues = [];
-        for (let i = 0; i < params.length; i++) {
-          const label = paramNames[i] && paramNames[i] !== params[i]
-            ? `${paramNames[i]} (${params[i]})`
-            : params[i];
-          const value = prompt(`Enter value for ${label}:`);
-          if (value === null) {
-            // User cancelled
-            selector.value = '';
-            return;
-          }
-          paramValues.push(value);
-        }
+        // Determine the "other" chain label for proxy checkboxes
+        const otherChain = selectedChain === 'L1' ? 'L2' : 'L1';
+        paramsGroup.innerHTML = params.map((type, i) => {
+          const name = paramNames[i] && paramNames[i] !== type ? paramNames[i] : `param${i}`;
+          const isAddress = type === 'address';
+          return `<div class="form-group" style="margin-bottom: 6px;">
+            <label style="font-size: 12px;">${name} <span style="color:#888">(${type})</span></label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="text" class="func-param" data-index="${i}" data-type="${type}" placeholder="${type}" style="flex:1;" />
+              ${isAddress ? `<label style="font-size: 11px; white-space: nowrap; margin: 0; cursor: pointer; display: flex; align-items: center; gap: 3px;">
+                <input type="checkbox" class="proxy-checkbox" data-index="${i}" />
+                on ${otherChain}
+              </label>
+              <span class="proxy-resolved" data-index="${i}" style="font-size: 10px; color: #888;"></span>` : ''}
+            </div>
+          </div>`;
+        }).join('');
+        paramsGroup.style.display = 'block';
 
-        // Encode the calldata
-        try {
-          const abiCoder = ethers.AbiCoder.defaultAbiCoder();
-          const encodedParams = abiCoder.encode(params, paramValues);
-          dataInput.value = funcSelector + encodedParams.slice(2);
-        } catch (e) {
-          alert('Error encoding parameters: ' + e.message);
-          selector.value = '';
-        }
+        // Encode on every param change; also re-resolve proxy if checkbox is checked
+        paramsGroup.querySelectorAll('.func-param').forEach(input => {
+          input.addEventListener('input', () => {
+            const idx = input.dataset.index;
+            const cb = paramsGroup.querySelector(`.proxy-checkbox[data-index="${idx}"]`);
+            if (cb && cb.checked) {
+              resolveProxyParam(cb);
+            } else {
+              encodeFunctionParams();
+            }
+          });
+        });
+
+        // Proxy checkbox: resolve proxy and re-encode
+        paramsGroup.querySelectorAll('.proxy-checkbox').forEach(cb => {
+          cb.addEventListener('change', () => resolveProxyParam(cb));
+        });
+
+        // Set data to just the selector for now (no params yet)
+        dataInput.value = funcSelector;
       }
 
       if (selectedOption.dataset.view === 'true' && parseFloat(valueInput.value || '0') > 0) {
         valueInput.value = '0';
         log('Reset Value to 0 ETH for view function simulation', 'info');
+      }
+    }
+
+    async function resolveProxyParam(checkbox) {
+      const idx = checkbox.dataset.index;
+      const paramsGroup = document.getElementById('functionParamsGroup');
+      const input = paramsGroup.querySelector(`.func-param[data-index="${idx}"]`);
+      const resolvedSpan = paramsGroup.querySelector(`.proxy-resolved[data-index="${idx}"]`);
+      const addr = input.value.trim();
+
+      if (!checkbox.checked) {
+        // Unchecked: clear resolved indicator, re-encode with raw value
+        resolvedSpan.textContent = '';
+        input.dataset.proxyAddress = '';
+        encodeFunctionParams();
+        return;
+      }
+
+      if (!addr || !addr.startsWith('0x') || addr.length !== 42) {
+        resolvedSpan.textContent = '(enter address first)';
+        return;
+      }
+
+      resolvedSpan.textContent = 'resolving...';
+      try {
+        const rollupsAddr = document.getElementById('rollupsAddress').value;
+        const rollupId = BigInt(document.getElementById('rollupId').value);
+        const l1Rpc = document.getElementById('l1Rpc').value;
+        const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
+        const l1ChainId = (await l1Provider.getNetwork()).chainId;
+        const rollups = new ethers.Contract(rollupsAddr, [
+          "function computeCrossChainProxyAddress(address,uint256,uint256) view returns (address)"
+        ], l1Provider);
+
+        // Address is "on the other chain", so compute its proxy on L1
+        // L1 tx targeting L2 address: proxy = computeCrossChainProxyAddress(addr, rollupId, l1ChainId)
+        // L2 tx targeting L1 address: proxy = computeCrossChainProxyAddress(addr, l1ChainId, l1ChainId)
+        const originId = selectedChain === 'L1' ? rollupId : l1ChainId;
+        const proxyAddress = await rollups.computeCrossChainProxyAddress(addr, originId, l1ChainId);
+
+        input.dataset.proxyAddress = proxyAddress;
+        resolvedSpan.textContent = `\u2192 ${proxyAddress.slice(0, 8)}...${proxyAddress.slice(-6)}`;
+        resolvedSpan.title = proxyAddress;
+        encodeFunctionParams();
+      } catch (e) {
+        resolvedSpan.textContent = 'error: ' + e.message;
+        input.dataset.proxyAddress = '';
+      }
+    }
+
+    function encodeFunctionParams() {
+      const selector = document.getElementById('functionSelector');
+      const dataInput = document.getElementById('txData');
+      const paramsGroup = document.getElementById('functionParamsGroup');
+      const selectedOption = selector.options[selector.selectedIndex];
+      if (!selectedOption || !selectedOption.value) return;
+
+      const funcSelector = selectedOption.value;
+      const params = JSON.parse(selectedOption.dataset.params || '[]');
+      const inputs = paramsGroup.querySelectorAll('.func-param');
+      const values = Array.from(inputs).map(el => {
+        // If proxy checkbox is checked and resolved, use the proxy address
+        const idx = el.dataset.index;
+        const cb = paramsGroup.querySelector(`.proxy-checkbox[data-index="${idx}"]`);
+        if (cb && cb.checked && el.dataset.proxyAddress) {
+          return el.dataset.proxyAddress;
+        }
+        return el.value;
+      });
+
+      // Only encode if all fields have values
+      if (values.some(v => v === '')) {
+        dataInput.value = funcSelector;
+        return;
+      }
+
+      try {
+        const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+        const encoded = abiCoder.encode(params, values);
+        dataInput.value = funcSelector + encoded.slice(2);
+      } catch (e) {
+        dataInput.value = funcSelector;
       }
     }
 
@@ -2280,6 +2485,20 @@
       builderEl.textContent = builderOnline ? 'Online' : 'Offline';
       builderEl.className = `status-indicator ${builderOnline ? 'online' : 'offline'}`;
 
+      // Check Ethrex Fullnode
+      const ethrexRpc = document.getElementById('ethrexRpc').value;
+      const ethrexOnline = await checkService(ethrexRpc, true);
+      const ethrexEl = document.getElementById('ethrexStatus');
+      ethrexEl.textContent = ethrexOnline ? 'Online' : 'Offline';
+      ethrexEl.className = `status-indicator ${ethrexOnline ? 'online' : 'offline'}`;
+
+      // Check Ethrex L2 EVM
+      const ethrexEvmRpc = document.getElementById('ethrexEvmRpc').value;
+      const ethrexEvmOnline = await checkService(ethrexEvmRpc, true);
+      const ethrexEvmEl = document.getElementById('ethrexEvmStatus');
+      ethrexEvmEl.textContent = ethrexEvmOnline ? 'Online' : 'Offline';
+      ethrexEvmEl.className = `status-indicator ${ethrexEvmOnline ? 'online' : 'offline'}`;
+
       // Check Blockscout L1 & L2
       const bsFrontendPorts = { L1: '4000', L2: '4001' };
       for (const layer of ['L1', 'L2']) {
@@ -2317,6 +2536,8 @@
 
       try {
         const builderUrl = document.getElementById('builderUrl').value;
+        const ethrexRpc = document.getElementById('ethrexRpc').value;
+        const ethrexEvmRpc = document.getElementById('ethrexEvmRpc').value;
         const l1Rpc = document.getElementById('l1Rpc').value;
         const l2Rpc = document.getElementById('l2Rpc').value;
         const l2EvmRpc = document.getElementById('l2EvmRpc').value;
@@ -2333,6 +2554,10 @@
           l2TrackedStateResult,
           l2SyncResult,
           l2BlockResult,
+          l1GenesisBlockResult,
+          l1LatestBlockResult,
+          ethrexSyncResult,
+          ethrexBlockDataResult,
         ] = await Promise.allSettled([
           fetch(builderUrl + '/status').then(async (resp) => {
             if (!resp.ok) throw new Error(`Builder status failed: ${resp.status}`);
@@ -2344,6 +2569,10 @@
           callJsonRpc(l2Rpc, 'syncrollups_getActualStateRoot', []),
           callJsonRpc(l2Rpc, 'syncrollups_isSynced', []),
           l2EvmProvider.getBlockNumber(),
+          l1Provider.getBlock(0),
+          l1Provider.getBlock('latest'),
+          callJsonRpc(ethrexRpc, 'syncrollups_isSynced', []),
+          callJsonRpc(ethrexEvmRpc, 'eth_getBlockByNumber', ['latest', false]),
         ]);
 
         // Update builder status (builder-private fullnode)
@@ -2365,6 +2594,23 @@
           document.getElementById('l1BlockNumber').textContent = l1BlockResult.value;
         } else {
           document.getElementById('l1BlockNumber').textContent = '-';
+        }
+
+        // Update L1 block ages
+        const now = Math.floor(Date.now() / 1000);
+        if (l1GenesisBlockResult.status === 'fulfilled' && l1GenesisBlockResult.value) {
+          const age = now - l1GenesisBlockResult.value.timestamp;
+          document.getElementById('l1GenesisAge').textContent = formatAge(age);
+          document.getElementById('l1GenesisAge').title = new Date(l1GenesisBlockResult.value.timestamp * 1000).toISOString();
+        } else {
+          document.getElementById('l1GenesisAge').textContent = '-';
+        }
+        if (l1LatestBlockResult.status === 'fulfilled' && l1LatestBlockResult.value) {
+          const age = now - l1LatestBlockResult.value.timestamp;
+          document.getElementById('l1LatestAge').textContent = formatAge(age);
+          document.getElementById('l1LatestAge').title = new Date(l1LatestBlockResult.value.timestamp * 1000).toISOString();
+        } else {
+          document.getElementById('l1LatestAge').textContent = '-';
         }
 
         if (rollupResult.status === 'fulfilled') {
@@ -2403,6 +2649,29 @@
           document.getElementById('l2BlockNumber').textContent = l2BlockResult.value;
         } else {
           document.getElementById('l2BlockNumber').textContent = '-';
+        }
+
+        // Update Ethrex fullnode status
+        const ethrexSyncEl = document.getElementById('ethrexSyncStatus');
+        if (ethrexSyncResult.status === 'fulfilled') {
+          const isSynced = !!ethrexSyncResult.value;
+          ethrexSyncEl.textContent = isSynced ? '✓ Synced' : '✗ Not Synced';
+          ethrexSyncEl.className = `status-value ${isSynced ? 'synced' : 'not-synced'}`;
+        } else {
+          ethrexSyncEl.textContent = 'Offline';
+          ethrexSyncEl.className = 'status-value not-synced';
+        }
+
+        if (ethrexBlockDataResult.status === 'fulfilled' && ethrexBlockDataResult.value) {
+          const block = ethrexBlockDataResult.value;
+          document.getElementById('ethrexBlockNumber').textContent = parseInt(block.number, 16);
+          const stateRoot = block.stateRoot || '0x';
+          document.getElementById('ethrexStateRoot').textContent = shortHash(stateRoot);
+          document.getElementById('ethrexStateRoot').title = stateRoot;
+        } else {
+          document.getElementById('ethrexBlockNumber').textContent = '-';
+          document.getElementById('ethrexStateRoot').textContent = '-';
+          document.getElementById('ethrexStateRoot').title = '';
         }
 
         if (!silent) log('Status refreshed', 'success');
@@ -2953,7 +3222,7 @@
         const rollups = new ethers.Contract(rollupsAddr, ROLLUPS_ABI, l1Provider);
         const selectedRollupId = BigInt(rollupId);
         const l1ChainId = BigInt((await l1Provider.getNetwork()).chainId);
-        l1ExplorerBaseUrl = CHAIN_EXPLORERS[Number(l1ChainId)] || '';
+        // Blockscout URLs derived from settings (no static explorer map needed)
         const proxyMetaCache = new Map();
         const authorizedProxyCache = new Map();
 
@@ -3253,7 +3522,7 @@
                 <span class="tx-type-badge prep">PREP: REGISTER EXECUTIONS</span>
                 <div class="tx-row">
                   <span>From (L1):</span>
-                  <code class="hash" title="${tx.from || ''}">${addrLabel(tx.from || '')}</code>
+                  ${bsAddrLink('L1', tx.from || '')}
                   <span class="copy-btn" onclick="copyText(this,'${tx.from || ''}')">${COPY_ICON}</span>
                 </div>
                 <div class="tx-row">
@@ -3278,17 +3547,17 @@
 	                <span class="tx-type-badge admin">PREP: PROXY DEPLOY</span>
                 <div class="tx-row">
                   <span>From (L1):</span>
-                  <code class="hash" title="${tx.from || ''}">${addrLabel(tx.from || '')}</code>
+                  ${bsAddrLink('L1', tx.from || '')}
                   <span class="copy-btn" onclick="copyText(this,'${tx.from || ''}')">${COPY_ICON}</span>
                 </div>
                 <div class="tx-row">
                   <span>Proxy:</span>
-                  <code class="hash" title="${tx.proxyAddress}">${shortHash(tx.proxyAddress)}</code>
+                  ${bsAddrLink('L1', tx.proxyAddress, shortHash(tx.proxyAddress))}
                   <span class="copy-btn" onclick="copyText(this,'${tx.proxyAddress}')">${COPY_ICON}</span>
                 </div>
 	                <div class="tx-row">
 	                  <span>${targetLabel}</span>
-	                  <code class="hash" title="${tx.originalAddress}">${addrLabel(tx.originalAddress)}</code>
+	                  ${bsAddrLink(isProxyForL1 ? 'L1' : 'L2', tx.originalAddress)}
 	                  <span class="copy-btn" onclick="copyText(this,'${tx.originalAddress}')">${COPY_ICON}</span>
 	                </div>
 	                <div class="prep-note">
@@ -3302,7 +3571,7 @@
 	                <span class="tx-type-badge rollups-admin">ROLLUPS ADMIN</span>
 	                <div class="tx-row">
 	                  <span>From (L1):</span>
-	                  <code class="hash" title="${tx.from || ''}">${addrLabel(tx.from || '')}</code>
+	                  ${bsAddrLink('L1', tx.from || '')}
 	                  <span class="copy-btn" onclick="copyText(this,'${tx.from || ''}')">${COPY_ICON}</span>
 	                </div>
 	                <div class="tx-row">
@@ -3319,14 +3588,14 @@
 
             if (proxyPrep) {
               prepDetails.push(
-                `proxy deployed in <code class="hash" title="${proxyPrep.l1TxHash}">${shortHash(proxyPrep.l1TxHash)}</code>` +
-                ` by <code class="hash" title="${proxyPrep.from || ''}">${addrLabel(proxyPrep.from || '')}</code>`
+                `proxy deployed in ${bsTxLink('L1', proxyPrep.l1TxHash)}` +
+                ` by ${bsAddrLink('L1', proxyPrep.from || '')}`
               );
             }
             if (loadPrep) {
               prepDetails.push(
-                `executions registered in <code class="hash" title="${loadPrep.l1TxHash}">${shortHash(loadPrep.l1TxHash)}</code>` +
-                ` by <code class="hash" title="${loadPrep.from || ''}">${addrLabel(loadPrep.from || '')}</code>` +
+                `executions registered in ${bsTxLink('L1', loadPrep.l1TxHash)}` +
+                ` by ${bsAddrLink('L1', loadPrep.from || '')}` +
                 ` (${loadPrep.count} loaded)`
               );
             }
@@ -3342,14 +3611,14 @@
 	                <span class="tx-type-badge l2-l1">L2→L1</span>
 	                <div class="tx-row">
 	                  <span>From (L2):</span>
-	                  <code class="hash" title="${tx.from}">${addrLabel(tx.from)}</code>
+	                  ${bsAddrLink('L2', tx.from)}
 	                  <span class="copy-btn" onclick="copyText(this,'${tx.from}')">${COPY_ICON}</span>
 	                </div>
 	                <div class="tx-row">
 	                  <span>To:</span>
-	                  Proxy <code class="hash" title="${tx.proxyAddress}">${shortHash(tx.proxyAddress)}</code>
+	                  Proxy ${bsAddrLink('L1', tx.proxyAddress, shortHash(tx.proxyAddress))}
 	                  <span class="copy-btn" onclick="copyText(this,'${tx.proxyAddress}')">${COPY_ICON}</span>
-	                  → L1: <code class="hash" title="${tx.l1Target}">${addrLabel(tx.l1Target)}</code>
+	                  → L1: ${bsAddrLink('L1', tx.l1Target)}
 	                  <span class="copy-btn" onclick="copyText(this,'${tx.l1Target}')">${COPY_ICON}</span>
 	                </div>
 	                ${callHtml}
@@ -3359,8 +3628,8 @@
 	            `;
 	          } else if (tx.type === 'L2_L2') {
 	            const toDisplay = tx.isDeployment
-	              ? `<span class="deployment">CONTRACT DEPLOY → ${shortHash(tx.deployedAddress)}</span>`
-	              : `<code class="hash" title="${tx.to}">${addrLabel(tx.to)}</code><span class="copy-btn" onclick="copyText(this,'${tx.to}')">${COPY_ICON}</span>`;
+	              ? `<span class="deployment">CONTRACT DEPLOY → ${bsAddrLink('L2', tx.deployedAddress, shortHash(tx.deployedAddress))}</span>`
+	              : `${bsAddrLink('L2', tx.to)}<span class="copy-btn" onclick="copyText(this,'${tx.to}')">${COPY_ICON}</span>`;
 
             const callHtml = tx.data && tx.data !== '0x' ? `<div class="tx-row"><span>Call:</span>${formatCalldata(tx.data, tx.value)}</div>` : '';
             const valueHtml = tx.value && tx.value > 0n && (!tx.data || tx.data === '0x') ? `<div class="tx-row"><span>Value:</span><span style="color: #10b981;">${ethers.formatEther(tx.value)} ETH</span></div>` : '';
@@ -3370,7 +3639,7 @@
 	                <span class="tx-type-badge l2tx">L2→L2</span>
 	                <div class="tx-row">
 	                  <span>From (L2):</span>
-	                  <code class="hash" title="${tx.from}">${addrLabel(tx.from)}</code>
+	                  ${bsAddrLink('L2', tx.from)}
 	                  <span class="copy-btn" onclick="copyText(this,'${tx.from}')">${COPY_ICON}</span>
 	                </div>
                 <div class="tx-row">
@@ -3388,20 +3657,20 @@
 
             if (proxyPrep) {
               prepDetails.push(
-                `proxy deployed in <code class="hash" title="${proxyPrep.l1TxHash}">${shortHash(proxyPrep.l1TxHash)}</code>` +
-                ` by <code class="hash" title="${proxyPrep.from || ''}">${addrLabel(proxyPrep.from || '')}</code>`
+                `proxy deployed in ${bsTxLink('L1', proxyPrep.l1TxHash)}` +
+                ` by ${bsAddrLink('L1', proxyPrep.from || '')}`
               );
             }
             if (loadPrep) {
               prepDetails.push(
-                `executions registered in <code class="hash" title="${loadPrep.l1TxHash}">${shortHash(loadPrep.l1TxHash)}</code>` +
-                ` by <code class="hash" title="${loadPrep.from || ''}">${addrLabel(loadPrep.from || '')}</code>` +
+                `executions registered in ${bsTxLink('L1', loadPrep.l1TxHash)}` +
+                ` by ${bsAddrLink('L1', loadPrep.from || '')}` +
                 ` (${loadPrep.count} loaded)`
               );
             }
 
             const l2TargetDisplay = tx.l2Target
-              ? `→ L2: <code class="hash" title="${tx.l2Target}">${addrLabel(tx.l2Target)}</code><span class="copy-btn" onclick="copyText(this,'${tx.l2Target}')">${COPY_ICON}</span>`
+              ? `→ L2: ${bsAddrLink('L2', tx.l2Target)}<span class="copy-btn" onclick="copyText(this,'${tx.l2Target}')">${COPY_ICON}</span>`
               : '';
             const callHtml = tx.data && tx.data !== '0x' ? `<div class="tx-row"><span>Call:</span>${formatCalldata(tx.data, tx.value)}</div>` : '';
             const valueHtml = tx.value && tx.value > 0n && (!tx.data || tx.data === '0x') ? `<div class="tx-row"><span>Value:</span><span style="color: #10b981;">${ethers.formatEther(tx.value)} ETH</span></div>` : '';
@@ -3414,12 +3683,12 @@
                 <span class="tx-type-badge bridge">L1→L2</span>
                 <div class="tx-row">
                   <span>From (L1):</span>
-                  <code class="hash" title="${tx.from}">${addrLabel(tx.from)}</code>
+                  ${bsAddrLink('L1', tx.from)}
                   <span class="copy-btn" onclick="copyText(this,'${tx.from}')">${COPY_ICON}</span>
                 </div>
                 <div class="tx-row">
                   <span>To:</span>
-                  Proxy <code class="hash" title="${tx.proxyAddress}">${shortHash(tx.proxyAddress)}</code>
+                  Proxy ${bsAddrLink('L1', tx.proxyAddress, shortHash(tx.proxyAddress))}
                   ${l2TargetDisplay}
                 </div>
                 ${callHtml}
@@ -3441,12 +3710,12 @@
           <div class="l1-tx-group">
             <div class="l1-tx-header">
               <span>
-                L1 TX: <a href="${getL1ExplorerTxUrl(group.l1TxHash)}" target="_blank" class="hash" title="${group.l1TxHash}" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">${shortHash(group.l1TxHash)}</a>
+                L1 TX: ${bsTxLink('L1', group.l1TxHash)}
                 <span class="copy-btn" onclick="copyText(this,'${group.l1TxHash}')">${COPY_ICON}</span>
                 <span style="margin-left: 8px; color: #888;">${group.timestamp.toLocaleTimeString()}</span>
                 ${group.l1From ? `
                 <span style="margin-left: 8px; color: #666;">
-                  from <code class="hash" title="${group.l1From}">${addrLabel(group.l1From)}</code>
+                  from ${bsAddrLink('L1', group.l1From)}
                 </span>` : ''}
               </span>
               <span style="font-weight: 600;">
