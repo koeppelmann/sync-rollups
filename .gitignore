@@ -10,3 +10,13 @@ docs/
 
 # Dotenv file
 .env
+.env.*
+
+# Build artifacts
+target/
+dist/
+node_modules/
+
+# Runtime state
+tooling/state/
+tooling/logs/
