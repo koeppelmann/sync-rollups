@@ -23,8 +23,8 @@ fi
 # Configuration (can be overridden via environment)
 L1_RPC_URL="${L1_RPC_URL:-http://localhost:8545}"
 ROLLUPS_ADDRESS="${ROLLUPS_ADDRESS:-}"
-ROLLUP_ID="${ROLLUP_ID:-1}"
-L2_CHAIN_ID="${L2_CHAIN_ID:-1337}"
+ROLLUP_ID="${ROLLUP_ID:-0}"
+L2_CHAIN_ID="${L2_CHAIN_ID:-10200200}"
 DEPLOYMENT_BLOCK="${DEPLOYMENT_BLOCK:-0}"
 ETHREX_BIN="${ETHREX_BIN:-/home/ubuntu/code/ethrex/target/release/ethrex}"
 CONTRACTS_OUT_DIR="${CONTRACTS_OUT_DIR:-../out}"

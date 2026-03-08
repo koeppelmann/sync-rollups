@@ -34,11 +34,11 @@ struct Args {
     rollups_address: String,
 
     /// Rollup ID
-    #[arg(long, env = "ROLLUP_ID", default_value = "1")]
+    #[arg(long, env = "ROLLUP_ID", default_value = "0")]
     rollup_id: u64,
 
     /// L2 chain ID
-    #[arg(long, env = "L2_CHAIN_ID", default_value = "1337")]
+    #[arg(long, env = "L2_CHAIN_ID", default_value = "10200200")]
     l2_chain_id: u64,
 
     /// L1 block number at which the Rollups contract was deployed
