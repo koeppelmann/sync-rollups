@@ -75,6 +75,30 @@ Phase 2 uses execution table entries with `scope=[0]` to trigger scope navigatio
 4. Scopes match → `_processCallAtScope` → proxy's `executeOnBehalf` → actual execution
 5. RESULT matches → terminal → unwinds back to caller
 
+## Visualizer presentation order logic
+
+The visualizer (`visualizator/index.html`) shows steps sequentially. The order follows the **arrow direction** of each scenario, NOT a fixed "always L1 first" or "always L2 first" rule.
+
+### Rules for determining step order
+
+1. **Follow the arrows.** The `→` in the scenario flow tells you which chain the story starts on.
+2. **Simple scenarios (S1, S2):** Show the initiating chain first, then the remote chain.
+   - S1 `Alice → A (→ B') → B` [L1→L2]: L1 first (Alice calls A), then L2 (B executes)
+   - S2 `Alice → D (→ C') → C` [L2→L1]: L2 first (Alice calls D), then L1 (C executes)
+3. **Nested scenarios (S3, S4):** The "inner" execution (the chain in the middle of the arrows) must complete first, because its result gets pre-loaded into the "outer" chain's table. Then the "outer" chain consumes it via scope navigation.
+   - S3 `Alice → A' (→ A → B') → B` [L2→L1→L2]: L1 first (A runs as inner), then L2 (Alice→A'→B as outer)
+   - S4 `Alice → D' (→ D → C') → C` [L1→L2→L1]: L2 first (D runs as inner), then L1 (Alice→D'→C as outer)
+4. **Within each chain phase:** setup (postBatch/loadTable) comes before execution (call/executeL2TX/executeIncoming).
+
+### How to build future flows
+
+For a new scenario with flow `X → Y → Z`:
+1. Identify the chains: which chain does each entity (X, Y, Z) live on?
+2. Identify the direction: the arrows tell you the conceptual order.
+3. Determine execution phases: the "inner" cross-chain calls must execute first on their home chain, producing results that get loaded into the "outer" chain's table.
+4. For each phase: first show table loading (postBatch on L1 / loadExecutionTable on L2), then show the execution that consumes those entries.
+5. Show both execution tables at all times — entries appear when loaded, disappear when consumed.
+
 ## Open questions for future work
 
 1. **Negative test cases:** Should we add tests for:
