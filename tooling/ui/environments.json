@@ -1,0 +1,34 @@
+{
+  "anvil": {
+    "label": "Anvil Local",
+    "settingsFile": "settings.anvil.json",
+    "walletsFile": "wallets.anvil.json",
+    "l1ChainId": 31337,
+    "l1ExplorerUrl": "http://localhost:4010",
+    "l2ExplorerUrl": "http://localhost:4011"
+  },
+  "gnosis": {
+    "label": "Gnosis Chain",
+    "settingsFile": "settings.gnosis.json",
+    "walletsFile": "wallets.gnosis.json",
+    "l1ChainId": 100,
+    "l1ExplorerUrl": "https://gnosis.blockscout.com",
+    "l2ExplorerUrl": "http://localhost:4002"
+  },
+  "devnet-philippe": {
+    "label": "Devnet Philippe",
+    "settingsFile": "settings.devnet-philippe.json",
+    "walletsFile": "wallets.devnet-philippe.json",
+    "l1ChainId": 0,
+    "l1ExplorerUrl": "http://51.210.221.124:10000",
+    "l2ExplorerUrl": "http://51.210.221.124:20000"
+  },
+  "mainnet": {
+    "label": "Ethereum Mainnet",
+    "settingsFile": "settings.mainnet.json",
+    "walletsFile": "wallets.mainnet.json",
+    "l1ChainId": 1,
+    "l1ExplorerUrl": "https://eth.blockscout.com",
+    "l2ExplorerUrl": "http://localhost:4003"
+  }
+}

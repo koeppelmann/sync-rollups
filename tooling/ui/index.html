@@ -55,6 +55,34 @@
       background: #ede9fe;
       color: #7c3aed;
     }
+    /* Environment selector */
+    .env-selector {
+      appearance: none;
+      background: #ede9fe;
+      border: 1px solid #c4b5fd;
+      border-radius: 8px;
+      padding: 6px 28px 6px 10px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #5b21b6;
+      cursor: pointer;
+      outline: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235b21b6' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 8px center;
+      transition: all 0.2s;
+    }
+    .env-selector:hover {
+      background-color: #ddd6fe;
+      border-color: #a78bfa;
+    }
+    .env-selector:focus {
+      border-color: #7c3aed;
+      box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+    }
+    .env-selector option:disabled {
+      color: #999;
+    }
     /* Popup panels */
     .popup-overlay {
       display: none;
@@ -701,6 +729,12 @@
 <body>
   <div class="header-bar">
     <h1>sync-rollups Dashboard</h1>
+    <select id="envSelector" class="env-selector" title="Switch deployment environment">
+      <option value="anvil">Anvil Local</option>
+      <option value="gnosis">Gnosis Chain</option>
+      <option value="devnet-philippe">Devnet Philippe</option>
+      <option value="mainnet" disabled>Mainnet (soon)</option>
+    </select>
     <div class="header-icons">
       <button class="icon-btn" id="settingsIconBtn" title="Settings">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -823,6 +857,14 @@
         <div class="status-row">
           <span class="status-label">Block Number</span>
           <span class="status-value" id="l2BlockNumber">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Genesis Block Age</span>
+          <span class="status-value" id="l2GenesisAge">-</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Latest Block Age</span>
+          <span class="status-value" id="l2LatestAge">-</span>
         </div>
         <div class="status-row">
           <span class="status-label">State Root (EVM)</span>
@@ -980,19 +1022,73 @@
     // ============ Configuration ============
     const L2_CHAIN_ID = 10200200;
     const _h = window.location.hostname;
-    const DEFAULT_RUNTIME_SETTINGS = {
-      l1Rpc: `http://${_h}:8546`,
-      l2Rpc: `http://${_h}:9547`,
-      l2EvmRpc: `http://${_h}:9548`,
-      builderUrl: `http://${_h}:3200`,
-      ethrexRpc: `http://${_h}:3201`,
-      ethrexEvmRpc: `http://${_h}:9556`,
-      blockscoutL1Url: `http://${_h}:4010`,
-      blockscoutL2Url: `http://${_h}:4011`,
-      rollupsAddress: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
-      rollupId: "0",
-      deploymentBlock: "0"
+    // Per-environment default settings (used when settings.<env>.json is unavailable)
+    const ENV_DEFAULT_SETTINGS = {
+      anvil: {
+        l1Rpc: `http://${_h}:8546`,
+        l2Rpc: `http://${_h}:9547`,
+        l2EvmRpc: `http://${_h}:9548`,
+        builderUrl: `http://${_h}:3200`,
+        prooferUrl: `http://${_h}:3300`,
+        ethrexRpc: `http://${_h}:3201`,
+        ethrexEvmRpc: `http://${_h}:9556`,
+        blockscoutL1Url: `http://${_h}:4010`,
+        blockscoutL2Url: `http://${_h}:4011`,
+        rollupsAddress: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+        rollupId: "0",
+        deploymentBlock: "0"
+      },
+      gnosis: {
+        l1Rpc: `http://${_h}:8556`,
+        l2Rpc: `http://${_h}:9647`,
+        l2EvmRpc: `http://${_h}:9648`,
+        builderUrl: `http://${_h}:3210`,
+        prooferUrl: `http://${_h}:3310`,
+        ethrexRpc: `http://${_h}:3211`,
+        ethrexEvmRpc: `http://${_h}:9656`,
+        blockscoutL1Url: 'https://gnosis.blockscout.com',
+        blockscoutL2Url: `http://${_h}:4002`,
+        rollupsAddress: '',
+        rollupId: "0",
+        deploymentBlock: "0"
+      },
+      'devnet-philippe': {
+        l1Rpc: 'http://51.210.221.124:18545',
+        l2Rpc: 'http://51.210.221.124:28545',
+        l2EvmRpc: 'http://51.210.221.124:28545',
+        builderUrl: '',
+        prooferUrl: '',
+        ethrexRpc: '',
+        ethrexEvmRpc: '',
+        blockscoutL1Url: 'http://51.210.221.124:10001',
+        blockscoutL2Url: 'http://51.210.221.124:20001',
+        rollupsAddress: '',
+        rollupId: "0",
+        deploymentBlock: "0"
+      },
+      mainnet: {
+        l1Rpc: `http://${_h}:8566`,
+        l2Rpc: `http://${_h}:9747`,
+        l2EvmRpc: `http://${_h}:9748`,
+        builderUrl: `http://${_h}:3220`,
+        prooferUrl: `http://${_h}:3320`,
+        ethrexRpc: '',
+        ethrexEvmRpc: '',
+        blockscoutL1Url: 'https://eth.blockscout.com/api',
+        blockscoutL2Url: `http://${_h}:4031`,
+        rollupsAddress: '',
+        rollupId: "0",
+        deploymentBlock: "0"
+      }
     };
+
+    // Current environment (persisted in localStorage)
+    let currentEnv = localStorage.getItem('sync-rollups-env') || 'anvil';
+
+    // Environment registry (loaded from environments.json)
+    let envRegistry = null;
+
+    const DEFAULT_RUNTIME_SETTINGS = ENV_DEFAULT_SETTINGS[currentEnv] || ENV_DEFAULT_SETTINGS.anvil;
 
     // Proxy detection magic addresses and values
     // When getBalance is called on these addresses, proxies return magic values
@@ -1176,31 +1272,28 @@
     }
 
     async function loadUserWalletConfig() {
-      // Detect L1 chain ID to choose the right default wallets
-      let isAnvil = false;
-      try {
-        const l1Rpc = document.getElementById('l1Rpc').value;
-        const provider = new ethers.JsonRpcProvider(l1Rpc);
-        const network = await provider.getNetwork();
-        isAnvil = (network.chainId === 31337n);
-        DEFAULT_USER_WALLETS = isAnvil ? ANVIL_USER_WALLETS : GNOSIS_USER_WALLETS;
-      } catch {
-        // If we can't detect, keep current default
-      }
+      // Use environment to choose default wallets
+      const isAnvil = (currentEnv === 'anvil');
+      DEFAULT_USER_WALLETS = isAnvil ? ANVIL_USER_WALLETS : GNOSIS_USER_WALLETS;
       USER_WALLETS = normalizeUserWallets(DEFAULT_USER_WALLETS);
-      // Only load wallets.dev.json on non-Anvil chains (Gnosis etc.)
-      if (!isAnvil) {
+
+      // Try environment-specific wallets file, then fall back to wallets.dev.json
+      const envFile = envRegistry?.[currentEnv]?.walletsFile || `wallets.${currentEnv}.json`;
+      const filesToTry = [envFile];
+      if (envFile !== 'wallets.dev.json') filesToTry.push('wallets.dev.json');
+
+      for (const file of filesToTry) {
         try {
-          const resp = await fetch('wallets.dev.json', { cache: 'no-store' });
-          if (resp.ok) {
-            const cfg = await resp.json();
-            const fileWallets = normalizeUserWallets(cfg?.users || cfg);
-            if (fileWallets.length >= 2) {
-              USER_WALLETS = fileWallets;
-            }
+          const resp = await fetch(file, { cache: 'no-store' });
+          if (!resp.ok) continue;
+          const cfg = await resp.json();
+          const fileWallets = normalizeUserWallets(cfg?.users || cfg);
+          if (fileWallets.length >= 2) {
+            USER_WALLETS = fileWallets;
+            break;
           }
         } catch {
-          // Keep defaults if runtime config is unavailable.
+          continue;
         }
       }
       refreshKnownAddressLabels();
@@ -1234,7 +1327,7 @@
       if (!settings || typeof settings !== 'object') return;
       const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'ethrexRpc', 'ethrexEvmRpc', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
       for (const key of keys) {
-        if (typeof settings[key] === 'string' && settings[key].length > 0) {
+        if (typeof settings[key] === 'string') {
           const input = document.getElementById(key);
           if (input) input.value = settings[key];
         }
@@ -1245,14 +1338,25 @@
     }
 
     async function loadRuntimeSettingsConfig() {
-      applyRuntimeSettings(DEFAULT_RUNTIME_SETTINGS);
-      try {
-        const resp = await fetch('settings.dev.json', { cache: 'no-store' });
-        if (!resp.ok) return;
-        const cfg = await resp.json();
-        applyRuntimeSettings(cfg);
-      } catch {
-        // Keep defaults if runtime config is unavailable.
+      // Apply defaults for the current environment
+      const envDefaults = ENV_DEFAULT_SETTINGS[currentEnv] || ENV_DEFAULT_SETTINGS.anvil;
+      applyRuntimeSettings(envDefaults);
+
+      // Try environment-specific settings file first, then fall back to settings.dev.json
+      const envFile = envRegistry?.[currentEnv]?.settingsFile || `settings.${currentEnv}.json`;
+      const filesToTry = [envFile];
+      if (envFile !== 'settings.dev.json') filesToTry.push('settings.dev.json');
+
+      for (const file of filesToTry) {
+        try {
+          const resp = await fetch(file, { cache: 'no-store' });
+          if (!resp.ok) continue;
+          const cfg = await resp.json();
+          applyRuntimeSettings(cfg);
+          break; // Use first successful file
+        } catch {
+          continue;
+        }
       }
     }
 
@@ -1361,12 +1465,19 @@
 
     // Block explorer URL based on L1 chain ID (detected at runtime)
     // Blockscout explorer URL helpers — derive frontend URLs from settings
-    const bsFrontendPorts = { L1: '4000', L2: '4001' };
-
     function getBlockscoutBaseUrl(chain) {
+      // Use explorer URL from environment registry if available (handles external explorers like gnosis.blockscout.com)
+      if (envRegistry && envRegistry[currentEnv]) {
+        const explorerKey = chain === 'L1' ? 'l1ExplorerUrl' : 'l2ExplorerUrl';
+        const explorerUrl = envRegistry[currentEnv][explorerKey];
+        if (explorerUrl) {
+          // Replace localhost with dashboard hostname for remote access
+          return explorerUrl.replace('localhost', window.location.hostname).replace(/\/+$/, '');
+        }
+      }
+      // Fallback: derive from the API URL input
       try {
         const url = new URL(document.getElementById(`blockscout${chain}Url`).value);
-        url.port = bsFrontendPorts[chain];
         return url.origin;
       } catch {
         return '';
@@ -2417,11 +2528,11 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 }),
-            signal: AbortSignal.timeout(2000),
+            signal: AbortSignal.timeout(8000),
           });
           return resp.ok;
         } else {
-          const resp = await fetch(url + '/status', { signal: AbortSignal.timeout(2000) });
+          const resp = await fetch(url + '/status', { signal: AbortSignal.timeout(8000) });
           return resp.ok;
         }
       } catch {
@@ -2439,7 +2550,7 @@
           params,
           id: 1,
         }),
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(10000),
       });
       if (!resp.ok) {
         throw new Error(`${method} RPC failed: ${resp.status} ${resp.statusText}`);
@@ -2485,38 +2596,62 @@
       builderEl.textContent = builderOnline ? 'Online' : 'Offline';
       builderEl.className = `status-indicator ${builderOnline ? 'online' : 'offline'}`;
 
-      // Check Ethrex Fullnode
+      // Check Ethrex Fullnode (skip if not configured)
       const ethrexRpc = document.getElementById('ethrexRpc').value;
-      const ethrexOnline = await checkService(ethrexRpc, true);
       const ethrexEl = document.getElementById('ethrexStatus');
-      ethrexEl.textContent = ethrexOnline ? 'Online' : 'Offline';
-      ethrexEl.className = `status-indicator ${ethrexOnline ? 'online' : 'offline'}`;
+      if (ethrexRpc) {
+        const ethrexOnline = await checkService(ethrexRpc, true);
+        ethrexEl.textContent = ethrexOnline ? 'Online' : 'Offline';
+        ethrexEl.className = `status-indicator ${ethrexOnline ? 'online' : 'offline'}`;
+      } else {
+        ethrexEl.textContent = 'N/A';
+        ethrexEl.className = 'status-indicator';
+      }
 
-      // Check Ethrex L2 EVM
+      // Check Ethrex L2 EVM (skip if not configured)
       const ethrexEvmRpc = document.getElementById('ethrexEvmRpc').value;
-      const ethrexEvmOnline = await checkService(ethrexEvmRpc, true);
       const ethrexEvmEl = document.getElementById('ethrexEvmStatus');
-      ethrexEvmEl.textContent = ethrexEvmOnline ? 'Online' : 'Offline';
-      ethrexEvmEl.className = `status-indicator ${ethrexEvmOnline ? 'online' : 'offline'}`;
+      if (ethrexEvmRpc) {
+        const ethrexEvmOnline = await checkService(ethrexEvmRpc, true);
+        ethrexEvmEl.textContent = ethrexEvmOnline ? 'Online' : 'Offline';
+        ethrexEvmEl.className = `status-indicator ${ethrexEvmOnline ? 'online' : 'offline'}`;
+      } else {
+        ethrexEvmEl.textContent = 'N/A';
+        ethrexEvmEl.className = 'status-indicator';
+      }
 
       // Check Blockscout L1 & L2
-      const bsFrontendPorts = { L1: '4000', L2: '4001' };
+      // Get explorer URLs from environment registry (for "Open" links)
+      const envExplorerUrls = {};
+      if (envRegistry && envRegistry[currentEnv]) {
+        envExplorerUrls.L1 = envRegistry[currentEnv].l1ExplorerUrl || '';
+        envExplorerUrls.L2 = envRegistry[currentEnv].l2ExplorerUrl || '';
+      }
       for (const layer of ['L1', 'L2']) {
         const bsUrl = document.getElementById(`blockscout${layer}Url`).value.replace(/\/+$/, '');
         const bsEl = document.getElementById(`blockscout${layer}Status`);
         const linkEl = document.getElementById(`blockscout${layer}Link`);
+        if (!bsUrl) {
+          bsEl.textContent = 'N/A';
+          bsEl.className = 'status-indicator';
+          linkEl.style.display = 'none';
+          continue;
+        }
         try {
-          const bsResp = await fetch(`${bsUrl}/api/v2/main-page/indexing-status`, { signal: AbortSignal.timeout(3000) });
+          const bsResp = await fetch(`${bsUrl}/api/v2/main-page/indexing-status`, { signal: AbortSignal.timeout(5000) });
           if (bsResp.ok) {
             const bsData = await bsResp.json();
             bsEl.textContent = bsData.finished_indexing ? 'Online' : 'Indexing...';
             bsEl.className = 'status-indicator online';
-            // Derive frontend URL: use dashboard hostname with frontend port
-            try {
-              const frontendUrl = `${window.location.protocol}//${window.location.hostname}:${bsFrontendPorts[layer]}`;
-              linkEl.href = frontendUrl;
+            // Use explorer URL from environment registry for the "Open" link
+            const explorerUrl = envExplorerUrls[layer];
+            if (explorerUrl) {
+              // Replace localhost with dashboard hostname for remote access
+              linkEl.href = explorerUrl.replace('localhost', window.location.hostname);
               linkEl.style.display = 'inline';
-            } catch { linkEl.style.display = 'none'; }
+            } else {
+              linkEl.style.display = 'none';
+            }
           } else {
             bsEl.textContent = 'Error';
             bsEl.className = 'status-indicator offline';
@@ -2558,8 +2693,10 @@
           l1LatestBlockResult,
           ethrexSyncResult,
           ethrexBlockDataResult,
+          l2GenesisBlockResult,
+          l2LatestBlockResult,
         ] = await Promise.allSettled([
-          fetch(builderUrl + '/status').then(async (resp) => {
+          fetch(builderUrl + '/status', { signal: AbortSignal.timeout(10000) }).then(async (resp) => {
             if (!resp.ok) throw new Error(`Builder status failed: ${resp.status}`);
             return resp.json();
           }),
@@ -2571,8 +2708,10 @@
           l2EvmProvider.getBlockNumber(),
           l1Provider.getBlock(0),
           l1Provider.getBlock('latest'),
-          callJsonRpc(ethrexRpc, 'syncrollups_isSynced', []),
-          callJsonRpc(ethrexEvmRpc, 'eth_getBlockByNumber', ['latest', false]),
+          ethrexRpc ? callJsonRpc(ethrexRpc, 'syncrollups_isSynced', []) : Promise.reject('not configured'),
+          ethrexEvmRpc ? callJsonRpc(ethrexEvmRpc, 'eth_getBlockByNumber', ['latest', false]) : Promise.reject('not configured'),
+          l2EvmProvider.getBlock(0),
+          l2EvmProvider.getBlock('latest'),
         ]);
 
         // Update builder status (builder-private fullnode)
@@ -2649,6 +2788,24 @@
           document.getElementById('l2BlockNumber').textContent = l2BlockResult.value;
         } else {
           document.getElementById('l2BlockNumber').textContent = '-';
+        }
+
+        // L2 genesis block age
+        if (l2GenesisBlockResult.status === 'fulfilled' && l2GenesisBlockResult.value) {
+          const age = Math.floor(Date.now() / 1000) - l2GenesisBlockResult.value.timestamp;
+          document.getElementById('l2GenesisAge').textContent = formatAge(age);
+          document.getElementById('l2GenesisAge').title = new Date(l2GenesisBlockResult.value.timestamp * 1000).toISOString();
+        } else {
+          document.getElementById('l2GenesisAge').textContent = '-';
+        }
+
+        // L2 latest block age
+        if (l2LatestBlockResult.status === 'fulfilled' && l2LatestBlockResult.value) {
+          const age = Math.floor(Date.now() / 1000) - l2LatestBlockResult.value.timestamp;
+          document.getElementById('l2LatestAge').textContent = formatAge(age);
+          document.getElementById('l2LatestAge').title = new Date(l2LatestBlockResult.value.timestamp * 1000).toISOString();
+        } else {
+          document.getElementById('l2LatestAge').textContent = '-';
         }
 
         // Update Ethrex fullnode status
@@ -3852,7 +4009,58 @@
     }
 
     // ============ Initialize ============
+    async function switchEnvironment(envKey) {
+      if (envKey === currentEnv) return;
+      currentEnv = envKey;
+      localStorage.setItem('sync-rollups-env', envKey);
+      log(`Switching to ${envRegistry?.[envKey]?.label || envKey}...`, 'info');
+
+      // Reload settings and wallets for the new environment
+      await loadRuntimeSettingsConfig();
+      await loadUserWalletConfig();
+      renderWalletList();
+      updateAddressDropdown();
+      updateFunctionSelector();
+      updateConnectedWalletDisplay();
+
+      // Clear stale state
+      walletBalances = {};
+      deployedContracts = [];
+
+      // Re-fetch everything
+      await fetchAllWalletBalances();
+      await refreshStatus();
+      await fetchTxHistory();
+      log(`Switched to ${envRegistry?.[envKey]?.label || envKey}`, 'info');
+    }
+
     async function initializeDashboard() {
+      // Load environment registry
+      try {
+        const resp = await fetch('environments.json', { cache: 'no-store' });
+        if (resp.ok) envRegistry = await resp.json();
+      } catch {}
+
+      // Set up environment selector
+      const envSelector = document.getElementById('envSelector');
+      if (envSelector) {
+        // Populate from registry if available
+        if (envRegistry) {
+          envSelector.innerHTML = '';
+          for (const [key, env] of Object.entries(envRegistry)) {
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = env.label;
+            if (key === 'mainnet') opt.disabled = true;
+            envSelector.appendChild(opt);
+          }
+        }
+        envSelector.value = currentEnv;
+        envSelector.addEventListener('change', (e) => {
+          switchEnvironment(e.target.value);
+        });
+      }
+
       await loadRuntimeSettingsConfig();
       await loadUserWalletConfig();
       loadDeployedContracts();
