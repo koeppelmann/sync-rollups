@@ -125,6 +125,14 @@
     .si-tc{margin-top:0.15rem;font-size:0.52rem}
     .tc-a{color:var(--add)}.tc-r{color:var(--rm)}
 
+    /* Persistent architecture diagram */
+    .arch-wrap{margin-bottom:0.6rem}
+    .arch-box{background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:0.5rem;overflow-x:auto}
+    .arch-svg{width:100%;display:block}
+
+    /* Detail call flow (below SVG) */
+    .detail-flow{margin-top:0.4rem;border-top:1px solid var(--brd);padding-top:0.35rem}
+
     @media(max-width:700px){.tbl-row,.st-row{grid-template-columns:1fr}.flow-row{flex-wrap:wrap}}
   </style>
 </head>
@@ -379,9 +387,140 @@ const E = {
   }
 };
 
-// ═══ Diagram node helper: [label, sub, type, chain] ═════════════
-// type: 'user' | 'contract' | 'proxy' | 'system'
-// String items between nodes = arrow labels
+// ═══ Persistent architecture layouts ═════════════════════════════
+// All components always visible; only active ones illuminated per step.
+// crossEdges connect proxy↔original across L1/L2 boundary.
+
+const ARCH = {
+s1: {
+  // col: 0=Alice, 1=A/A', 2=B'/B, 3=Rollups/Mgr, 4=external
+  l1: [
+    { id:'Alice',   label:'Alice',   sub:'EOA',             type:'user',     col:0 },
+    { id:'A',       label:'A',       sub:'CounterAndProxy', type:'contract', col:1 },
+    { id:'Bprime',  label:"B'",      sub:'Proxy for B',     type:'proxy',    col:2 },
+    { id:'Rollups', label:'Rollups', sub:'Manager',         type:'system',   col:3 },
+    { id:'Prover',   label:'Prover',  sub:'ZK Proof',        type:'ghost',    col:4 },
+  ],
+  l2: [
+    { id:'Aprime',  label:"A'",      sub:'Proxy for A',     type:'proxy',    col:1 },
+    { id:'B',       label:'B',       sub:'Counter',         type:'contract', col:2 },
+    { id:'ManagerL2',label:'ManagerL2',sub:'Manager',       type:'system',   col:3 },
+    { id:'System',  label:'SYSTEM',  sub:'sysAddr',         type:'ghost',    col:4 },
+  ],
+  cols: 5,
+  edges: [
+    { from:'Alice',to:'A',       label:'increment()' },
+    { from:'A',to:'Bprime',      label:'increment()' },
+    { from:'Bprime',to:'Rollups',label:'execCC' },
+    { from:'ManagerL2',to:'Aprime',label:'execOnBehalf' },
+    { from:'Aprime',to:'B',      label:'inc()' },
+    { from:'B',to:'Aprime',      label:'return(1)', back:true },
+    { from:'Aprime',to:'ManagerL2',label:'RESULT{1}', back:true },
+    { from:'Rollups',to:'Bprime', label:'return(1)', back:true },
+    { from:'Bprime',to:'A',      label:'return(1)', back:true },
+    { from:'Prover',to:'Rollups', label:'postBatch' },
+    { from:'System',to:'ManagerL2', label:'loadExecTable' },
+  ],
+},
+s2: {
+  // col: 0=Alice, 1=D'/D, 2=C/C', 3=Rollups/Mgr, 4=external
+  l1: [
+    { id:'Dprime',  label:"D'",      sub:'Proxy for D',     type:'proxy',    col:1 },
+    { id:'C',       label:'C',       sub:'Counter',         type:'contract', col:2 },
+    { id:'Rollups', label:'Rollups', sub:'Manager',         type:'system',   col:3 },
+    { id:'Prover',   label:'Prover',  sub:'ZK Proof',        type:'ghost',    col:4 },
+  ],
+  l2: [
+    { id:'Alice',   label:'Alice',   sub:'EOA',             type:'user',     col:0 },
+    { id:'D',       label:'D',       sub:'CounterAndProxy', type:'contract', col:1 },
+    { id:'Cprime',  label:"C'",      sub:'Proxy for C',     type:'proxy',    col:2 },
+    { id:'ManagerL2',label:'ManagerL2',sub:'Manager',       type:'system',   col:3 },
+    { id:'System',  label:'SYSTEM',  sub:'sysAddr',         type:'ghost',    col:4 },
+  ],
+  cols: 5,
+  edges: [
+    { from:'Alice',to:'D',       label:'increment()' },
+    { from:'D',to:'Cprime',      label:'increment()' },
+    { from:'Cprime',to:'ManagerL2',label:'execCC' },
+    { from:'Rollups',to:'Dprime', label:'execOnBehalf' },
+    { from:'Dprime',to:'C',      label:'inc()' },
+    { from:'C',to:'Dprime',      label:'return(1)', back:true },
+    { from:'Dprime',to:'Rollups', label:'RESULT{1}', back:true },
+    { from:'ManagerL2',to:'Cprime',label:'return(1)', back:true },
+    { from:'Cprime',to:'D',      label:'return(1)', back:true },
+    { from:'Prover',to:'Rollups', label:'postBatch' },
+    { from:'System',to:'ManagerL2', label:'loadExecTable' },
+  ],
+},
+s3: {
+  // col: 0=Alice/AliceProxy, 1=A'/A, 2=B/B', 3=Mgr/Rollups, 4=external
+  l1: [
+    { id:'AliceProxy',label:"Alice'", sub:'Proxy for Alice', type:'proxy',    col:0 },
+    { id:'A',         label:'A',       sub:'CounterAndProxy', type:'contract', col:1 },
+    { id:'Bprime',    label:"B'",      sub:'Proxy for B',     type:'proxy',    col:2 },
+    { id:'Rollups',   label:'Rollups', sub:'Manager',         type:'system',   col:3 },
+    { id:'Prover',     label:'Prover',  sub:'ZK Proof',        type:'ghost',    col:4 },
+  ],
+  l2: [
+    { id:'Alice',     label:'Alice',     sub:'EOA',           type:'user',     col:0 },
+    { id:'Aprime',    label:"A'",        sub:'Proxy for A',   type:'proxy',    col:1 },
+    { id:'B',         label:'B',         sub:'Counter',       type:'contract', col:2 },
+    { id:'ManagerL2', label:'ManagerL2', sub:'Manager',       type:'system',   col:3 },
+    { id:'System',    label:'SYSTEM',    sub:'sysAddr',       type:'ghost',    col:4 },
+  ],
+  cols: 5,
+  edges: [
+    { from:'Alice',to:'Aprime',     label:'inc()' },
+    { from:'Aprime',to:'ManagerL2', label:'execCC', alt:true, id:'Aprime-execCC' },
+    { from:'Rollups',to:'AliceProxy',label:'execOnBehalf' },
+    { from:'AliceProxy',to:'A',     label:'inc()', alt:true },
+    { from:'A',to:'Bprime',         label:'inc()' },
+    { from:'Bprime',to:'Rollups',   label:'execCC', alt:true },
+    { from:'ManagerL2',to:'Aprime', label:'execOnBehalf' },
+    { from:'Aprime',to:'B',         label:'inc()' },
+    { from:'B',to:'Aprime',         label:'return(1)', back:true },
+    { from:'Aprime',to:'ManagerL2', label:'RESULT{1}', back:true, id:'Aprime-RESULT' },
+    { from:'Rollups',to:'Bprime',   label:'return(1)', back:true },
+    { from:'Bprime',to:'A',         label:'return(1)', back:true, alt:true },
+    { from:'Prover',to:'Rollups',    label:'postBatch' },
+    { from:'System',to:'ManagerL2', label:'loadExecTable' },
+  ],
+},
+s4: {
+  // col: 0=Alice/AliceProxy, 1=D'/D, 2=C/C', 3=Rollups/Mgr, 4=external
+  l1: [
+    { id:'Alice',   label:'Alice',   sub:'EOA',             type:'user',     col:0 },
+    { id:'Dprime',  label:"D'",      sub:'Proxy for D',     type:'proxy',    col:1 },
+    { id:'C',       label:'C',       sub:'Counter',         type:'contract', col:2 },
+    { id:'Rollups', label:'Rollups', sub:'Manager',         type:'system',   col:3 },
+    { id:'Prover',   label:'Prover',  sub:'ZK Proof',        type:'ghost',    col:4 },
+  ],
+  l2: [
+    { id:'AliceProxy',label:"Alice'",sub:'Proxy for Alice',type:'proxy',    col:0 },
+    { id:'D',       label:'D',       sub:'CounterAndProxy', type:'contract', col:1 },
+    { id:'Cprime',  label:"C'",      sub:'Proxy for C',     type:'proxy',    col:2 },
+    { id:'ManagerL2',label:'ManagerL2',sub:'Manager',       type:'system',   col:3 },
+    { id:'System',  label:'SYSTEM',  sub:'sysAddr',         type:'ghost',    col:4 },
+  ],
+  cols: 5,
+  edges: [
+    { from:'Alice',to:'Dprime',    label:'inc()' },
+    { from:'Dprime',to:'Rollups',  label:'execCC', alt:true, id:'Dprime-execCC' },
+    { from:'ManagerL2',to:'AliceProxy',label:'execOnBehalf', back:true },
+    { from:'AliceProxy',to:'D',    label:'inc()', alt:true },
+    { from:'D',to:'Cprime',        label:'inc()' },
+    { from:'Cprime',to:'ManagerL2',label:'execCC', alt:true },
+    { from:'ManagerL2',to:'Cprime',label:'return(1)', back:true },
+    { from:'Cprime',to:'D',        label:'return(1)', back:true, alt:true },
+    { from:'Rollups',to:'Dprime',  label:'execOnBehalf' },
+    { from:'Dprime',to:'C',        label:'inc()' },
+    { from:'C',to:'Dprime',        label:'return(1)', back:true },
+    { from:'Dprime',to:'Rollups',  label:'RESULT{1}', back:true, id:'Dprime-RESULT' },
+    { from:'Prover',to:'Rollups',   label:'postBatch' },
+    { from:'System',to:'ManagerL2', label:'loadExecTable' },
+  ],
+}
+};
 
 // ═══ Scenario definitions ════════════════════════════════════════
 // FLOW ORDER: Load both tables first, then follow the cross-chain
@@ -396,26 +535,31 @@ s1: {
     { chain:'l1', title:'Setup L1: rollups.postBatch(1 entry)',
       detail:'Stores deferred entry: hash(CALL{B}) → RESULT{1}, with L2 state delta S0→S1.',
       l1Add:['s1e1'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['Rollups','Prover'], activeEdges:['Batch→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(1 entry)',
       detail:'Stores entry: hash(RESULT{1}) → RESULT{1} (terminal self-ref).',
       l1Add:[], l1Rm:[], l2Add:['s1e2'], l2Rm:[], state:{},
+      activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores', ['L2 Table','','system','l2'] ]
     },
     { chain:'l1', title:'L1: Alice calls A.increment() → A calls B\'',
       detail:'A(CounterAndProxy) calls B\'(proxy for B on L2). B\'.fallback() → Rollups.executeCrossChainCall. Builds CALL{L2,B,src=A} → matches L1 entry → consumed. L2 state S0→S1 applied.',
       l1Add:[], l1Rm:['s1e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
+      activeNodes:['Alice','A','Bprime','Rollups'], activeEdges:['Alice→A','A→Bprime','Bprime→Rollups'],
       diagram:[ ['Alice','','user',''], 'increment()', ['A','CounterAndProxy','contract','l1'], 'increment()', ["B'",'Proxy for B','proxy','l1'], 'execCC', ['Rollups','','system','l1'] ]
     },
     { chain:'l2', title:'↗ Cross to L2: B.increment() executes',
       detail:'executeIncomingCrossChainCall(dest=B, src=A) → newScope → A\'.executeOnBehalf(B, inc) → B.counter 0→1, returns 1 → RESULT{1} consumed from L2 table.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s1e2'], state:{'B.counter':1},
+      activeNodes:['ManagerL2','Aprime','B'], activeEdges:['ManagerL2→Aprime','Aprime→B','B→Aprime','Aprime→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'execIncoming', ['ManagerL2','','system','l2'], 'execOnBehalf', ["A'",'Proxy for A','proxy','l2'], 'inc()', ['B','counter: 0→1','contract','l2'] ]
     },
     { chain:'l1', title:'↙ Back to L1: RESULT{1} returned to A',
       detail:'executeCrossChainCall returned RESULT{1} to B\'.fallback → returned to A. A decodes result: targetCounter=1, counter++.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'A.counter':1,'A.targetCounter':1},
+      activeNodes:['Rollups','Bprime','A'], activeEdges:['Rollups→Bprime','Bprime→A'],
       diagram:[ ['Rollups','RESULT{1}','system','l1'], 'returns to', ['A','counter=1, tgt=1','contract','l1'], 'returns to', ['Alice','done','user',''] ]
     }
   ]
@@ -429,26 +573,31 @@ s2: {
     { chain:'l1', title:'Setup L1: rollups.postBatch(2 entries)',
       detail:'Entry 1: hash(L2TX) → CALL{C}, L2 delta S0→S1. Entry 2: hash(RESULT{1}) → RESULT{1} terminal.',
       l1Add:['s2e1','s2e2'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['Rollups','Prover'], activeEdges:['Batch→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 2', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(1 entry)',
       detail:'Entry: hash(CALL{C}) → RESULT{1}.',
       l1Add:[], l1Rm:[], l2Add:['s2e3'], l2Rm:[], state:{},
+      activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores', ['L2 Table','','system','l2'] ]
     },
     { chain:'l2', title:'L2: Alice calls D.increment() → D calls C\'',
       detail:'D(CounterAndProxy) calls C\'(proxy for C on L1). C\'.fallback() → executeCrossChainCall. Builds CALL{MAIN,C,src=D} → matches L2 entry → consumed.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s2e3'], state:{},
+      activeNodes:['Alice','D','Cprime','ManagerL2'], activeEdges:['Alice→D','D→Cprime','Cprime→ManagerL2'],
       diagram:[ ['Alice','','user',''], 'increment()', ['D','CounterAndProxy','contract','l2'], 'increment()', ["C'",'Proxy for C','proxy','l2'], 'execCC', ['ManagerL2','','system','l2'] ]
     },
     { chain:'l1', title:'↗ Cross to L1: executeL2TX → C.increment() executes',
       detail:'executeL2TX(L2_ROLLUP_ID, 0x01) → L2TX consumed → CALL{C} → scope nav → D\'.executeOnBehalf(C, inc) → C.counter 0→1 → RESULT{1} consumed. Both L1 entries consumed.',
       l1Add:[], l1Rm:['s2e1','s2e2'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S1'},
-      diagram:[ ['Rollups','executeL2TX','system','l1'], 'scopeNav', ["D'",'Proxy for D','proxy','l1'], 'execOnBehalf', ['C','counter: 0→1','contract','l1'] ]
+      activeNodes:['Rollups','Dprime','C'], activeEdges:['Rollups→Dprime','Dprime→C','C→Dprime','Dprime→Rollups'],
+      diagram:[ ['Rollups','executeL2TX','system','l1'], 'execOnBehalf', ["D'",'Proxy for D','proxy','l1'], 'inc()', ['C','counter: 0→1','contract','l1'] ]
     },
     { chain:'l2', title:'↙ Back to L2: RESULT{1} returned to D',
       detail:'executeCrossChainCall returned RESULT{1}. D decodes result: targetCounter=1, counter++.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'D.counter':1,'D.targetCounter':1},
+      activeNodes:['ManagerL2','Cprime','D'], activeEdges:['ManagerL2→Cprime','Cprime→D'],
       diagram:[ ['ManagerL2','RESULT{1}','system','l2'], 'returns to', ['D','counter=1, tgt=1','contract','l2'], 'returns to', ['Alice','done','user',''] ]
     }
   ]
@@ -462,26 +611,31 @@ s3: {
     { chain:'l1', title:'Setup L1: rollups.postBatch(3 entries)',
       detail:'E1: L2TX→CALL(A) [S0→S1]. E2: CALL(B)→RESULT(1) [S1→S2]. E3: RESULT(void)→RESULT(void).',
       l1Add:['s3e1','s3e2','s3e3'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['Rollups','Prover'], activeEdges:['Batch→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 3', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(2 entries)',
       detail:'E1: CALL#1(A,scope=[])→CALL#2(B,scope=[0]). E2: RESULT(1)→RESULT(1) terminal.',
       l1Add:[], l1Rm:[], l2Add:['s3e4','s3e5'], l2Rm:[], state:{},
+      activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 2', ['L2 Table','','system','l2'] ]
     },
     { chain:'l2', title:'L2: Alice calls A\' (proxy for A on L1)',
       detail:'A\'.fallback() → executeCrossChainCall(src=Alice) → builds CALL#1{MAIN,A,src=Alice} → matches L2 entry → consumed → returns CALL#2{L2,B,scope=[0]}.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e4'], state:{},
+      activeNodes:['Alice','Aprime','ManagerL2'], activeEdges:['Alice→Aprime','Aprime-execCC'],
       diagram:[ ['Alice','','user',''], 'inc()', ["A'",'Proxy for A','proxy','l2'], 'execCC', ['ManagerL2','','system','l2'] ]
     },
     { chain:'l1', title:'↗ Cross to L1: executeL2TX → A.increment() runs',
       detail:'executeL2TX → L2TX consumed [S0→S1] → CALL{A} → scope nav → AliceProxy.executeOnBehalf(A, inc) → A.increment() starts.',
       l1Add:[], l1Rm:['s3e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
+      activeNodes:['Rollups','AliceProxy','A'], activeEdges:['Rollups→AliceProxy','AliceProxy→A'],
       diagram:[ ['Rollups','executeL2TX','system','l1'], 'scopeNav', ['Alice Proxy','','proxy','l1'], 'execOnBehalf', ['A','CounterAndProxy','contract','l1'] ]
     },
     { chain:'l1', title:'L1: A calls B\' → REENTRANT cross-chain call',
       detail:'Inside A.increment(): A calls B\'(proxy for B) → REENTRANT executeCrossChainCall → CALL{L2,B,src=A} consumed [S1→S2] → RESULT{1} returned to A. A: targetCounter=1, counter=1.',
       l1Add:[], l1Rm:['s3e2'], l2Add:[], l2Rm:[], state:{'A.counter':1,'A.targetCounter':1,'L2 State':'S2'},
+      activeNodes:['A','Bprime','Rollups'], activeEdges:['A→Bprime','Bprime→Rollups','Rollups→Bprime','Bprime→A'],
       diagram:[ ['A','calls B\'','contract','l1'], 'inc()', ["B'",'Proxy for B','proxy','l1'], 'REENTRANT', ['Rollups','consumes CALL(B)','system','l1'] ],
       diagram2:[ ['Rollups','RESULT{1}','system','l1'], '→', ['A','tgt=1, ctr=1','contract','l1'] ],
       d2label:'Returns:'
@@ -489,16 +643,19 @@ s3: {
     { chain:'l2', title:'↗ Cross to L2: B.increment() via scope navigation',
       detail:'_resolveScopes(CALL#2) → newScope([0]) → A\'.executeOnBehalf(B, inc) [A\' REENTRANT: fallback then execOnBehalf]. B.counter 0→1 → RESULT consumed from L2 table.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e5'], state:{'B.counter':1},
+      activeNodes:['ManagerL2','Aprime','B'], activeEdges:['ManagerL2→Aprime','Aprime→B','B→Aprime','Aprime-RESULT'],
       diagram:[ ['ManagerL2','scope=[0]','system','l2'], 'execOnBehalf', ["A'",'REENTRANT','proxy','l2'], 'inc()', ['B','counter: 0→1','contract','l2'] ]
     },
     { chain:'l1', title:'↙ Back to L1: A returns → RESULT(void) consumed',
       detail:'A.increment() returns (void). Builds RESULT{MAIN,data=""} → matches L1 entry 3 → consumed → terminal.',
       l1Add:[], l1Rm:['s3e3'], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['A','Rollups'], activeEdges:['A→Bprime','Bprime→Rollups'],
       diagram:[ ['A','returns void','contract','l1'], 'RESULT{""}', ['Rollups','terminal','system','l1'] ]
     },
     { chain:'l2', title:'↙ Back to L2: scope nav returns → Alice\'s call completes',
       detail:'Scope navigation unwinds. RESULT propagates back through A\' → executeCrossChainCall → A\'.fallback returns to Alice.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['ManagerL2','Aprime'], activeEdges:[],
       diagram:[ ['ManagerL2','RESULT','system','l2'], 'returns', ["A'",'','proxy','l2'], 'returns', ['Alice','done','user',''] ]
     }
   ]
@@ -512,26 +669,31 @@ s4: {
     { chain:'l1', title:'Setup L1: rollups.postBatch(2 entries)',
       detail:'E1: CALL#1(D)→CALL#2(C,scope=[0]), L2 delta S0→S1. E2: RESULT(1)→RESULT(1) terminal.',
       l1Add:['s4e1','s4e2'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['Rollups','Prover'], activeEdges:['Batch→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 2', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(2 entries)',
       detail:'E1: CALL(C)→RESULT(1). E2: RESULT(void)→RESULT(void) terminal.',
       l1Add:[], l1Rm:[], l2Add:['s4e3','s4e4'], l2Rm:[], state:{},
+      activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 2', ['L2 Table','','system','l2'] ]
     },
     { chain:'l1', title:'L1: Alice calls D\' (proxy for D on L2)',
       detail:'D\'.fallback() → executeCrossChainCall(src=Alice) → builds CALL#1{L2,D,src=Alice} → matches L1 entry → consumed [S0→S1]. Returns CALL#2{MAIN,C,scope=[0]}.',
       l1Add:[], l1Rm:['s4e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
+      activeNodes:['Alice','Dprime','Rollups'], activeEdges:['Alice→Dprime','Dprime-execCC'],
       diagram:[ ['Alice','','user',''], 'inc()', ["D'",'Proxy for D','proxy','l1'], 'execCC', ['Rollups','','system','l1'] ]
     },
     { chain:'l2', title:'↗ Cross to L2: executeIncomingCrossChainCall → D.increment() runs',
       detail:'SYSTEM calls executeIncomingCrossChainCall(D, src=Alice) → newScope → AliceProxy.executeOnBehalf(D, inc) → D.increment() starts.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['ManagerL2','AliceProxy','D'], activeEdges:['ManagerL2→AliceProxy','AliceProxy→D'],
       diagram:[ ['SYSTEM','','user',''], 'execIncoming', ['ManagerL2','','system','l2'], 'execOnBehalf', ['Alice Proxy','','proxy','l2'], 'inc()', ['D','CounterAndProxy','contract','l2'] ]
     },
     { chain:'l2', title:'L2: D calls C\' → REENTRANT cross-chain call',
       detail:'Inside D.increment(): D calls C\'(proxy for C) → REENTRANT executeCrossChainCall → CALL{MAIN,C,src=D} consumed → RESULT{1} returned to D. D: targetCounter=1, counter=1.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s4e3'], state:{'D.counter':1,'D.targetCounter':1},
+      activeNodes:['D','Cprime','ManagerL2'], activeEdges:['D→Cprime','Cprime→ManagerL2','ManagerL2→Cprime','Cprime→D'],
       diagram:[ ['D','calls C\'','contract','l2'], 'inc()', ["C'",'Proxy for C','proxy','l2'], 'REENTRANT', ['ManagerL2','consumes CALL(C)','system','l2'] ],
       diagram2:[ ['ManagerL2','RESULT{1}','system','l2'], '→', ['D','tgt=1, ctr=1','contract','l2'] ],
       d2label:'Returns:'
@@ -539,16 +701,19 @@ s4: {
     { chain:'l1', title:'↗ Cross to L1: C.increment() via scope navigation',
       detail:'_resolveScopes(CALL#2) → newScope([0]) → D\'.executeOnBehalf(C, inc) [D\' REENTRANT: fallback then execOnBehalf]. C.counter 0→1 → RESULT consumed from L1 table.',
       l1Add:[], l1Rm:['s4e2'], l2Add:[], l2Rm:[], state:{'C.counter':1},
+      activeNodes:['Rollups','Dprime','C'], activeEdges:['Rollups→Dprime','Dprime→C','C→Dprime','Dprime-RESULT'],
       diagram:[ ['Rollups','scope=[0]','system','l1'], 'execOnBehalf', ["D'",'REENTRANT','proxy','l1'], 'inc()', ['C','counter: 0→1','contract','l1'] ]
     },
     { chain:'l2', title:'↙ Back to L2: D returns → RESULT(void) consumed',
       detail:'D.increment() returns (void). Builds RESULT{L2,data=""} → matches L2 entry 2 → consumed → terminal.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s4e4'], state:{},
+      activeNodes:['D','Cprime','ManagerL2'], activeEdges:['D→Cprime','Cprime→ManagerL2'],
       diagram:[ ['D','returns void','contract','l2'], 'RESULT{""}', ['ManagerL2','terminal','system','l2'] ]
     },
     { chain:'l1', title:'↙ Back to L1: scope nav returns → Alice\'s call completes',
       detail:'Scope navigation unwinds. RESULT propagates back through D\' → executeCrossChainCall → D\'.fallback returns to Alice.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      activeNodes:['Rollups','Dprime'], activeEdges:[],
       diagram:[ ['Rollups','RESULT','system','l1'], 'returns', ["D'",'','proxy','l1'], 'returns', ['Alice','done','user',''] ]
     }
   ]
@@ -589,21 +754,21 @@ function render() {
   const step = cs>=0 ? sc.steps[cs] : null;
   let h = `<div class="info"><h2>${sc.title}</h2><div class="flow">${sc.flow}</div><div class="dir">${sc.dir}</div></div>`;
 
-  // Diagram
-  h += '<div class="diagram-wrap">';
+  // Architecture diagram (persistent, all components always visible)
+  h += '<div class="arch-wrap"><div class="arch-box">';
+  h += renderArchDiagram(ak, step);
+  // Detail call flow strip below SVG
   if (step && step.diagram) {
-    h += '<div class="diagram-box">';
-    h += '<div class="diagram-label">Call flow:</div>';
+    h += '<div class="detail-flow">';
+    h += '<div class="diagram-label">Call flow detail:</div>';
     h += renderDiagram(step.diagram);
     if (step.diagram2) {
       h += `<div class="diagram-label reentrant" style="margin-top:0.3rem">${step.d2label||'Inner call:'}</div>`;
       h += renderDiagram(step.diagram2);
     }
     h += '</div>';
-  } else {
-    h += '<div class="diagram-box"><div class="diagram-label">Call flow:</div><div style="text-align:center;color:var(--dim);font-size:0.55rem;padding:0.3rem">Select a step to see the call diagram</div></div>';
   }
-  h += '</div>';
+  h += '</div></div>';
 
   // Tables
   h += `<div class="tbl-row">${renderTbl('L1 Execution Table (Rollups)','l1',st.l1)}${renderTbl('L2 Execution Table (ManagerL2)','l2',st.l2)}</div>`;
@@ -658,6 +823,141 @@ function renderDiagram(d) {
   }
   h += '</div>';
   return h;
+}
+
+function renderArchDiagram(scenarioKey, step) {
+  const arch = ARCH[scenarioKey];
+  if (!arch) return '';
+
+  const activeN = new Set(step ? (step.activeNodes||[]) : []);
+  const activeE = new Set(step ? (step.activeEdges||[]) : []);
+
+  // Layout: column-based, proxies aligned with originals
+  const nodeW=88, nodeH=42, padX=20, padTop=28, padBot=24, gapY=28;
+  const cols = arch.cols || 4;
+  const cellW = nodeW + 28;
+  const svgW = cols * cellW + 2*padX;
+  const laneH = nodeH + padTop + padBot;
+  const svgH = 2*laneH + gapY;
+
+  // Position nodes by column
+  const pos = {};
+  function place(nodes, laneIdx) {
+    const y = laneIdx === 0 ? padTop : laneH + gapY + padTop;
+    for (const n of nodes) {
+      const x = padX + n.col * cellW + (cellW - nodeW)/2;
+      pos[n.id] = { x, y, cx: x + nodeW/2, cy: y + nodeH/2 };
+    }
+  }
+  place(arch.l1, 0);
+  place(arch.l2, 1);
+
+  // Colors
+  const colors = {
+    'contract-l1':'#3b82f6','proxy-l1':'rgba(59,130,246,0.5)',
+    'contract-l2':'#a855f7','proxy-l2':'rgba(168,85,247,0.5)',
+    'system-l1':'#3b82f6','system-l2':'#a855f7','user':'#666'
+  };
+  function nodeColor(n) {
+    if (n.type==='ghost') return '#4a4a60';
+    return n.type==='user' ? colors.user : (colors[n.type+'-'+n.chain] || '#555');
+  }
+
+  let svg = `<svg class="arch-svg" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">`;
+
+  // Defs: arrowheads
+  svg += `<defs>
+    <marker id="ah-dim" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,3.5 L0,7z" fill="#3a3a50"/>
+    </marker>
+    <marker id="ah-lit" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,3.5 L0,7z" fill="#22d3ee"/>
+    </marker>
+  </defs>`;
+
+  // Lane backgrounds
+  svg += `<rect x="0" y="0" width="${svgW}" height="${laneH}" rx="6" fill="rgba(59,130,246,0.04)" stroke="rgba(59,130,246,0.12)" stroke-width="1"/>`;
+  svg += `<rect x="0" y="${laneH+gapY}" width="${svgW}" height="${laneH}" rx="6" fill="rgba(168,85,247,0.04)" stroke="rgba(168,85,247,0.12)" stroke-width="1"/>`;
+
+  // Thin cross-chain boundary line
+  const bndY = laneH + gapY/2;
+  svg += `<line x1="10" y1="${bndY}" x2="${svgW-10}" y2="${bndY}" stroke="#2a2a3a" stroke-width="0.5" stroke-dasharray="3 4" opacity="0.4"/>`;
+  svg += `<text x="6" y="10" fill="#3b82f6" font-size="7" font-family="monospace" font-weight="700" opacity="0.6">L1</text>`;
+  svg += `<text x="6" y="${laneH+gapY+10}" fill="#a855f7" font-size="7" font-family="monospace" font-weight="700" opacity="0.6">L2</text>`;
+
+  // Internal edges — arcs above (forward) / below (back) so labels don't overlap nodes
+  let labels = ''; // collect labels to render on top of everything
+  for (const e of (arch.edges||[])) {
+    const p1 = pos[e.from], p2 = pos[e.to];
+    if (!p1 || !p2) continue;
+    const edgeId = e.id || (e.from+'→'+e.to);
+    const lit = activeE.has(edgeId);
+    const stroke = lit ? '#22d3ee' : '#2a2a3a';
+    const op = lit ? '0.85' : '0.12';
+    const marker = lit ? 'url(#ah-lit)' : 'url(#ah-dim)';
+    const sw = lit ? 1.5 : 0.7;
+    const glow = lit ? 'style="filter:drop-shadow(0 0 4px rgba(34,211,238,0.35))"' : '';
+
+    if (Math.abs(p1.cy - p2.cy) < 5) {
+      // Same lane
+      const goRight = p1.cx < p2.cx;
+      const x1 = goRight ? p1.x+nodeW : p1.x;
+      const x2 = goRight ? p2.x : p2.x+nodeW;
+      const baseY = p1.cy;
+      // back arrows arc below node bottom, forward arrows arc above node top
+      // alt:true flips the direction
+      const defaultDir = e.back ? 1 : -1;
+      const arcDir = e.alt ? -defaultDir : defaultDir;
+      const arcH = (arcDir === 1) ? (nodeH/2 + 12) : (nodeH/2 + 10);
+      const midX = (x1+x2)/2;
+      const midY = baseY + arcDir * arcH;
+      const y1 = e.back ? (p1.y + nodeH) : p1.y;
+      const y2 = e.back ? (p2.y + nodeH) : p2.y;
+      svg += `<path d="M${x1},${y1} Q${midX},${midY} ${x2},${y2}" stroke="${stroke}" stroke-width="${sw}" fill="none" opacity="${op}" marker-end="${marker}" ${glow}/>`;
+
+      // Label at arc apex — collected for later (rendered on top)
+      if (e.label && lit) {
+        const lblY = midY + arcDir * 4;
+        labels += `<text x="${midX}" y="${lblY}" text-anchor="middle" fill="#22d3ee" font-size="7" font-family="monospace" font-weight="700" opacity="0.95">${e.label}</text>`;
+      }
+    } else {
+      // Cross-lane (rare for internal edges)
+      const x1 = p1.cx, x2 = p2.cx;
+      const y1 = p1.cy < p2.cy ? p1.y+nodeH : p1.y;
+      const y2 = p2.cy < p1.cy ? p2.y+nodeH : p2.y;
+      svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${sw}" opacity="${op}" marker-end="${marker}" ${glow}/>`;
+      if (e.label && lit) {
+        labels += `<text x="${(x1+x2)/2}" y="${(y1+y2)/2-4}" text-anchor="middle" fill="#22d3ee" font-size="7" font-family="monospace" font-weight="700" opacity="0.95">${e.label}</text>`;
+      }
+    }
+  }
+
+  // Nodes
+  const allNodes = [...arch.l1.map(n=>({...n,chain:'l1'})), ...arch.l2.map(n=>({...n,chain:'l2'}))];
+  for (const n of allNodes) {
+    const p = pos[n.id];
+    if (!p) continue;
+    const lit = activeN.has(n.id);
+    const col = nodeColor(n);
+    const isGhost = n.type==='ghost';
+    const op = lit ? (isGhost ? 0.7 : 1) : (isGhost ? 0.08 : 0.25);
+    const dashArr = (n.type==='proxy'||isGhost) ? 'stroke-dasharray="4 2"' : '';
+    const glow = lit ? `filter="drop-shadow(0 0 8px ${col})"` : '';
+
+    svg += `<g opacity="${op}" ${glow}>`;
+    svg += `<rect x="${p.x}" y="${p.y}" width="${nodeW}" height="${nodeH}" rx="5" fill="${lit?'rgba(20,20,35,0.9)':'rgba(15,15,25,0.6)'}" stroke="${col}" stroke-width="${lit?1.8:1}" ${dashArr}/>`;
+    svg += `<text x="${p.cx}" y="${p.y+16}" text-anchor="middle" fill="${lit?'#e0e0e8':'#7a7a90'}" font-size="9" font-weight="700" font-family="monospace">${n.label}</text>`;
+    if (n.sub) {
+      svg += `<text x="${p.cx}" y="${p.y+27}" text-anchor="middle" fill="${lit?'#7a7a90':'#4a4a60'}" font-size="6" font-family="monospace">${n.sub}</text>`;
+    }
+    svg += `</g>`;
+  }
+
+  // Labels on top of everything
+  svg += labels;
+
+  svg += '</svg>';
+  return svg;
 }
 
 function renderTbl(title, chain, entries) {
@@ -727,6 +1027,12 @@ function jump(i) { stop(); cs=i; render(); }
 function play() { stop(); cs=-1; render(); pt=setInterval(()=>{if(!next())stop();},1500); }
 function stop() { if(pt){clearInterval(pt);pt=null;} }
 function tog(id) { collapsed.has(id)?collapsed.delete(id):collapsed.add(id); render(); }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); next(); }
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); prev(); }
+  else if (e.key === 'Escape') { e.preventDefault(); reset(); }
+});
 
 renderTabs(); render();
 </script>
