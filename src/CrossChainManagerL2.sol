@@ -146,18 +146,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         bytes32 actionHash = keccak256(abi.encode(action));
         emit IncomingCrossChainCallExecuted(actionHash, destination, value, data, sourceAddress, sourceRollup, scope);
 
-        uint256[] memory emptyScope = new uint256[](0);
-        Action memory nextAction;
-        try this.newScope(emptyScope, action) returns (Action memory retAction) {
-            nextAction = retAction;
-        } catch (bytes memory revertData) {
-            nextAction = _handleScopeRevert(revertData);
-        }
-
-        if (nextAction.actionType != ActionType.RESULT || nextAction.failed) {
-            revert CallExecutionFailed();
-        }
-        return nextAction.data;
+        return _resolveScopes(action);
     }
 
     // ──────────────────────────────────────────────

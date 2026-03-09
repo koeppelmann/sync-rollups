@@ -11,24 +11,16 @@ contract Counter {
 }
 
 contract CounterAndProxy {
-    address public target;
+    Counter public target;
     uint256 public targetCounter;
     uint256 public counter;
 
-    constructor(address _target) {
+    constructor(Counter _target) {
         target = _target;
     }
 
     function increment() external {
-        (bool success, bytes memory result) = target.call(
-            abi.encodeWithSelector(Counter.increment.selector)
-        );
-        require(success, "counter call failed");
-
-        // When calling through a CrossChainProxy, the return is ABI-encoded bytes memory
-        // (from executeCrossChainCall's return type), so we decode the outer bytes first.
-        bytes memory innerResult = abi.decode(result, (bytes));
-        targetCounter = abi.decode(innerResult, (uint256));
+        targetCounter = target.increment();
         counter++;
     }
 }

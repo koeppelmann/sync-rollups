@@ -83,13 +83,13 @@ contract IntegrationTest is Test {
         counterProxy = rollups.createCrossChainProxy(address(counterL2), L2_ROLLUP_ID);
 
         // A: CounterAndProxy on L1, its target = B'
-        counterAndProxy = new CounterAndProxy(counterProxy);
+        counterAndProxy = new CounterAndProxy(Counter(counterProxy));
 
         // C': proxy for C(Counter on L1), lives on L2 — so D can call C cross-chain
         counterProxyL2 = managerL2.createCrossChainProxy(address(counterL1), MAINNET_ROLLUP_ID);
 
         // D: CounterAndProxy on L2, its target = C'
-        counterAndProxyL2 = new CounterAndProxy(counterProxyL2);
+        counterAndProxyL2 = new CounterAndProxy(Counter(counterProxyL2));
 
         // A': proxy for A(CounterAndProxy on L1), lives on L2 — for Scenario 3
         counterAndProxyProxyL2 = managerL2.createCrossChainProxy(address(counterAndProxy), MAINNET_ROLLUP_ID);

@@ -56,15 +56,29 @@ contract CrossChainProxy {
 
     /// @dev Internal fallback that forwards the call to the manager as a cross-chain execution.
     ///      Uses assembly return/revert which terminates the entire call context.
+    ///
+    ///      Result decoding:
+    ///      The low-level `.call()` returns ABI-encoded return data. Since `executeCrossChainCall`
+    ///      returns `bytes memory`, the raw `result` is double-encoded: the outer ABI encoding
+    ///      wraps the inner `bytes` return value. We must `abi.decode(result, (bytes))` to unwrap
+    ///      the inner bytes before returning them to the caller.
+    ///      On revert, the raw revert data is not ABI-wrapped, so we forward it directly.
     function _fallback() internal {
         (bool success, bytes memory result) = MANAGER.call{value: msg.value}(
             abi.encodeCall(ICrossChainManager.executeCrossChainCall, (msg.sender, msg.data))
         );
 
-        assembly {
-            switch success
-            case 0 { revert(add(result, 0x20), mload(result)) }
-            default { return(add(result, 0x20), mload(result)) }
+        if (success) {
+            // Decode the inner `bytes` from the ABI-encoded return value
+            bytes memory resultDecoded = abi.decode(result, (bytes));
+            assembly {
+                return(add(resultDecoded, 0x20), mload(resultDecoded))
+            }
+        } else {
+            // Revert data is not ABI-wrapped, forward as-is
+            assembly {
+                revert(add(result, 0x20), mload(result))
+            }
         }
     }
 }
