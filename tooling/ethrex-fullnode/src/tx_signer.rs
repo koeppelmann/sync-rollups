@@ -1,7 +1,7 @@
 /// Transaction signing for operator system calls on L2.
 ///
-/// The operator signs EIP-1559 transactions with zero gas fees.
-/// All transactions use maxFeePerGas=0, maxPriorityFeePerGas=0.
+/// The operator signs EIP-1559 transactions with maxPriorityFeePerGas=0
+/// and maxFeePerGas set to the expected next block base fee (for determinism).
 use alloy_primitives::{Address, B256, U256};
 // alloy_rlp used only for reference; we do manual RLP encoding below
 use eyre::Result;
@@ -32,12 +32,14 @@ impl TxSigner {
     }
 
     /// Sign and encode an EIP-1559 transaction. Returns the RLP-encoded raw transaction.
+    /// `max_fee_per_gas` should be set to the expected next block base fee for determinism.
     pub fn sign_tx(
         &mut self,
         to: &Address,
         data: &[u8],
         value: U256,
         gas_limit: u64,
+        max_fee_per_gas: u64,
     ) -> Result<String> {
         let nonce = self.nonce;
         self.nonce += 1;
@@ -54,10 +56,10 @@ impl TxSigner {
         encode_u64(&mut inner, self.chain_id);
         // nonce
         encode_u64(&mut inner, nonce);
-        // maxPriorityFeePerGas = 0
+        // maxPriorityFeePerGas = 0 (no tip, only base fee)
         encode_u64(&mut inner, 0);
-        // maxFeePerGas = 0
-        encode_u64(&mut inner, 0);
+        // maxFeePerGas = expected next block base fee
+        encode_u64(&mut inner, max_fee_per_gas);
         // gasLimit
         encode_u64(&mut inner, gas_limit);
         // to

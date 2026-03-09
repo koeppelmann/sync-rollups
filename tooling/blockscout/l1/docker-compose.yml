@@ -17,7 +17,7 @@ services:
       retries: 10
 
   l1-backend:
-    image: blockscout/blockscout:latest
+    image: blockscout/blockscout:master
     restart: unless-stopped
     network_mode: host
     command: ["sh", "-c", "bin/blockscout eval 'Elixir.Explorer.ReleaseTasks.create_and_migrate()' && bin/blockscout start"]
@@ -52,8 +52,9 @@ services:
       FETCH_REWARDS_WAY: "manual"
 
   l1-frontend:
-    image: ghcr.io/blockscout/frontend:latest
+    image: ghcr.io/blockscout/frontend:v1.38.2
     restart: unless-stopped
+    network_mode: host
     depends_on:
       - l1-backend
     environment:
@@ -71,8 +72,10 @@ services:
       NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: "18"
       NEXT_PUBLIC_HOMEPAGE_CHARTS: "['daily_txs']"
       NEXT_PUBLIC_IS_TESTNET: "true"
-    ports:
-      - "4000:3000"
+      PORT: "4000"
+      HOSTNAME: "0.0.0.0"
+      NEXT_PUBLIC_USE_NEXT_JS_PROXY: "true"
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: ws
 
 volumes:
   l1-db-data:

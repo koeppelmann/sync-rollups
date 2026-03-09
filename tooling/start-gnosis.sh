@@ -10,24 +10,27 @@ cd "$(dirname "$0")"
 
 ENV_FILE="${ENV_FILE:-.env.gnosis}"
 
-L1_PROXY_PORT="${L1_PROXY_PORT:-8546}"
-PUBLIC_L2_EVM_PORT="${PUBLIC_L2_EVM_PORT:-9546}"
-PUBLIC_FULLNODE_RPC_PORT="${PUBLIC_FULLNODE_RPC_PORT:-9547}"
-L2_PROXY_PORT="${L2_PROXY_PORT:-9548}"
-BUILDER_L2_EVM_PORT="${BUILDER_L2_EVM_PORT:-9549}"
-BUILDER_FULLNODE_RPC_PORT="${BUILDER_FULLNODE_RPC_PORT:-9550}"
-BUILDER_PORT="${BUILDER_PORT:-3200}"
+L1_PROXY_PORT="${L1_PROXY_PORT:-8556}"
+PUBLIC_L2_EVM_PORT="${PUBLIC_L2_EVM_PORT:-9646}"
+PUBLIC_FULLNODE_RPC_PORT="${PUBLIC_FULLNODE_RPC_PORT:-9647}"
+L2_PROXY_PORT="${L2_PROXY_PORT:-9648}"
+BUILDER_L2_EVM_PORT="${BUILDER_L2_EVM_PORT:-9649}"
+BUILDER_FULLNODE_RPC_PORT="${BUILDER_FULLNODE_RPC_PORT:-9650}"
+BUILDER_PORT="${BUILDER_PORT:-3210}"
+PROOFER_L2_EVM_PORT="${PROOFER_L2_EVM_PORT:-9651}"
+PROOFER_FULLNODE_RPC_PORT="${PROOFER_FULLNODE_RPC_PORT:-9652}"
+PROOFER_PORT="${PROOFER_PORT:-3310}"
+ETHREX_L2_EVM_PORT="${ETHREX_L2_EVM_PORT:-9656}"
+ETHREX_ENGINE_PORT="${ETHREX_ENGINE_PORT:-9661}"
+ETHREX_P2P_PORT="${ETHREX_P2P_PORT:-30325}"
+ETHREX_STATUS_PORT="${ETHREX_STATUS_PORT:-3211}"
+ETHREX_BIN="${ETHREX_BIN:-/home/ubuntu/code/ethrex/target/release/ethrex}"
 UI_PORT="${UI_PORT:-8080}"
 
-INITIAL_STATE="0x0000000000000000000000000000000000000000000000000000000000000000"
-UI_WALLETS_FILE="${UI_WALLETS_FILE:-ui/wallets.dev.json}"
-UI_SETTINGS_FILE="${UI_SETTINGS_FILE:-ui/settings.dev.json}"
+UI_WALLETS_FILE="${UI_WALLETS_FILE:-ui/wallets.gnosis.json}"
+UI_SETTINGS_FILE="${UI_SETTINGS_FILE:-ui/settings.gnosis.json}"
 
-NODE_BIN_DEFAULT="/Users/mkoeppelmann/.nvm/versions/node/v20.19.0/bin/node"
-NODE_BIN="${NODE_BIN:-$NODE_BIN_DEFAULT}"
-if [ ! -x "$NODE_BIN" ]; then
-  NODE_BIN="$(command -v node || true)"
-fi
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 if [ -z "${NODE_BIN:-}" ]; then
   echo "Error: node binary not found"
   exit 1
@@ -101,20 +104,26 @@ wait_for_sync_true() {
 }
 
 stop_existing_services() {
-  log "Stopping local services..."
-  pkill -f "dist/fullnode/fullnode.js" 2>/dev/null || true
-  pkill -f "dist/builder/builder.js" 2>/dev/null || true
-  pkill -f "dist/builder/rpc-proxy.js" 2>/dev/null || true
-  pkill -f "dist/builder/l2-rpc-proxy.js" 2>/dev/null || true
-  pkill -f "fullnode/fullnode.ts" 2>/dev/null || true
-  pkill -f "builder/builder.ts" 2>/dev/null || true
-  pkill -f "rpc-proxy.ts" 2>/dev/null || true
-  pkill -f "l2-rpc-proxy.ts" 2>/dev/null || true
-  pkill -f "python3 -m http.server ${UI_PORT}" 2>/dev/null || true
-  pkill -f "python -m http.server ${UI_PORT}" 2>/dev/null || true
-  pkill -f "http.server ${UI_PORT} --directory ui" 2>/dev/null || true
+  log "Stopping Gnosis services (port-specific, won't affect Anvil)..."
+  # Kill by PID file if available (from previous runs)
+  for pidfile in logs/pid-gnosis-*.txt; do
+    [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null || true
+    rm -f "$pidfile" 2>/dev/null || true
+  done
+  # Kill reth instances by port (guaranteed port-specific)
   pkill -f "reth.*--http.port.*${PUBLIC_L2_EVM_PORT}" 2>/dev/null || true
   pkill -f "reth.*--http.port.*${BUILDER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "reth.*--http.port.*${PROOFER_L2_EVM_PORT}" 2>/dev/null || true
+  pkill -f "ethrex.*--http.port.*${ETHREX_L2_EVM_PORT}" 2>/dev/null || true
+  lsof -ti :${ETHREX_STATUS_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  # Kill port-specific services
+  lsof -ti :${L1_PROXY_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  lsof -ti :${L2_PROXY_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  lsof -ti :${BUILDER_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  lsof -ti :${PROOFER_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  lsof -ti :${PUBLIC_FULLNODE_RPC_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  lsof -ti :${BUILDER_FULLNODE_RPC_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
+  lsof -ti :${PROOFER_FULLNODE_RPC_PORT} 2>/dev/null | xargs kill 2>/dev/null || true
   sleep 2
 }
 
@@ -135,15 +144,23 @@ load_env() {
   PROVER_KEY_VAL="${PROVER_KEY:-${BUILDER_KEY_VAL}}"
   USER1_KEY_VAL="${USER1_KEY:-}"
   USER2_KEY_VAL="${USER2_KEY:-}"
+  GENESIS_STATE_VAL="${GENESIS_STATE:-}"
 
   if [ -z "${L1_RPC_URL}" ] || [ -z "${ROLLUPS_ADDR}" ] || [ -z "${DEPLOYMENT_BLOCK}" ] || [ -z "${BUILDER_KEY_VAL}" ]; then
     echo "Error: ${ENV_FILE} must include L1_RPC, ROLLUPS_ADDRESS, DEPLOYMENT_BLOCK, BUILDER_KEY"
     exit 1
   fi
 
+  if [ -z "${GENESIS_STATE_VAL}" ]; then
+    echo "Error: ${ENV_FILE} must include GENESIS_STATE. Re-run setup-gnosis.sh."
+    exit 1
+  fi
+
   BUILDER_URL="http://localhost:${BUILDER_PORT}"
+  PROOFER_URL="http://localhost:${PROOFER_PORT}"
   PUBLIC_FULLNODE_RPC_URL="http://localhost:${PUBLIC_FULLNODE_RPC_PORT}"
   BUILDER_FULLNODE_RPC_URL="http://localhost:${BUILDER_FULLNODE_RPC_PORT}"
+  PROOFER_FULLNODE_RPC_URL="http://localhost:${PROOFER_FULLNODE_RPC_PORT}"
 }
 
 write_ui_wallet_config() {
@@ -181,12 +198,21 @@ EOF
 }
 
 write_ui_settings_config() {
+  local host_ip
+  host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -z "${host_ip}" ] && host_ip="localhost"
+
   cat > "${UI_SETTINGS_FILE}" <<EOF
 {
-  "l1Rpc": "http://localhost:${L1_PROXY_PORT}",
-  "l2Rpc": "http://localhost:${PUBLIC_FULLNODE_RPC_PORT}",
-  "l2EvmRpc": "http://localhost:${L2_PROXY_PORT}",
-  "builderUrl": "http://localhost:${BUILDER_PORT}",
+  "l1Rpc": "http://${host_ip}:${L1_PROXY_PORT}",
+  "l2Rpc": "http://${host_ip}:${PUBLIC_FULLNODE_RPC_PORT}",
+  "l2EvmRpc": "http://${host_ip}:${L2_PROXY_PORT}",
+  "builderUrl": "http://${host_ip}:${BUILDER_PORT}",
+  "prooferUrl": "http://${host_ip}:${PROOFER_PORT}",
+  "ethrexRpc": "http://${host_ip}:${ETHREX_STATUS_PORT}",
+  "ethrexEvmRpc": "http://${host_ip}:${ETHREX_L2_EVM_PORT}",
+  "blockscoutL1Url": "https://gnosis.blockscout.com",
+  "blockscoutL2Url": "http://${host_ip}:4021",
   "rollupsAddress": "${ROLLUPS_ADDR}",
   "rollupId": "${ROLLUP_ID_VAL}",
   "deploymentBlock": "${DEPLOYMENT_BLOCK}"
@@ -211,10 +237,10 @@ start_services() {
     --start-block "${DEPLOYMENT_BLOCK}" \
     --l2-port "${PUBLIC_L2_EVM_PORT}" \
     --rpc-port "${PUBLIC_FULLNODE_RPC_PORT}" \
-    --initial-state "${INITIAL_STATE}" \
+    --initial-state "${GENESIS_STATE_VAL}" \
     --contracts-out "${CONTRACTS_OUT}" \
     > logs/fullnode-public.log 2>&1 &
-  echo $! > logs/pid-fullnode-public.txt
+  echo $! > logs/pid-gnosis-fullnode-public.txt
   wait_for_rpc_method "${PUBLIC_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 120 || {
     echo "Error: public fullnode did not start"
     exit 1
@@ -228,14 +254,41 @@ start_services() {
     --start-block "${DEPLOYMENT_BLOCK}" \
     --l2-port "${BUILDER_L2_EVM_PORT}" \
     --rpc-port "${BUILDER_FULLNODE_RPC_PORT}" \
-    --initial-state "${INITIAL_STATE}" \
+    --initial-state "${GENESIS_STATE_VAL}" \
     --contracts-out "${CONTRACTS_OUT}" \
     > logs/fullnode-builder.log 2>&1 &
-  echo $! > logs/pid-fullnode-builder.txt
+  echo $! > logs/pid-gnosis-fullnode-builder.txt
   wait_for_rpc_method "${BUILDER_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 120 || {
     echo "Error: builder fullnode did not start"
     exit 1
   }
+
+  log "Starting PROOFER fullnode (${PROOFER_L2_EVM_PORT}/${PROOFER_FULLNODE_RPC_PORT})..."
+  nohup "${NODE_BIN}" dist/fullnode/fullnode.js -- \
+    --rollups "${ROLLUPS_ADDR}" \
+    --rollup-id "${ROLLUP_ID_VAL}" \
+    --l1-rpc "${L1_RPC_URL}" \
+    --start-block "${DEPLOYMENT_BLOCK}" \
+    --l2-port "${PROOFER_L2_EVM_PORT}" \
+    --rpc-port "${PROOFER_FULLNODE_RPC_PORT}" \
+    --initial-state "${GENESIS_STATE_VAL}" \
+    --contracts-out "${CONTRACTS_OUT}" \
+    > logs/fullnode-proofer.log 2>&1 &
+  echo $! > logs/pid-gnosis-fullnode-proofer.txt
+  wait_for_rpc_method "${PROOFER_FULLNODE_RPC_URL}" "syncrollups_getStateRoot" 120 || {
+    echo "Error: proofer fullnode did not start"
+    exit 1
+  }
+
+  log "Starting proofer on ${PROOFER_PORT}..."
+  nohup npx tsx proofer/proofer.ts -- \
+    --rollups "${ROLLUPS_ADDR}" \
+    --l1-rpc "${L1_RPC_URL}" \
+    --proof-key "${PROVER_KEY_VAL}" \
+    --fullnode "${PROOFER_FULLNODE_RPC_URL}" \
+    --port "${PROOFER_PORT}" \
+    > logs/proofer.log 2>&1 &
+  echo $! > logs/pid-gnosis-proofer.txt
 
   log "Starting builder API on ${BUILDER_PORT}..."
   nohup "${NODE_BIN}" dist/builder/builder.js -- \
@@ -243,11 +296,11 @@ start_services() {
     --rollup-id "${ROLLUP_ID_VAL}" \
     --l1-rpc "${L1_RPC_URL}" \
     --admin-key "${BUILDER_KEY_VAL}" \
-    --proof-key "${PROVER_KEY_VAL}" \
+    --proofer "${PROOFER_URL}" \
     --fullnode "${BUILDER_FULLNODE_RPC_URL}" \
     --port "${BUILDER_PORT}" \
     > logs/builder.log 2>&1 &
-  echo $! > logs/pid-builder.txt
+  echo $! > logs/pid-gnosis-builder.txt
   wait_for_builder_status 120 || {
     echo "Error: builder did not start"
     exit 1
@@ -260,7 +313,7 @@ start_services() {
     --builder "${BUILDER_URL}" \
     --rollups "${ROLLUPS_ADDR}" \
     > logs/l1-proxy.log 2>&1 &
-  echo $! > logs/pid-l1-proxy.txt
+  echo $! > logs/pid-gnosis-l1-proxy.txt
 
   log "Starting L2 proxy on ${L2_PROXY_PORT}..."
   nohup "${NODE_BIN}" dist/builder/l2-rpc-proxy.js -- \
@@ -268,11 +321,42 @@ start_services() {
     --rpc "${PUBLIC_FULLNODE_RPC_URL}" \
     --builder "${BUILDER_URL}" \
     > logs/l2-proxy.log 2>&1 &
-  echo $! > logs/pid-l2-proxy.txt
+  echo $! > logs/pid-gnosis-l2-proxy.txt
 
-  log "Starting dashboard on ${UI_PORT}..."
-  nohup python3 -m http.server "${UI_PORT}" --directory ui > logs/ui.log 2>&1 &
-  echo $! > logs/pid-ui.txt
+  # Start ethrex fullnode (alternative L2 client)
+  if [ -f "${ETHREX_BIN}" ]; then
+    log "Starting ETHREX fullnode (${ETHREX_L2_EVM_PORT}/${ETHREX_STATUS_PORT})..."
+    local ETHREX_FULLNODE_BIN="./ethrex-fullnode/target/release/sync-rollups-ethrex-fullnode"
+    if [ ! -f "${ETHREX_FULLNODE_BIN}" ]; then
+      log "Building ethrex fullnode..."
+      (cd ethrex-fullnode && cargo build --release 2>&1 | tail -1)
+    fi
+    if [ -f "${ETHREX_FULLNODE_BIN}" ]; then
+      rm -rf state/ethrex-gnosis
+      nohup "${ETHREX_FULLNODE_BIN}" \
+        --l1-rpc-url "${L1_RPC_URL}" \
+        --rollups-address "${ROLLUPS_ADDR}" \
+        --rollup-id "${ROLLUP_ID_VAL}" \
+        --l2-chain-id 10200200 \
+        --deployment-block "${DEPLOYMENT_BLOCK}" \
+        --ethrex-bin "${ETHREX_BIN}" \
+        --contracts-out-dir "${CONTRACTS_OUT}" \
+        --datadir ./state/ethrex-gnosis \
+        --l2-rpc-port "${ETHREX_L2_EVM_PORT}" \
+        --l2-engine-port "${ETHREX_ENGINE_PORT}" \
+        --l2-p2p-port "${ETHREX_P2P_PORT}" \
+        --status-rpc-port "${ETHREX_STATUS_PORT}" \
+        > logs/ethrex-fullnode-gnosis.log 2>&1 &
+      echo $! > logs/pid-gnosis-ethrex.txt
+    else
+      log "WARNING: ethrex fullnode binary not found, skipping"
+    fi
+  else
+    log "Skipping ETHREX fullnode (ethrex binary not found at ${ETHREX_BIN})"
+  fi
+
+  # Dashboard is shared with Anvil (served on port 8080 by start-local.sh)
+  # The UI env selector switches between deployment configs automatically
 }
 
 verify_sync() {
@@ -282,6 +366,10 @@ verify_sync() {
   }
   wait_for_sync_true "${BUILDER_FULLNODE_RPC_URL}" 240 || {
     echo "Error: builder fullnode did not sync"
+    exit 1
+  }
+  wait_for_sync_true "${PROOFER_FULLNODE_RPC_URL}" 240 || {
+    echo "Error: proofer fullnode did not sync"
     exit 1
   }
   wait_for_builder_synced 240 || {
@@ -308,6 +396,8 @@ print_summary() {
   echo "  L2 Proxy:         http://localhost:${L2_PROXY_PORT}"
   echo "  Public L2 RPC:    http://localhost:${PUBLIC_FULLNODE_RPC_PORT}"
   echo "  Builder API:      http://localhost:${BUILDER_PORT}"
+  echo "  Proofer API:      http://localhost:${PROOFER_PORT}"
+  echo "  Proofer L2 RPC:   http://localhost:${PROOFER_FULLNODE_RPC_PORT}"
   echo ""
 }
 

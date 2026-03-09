@@ -63,7 +63,7 @@ export class ExecutionPlanner {
    * Plan an L2 transaction
    * Returns all executions needed to process the transaction
    */
-  async planL2Transaction(rlpEncodedTx: string): Promise<ExecutionPlan> {
+  async planL2Transaction(rlpEncodedTx: string, timestamp?: number): Promise<ExecutionPlan> {
     const entries: ExecutionEntry[] = [];
 
     // Get current state from L1 directly (this is what the contract will check)
@@ -76,9 +76,13 @@ export class ExecutionPlanner {
     const rootActionHash = this.computeActionHash(l2txAction);
     console.log(`[Planner] Action hash: ${rootActionHash.slice(0, 18)}...`);
 
-    // Simulate the transaction
-    const simulation = await this.simulateAction(l2txAction);
+    // Simulate the transaction (with optional timestamp for deterministic state roots)
+    const simulation = await this.simulateAction(l2txAction, timestamp);
     console.log(`[Planner] Simulation success: ${simulation.success}, stateDeltas: ${simulation.stateDeltas.length}`);
+
+    if (!simulation.success) {
+      throw new Error(`L2TX simulation failed: ${simulation.error || "unknown error"}`);
+    }
 
     // Build RESULT action
     const resultAction = createResultAction(
@@ -87,12 +91,7 @@ export class ExecutionPlanner {
       simulation.nextAction.failed
     );
 
-    // For L2TX, we use the L1 state as current, and compute a new state hash
-    // In a real implementation, the new state would come from actually executing on L2
-    // For now, we create a deterministic new state based on the action
-    const newState = simulation.stateDeltas.length > 0
-      ? simulation.stateDeltas[0].newState
-      : this.computeNewState(currentState, rootActionHash);
+    const newState = simulation.stateDeltas[0].newState;
 
     console.log(`[Planner] New state: ${newState.slice(0, 18)}...`);
 
@@ -115,7 +114,81 @@ export class ExecutionPlanner {
     return {
       entries,
       rootActionHash,
-      proof: "", // Will be filled by proof-generator
+      rootActions: [l2txAction],
+      proof: "", // Will be filled by proofer
+    };
+  }
+
+  /**
+   * Plan a batch of L2 transactions to be included in a single L2 block.
+   * Simulates all txs together in one block on the builder's fullnode.
+   */
+  async planL2Batch(signedTxs: string[], timestamp?: number): Promise<ExecutionPlan> {
+    const entries: ExecutionEntry[] = [];
+
+    // Get current state from L1
+    const states = await this.getStates();
+    const currentState = states.l1State.stateRoot;
+    console.log(`[Planner] Batch of ${signedTxs.length} txs, initial state: ${currentState.slice(0, 18)}...`);
+
+    // Simulate all txs in a single block on the builder's fullnode
+    const simResult = await this.fullnodeProvider.send("syncrollups_simulateBatch", [signedTxs, timestamp]);
+    if (!simResult.success) {
+      throw new Error(`L2TX batch simulation failed: ${simResult.error || "unknown"}`);
+    }
+
+    const newState = simResult.newState;
+    console.log(`[Planner] Batch simulated, new state: ${newState.slice(0, 18)}...`);
+
+    // Create one entry per tx (each with the same overall state transition)
+    // The L1 contract processes entries individually, so we need N entries.
+    // The first entry carries the state transition, the rest are no-ops.
+    for (let i = 0; i < signedTxs.length; i++) {
+      const l2txAction = createL2TXAction(this.config.rollupId, signedTxs[i]);
+      const actionHash = this.computeActionHash(l2txAction);
+
+      // Build RESULT action (we don't have individual return data, use empty)
+      const resultAction = createResultAction(this.config.rollupId, "0x", false);
+
+      if (i === 0) {
+        // First entry: carries the full state transition
+        entries.push({
+          stateDeltas: [{
+            rollupId: this.config.rollupId,
+            currentState,
+            newState,
+            etherDelta: 0n,
+          }],
+          actionHash,
+          nextAction: resultAction,
+        });
+      } else {
+        // Subsequent entries: identity state transition (newState→newState)
+        entries.push({
+          stateDeltas: [{
+            rollupId: this.config.rollupId,
+            currentState: newState,
+            newState: newState,
+            etherDelta: 0n,
+          }],
+          actionHash,
+          nextAction: resultAction,
+        });
+      }
+    }
+
+    console.log(`[Planner] Batch complete, final state: ${newState.slice(0, 18)}...`);
+
+    // Root actions: one L2TX action per signed tx
+    const rootActions = signedTxs.map((tx) =>
+      createL2TXAction(this.config.rollupId, tx)
+    );
+
+    return {
+      entries,
+      rootActionHash: entries.length > 0 ? entries[0].actionHash : "0x" + "00".repeat(32),
+      rootActions,
+      proof: "",
     };
   }
 
@@ -129,7 +202,8 @@ export class ExecutionPlanner {
     l2CallData: string,
     l2CallValue: bigint,
     l2Sender: string,
-    sourceProxyOnL1: string
+    sourceProxyOnL1: string,
+    timestamp?: number
   ): Promise<ExecutionPlan> {
     const entries: ExecutionEntry[] = [];
 
@@ -140,7 +214,7 @@ export class ExecutionPlanner {
     const rootActionHash = this.computeActionHash(l2txAction);
 
     // Simulate root L2TX on fullnode to obtain the post-tx L2 state root.
-    const l2txSimulation = await this.simulateAction(l2txAction);
+    const l2txSimulation = await this.simulateAction(l2txAction, timestamp);
     if (!l2txSimulation.success) {
       throw new Error(
         `L2 transaction simulation failed for L2→L1 planning: ${l2txSimulation.error || "unknown error"}`
@@ -163,13 +237,32 @@ export class ExecutionPlanner {
       []
     );
 
-    // Simulate the L1 call return data (state changes on L1 are not in rollup state deltas).
-    const l1CallResult = await this.simulateL1Call(
-      sourceProxyOnL1,
-      l1Target,
-      l2CallData,
-      l2CallValue
-    );
+    // Simulate the L1 call return data.
+    // For value-only transfers (empty calldata) to EOAs, the call always succeeds
+    // on L1 because the Rollups contract provides the ETH via executeOnBehalf.
+    // We can't reliably simulate this via eth_call (the source proxy may not have
+    // ETH in simulation), so we short-circuit for plain value transfers.
+    let l1CallResult: { returnData: string; failed: boolean };
+    const isPlainTransfer = !l2CallData || l2CallData === "0x" || l2CallData === "0x00";
+    const targetCode = await this.l1Provider.getCode(l1Target);
+    if (isPlainTransfer && targetCode === "0x") {
+      // EOA value transfer — always succeeds. The return data from
+      // _processCallAtScope is ABI-encoded: executeOnBehalf returns
+      // bytes memory, which ABI-encodes the inner call's empty return.
+      // abi.encode(bytes("")) = offset(0x20) + length(0x00)
+      const abiEncodedEmptyBytes =
+        "0x" +
+        "0000000000000000000000000000000000000000000000000000000000000020" +
+        "0000000000000000000000000000000000000000000000000000000000000000";
+      l1CallResult = { returnData: abiEncodedEmptyBytes, failed: false };
+    } else {
+      l1CallResult = await this.simulateL1Call(
+        sourceProxyOnL1,
+        l1Target,
+        l2CallData,
+        l2CallValue
+      );
+    }
 
     // Execution #1: L2TX -> CALL(L1)
     const rootExecutionEntry: ExecutionEntry = {
@@ -198,9 +291,20 @@ export class ExecutionPlanner {
     const callResultHash = this.computeActionHash(callResultAction);
 
     // Execution #2: RESULT(call) -> final RESULT.
-    // No rollup state change here; this continuation only finalizes the call chain.
+    // When the CALL sends ETH on L1 (L2→L1 withdrawal), _etherDelta becomes
+    // negative. The continuation's stateDeltas must carry a matching negative
+    // etherDelta so the Rollups contract's ether accounting check passes.
+    // The rollup's L1 etherBalance decreases by the withdrawn amount.
+    const continuationStateDeltas: StateDelta[] = l2CallValue > 0n
+      ? [{
+          rollupId: this.config.rollupId,
+          currentState: postL2State,
+          newState: postL2State,  // No further L2 state change, just L1 ether accounting
+          etherDelta: -l2CallValue,
+        }]
+      : [];
     const continuationExecutionEntry: ExecutionEntry = {
-      stateDeltas: [],
+      stateDeltas: continuationStateDeltas,
       actionHash: callResultHash,
       nextAction: createResultAction(
         this.config.rollupId,
@@ -213,6 +317,7 @@ export class ExecutionPlanner {
     return {
       entries,
       rootActionHash,
+      rootActions: [l2txAction, callResultAction],
       proof: "",
     };
   }
@@ -287,7 +392,8 @@ export class ExecutionPlanner {
     return {
       entries,
       rootActionHash,
-      proof: "", // Will be filled by proof-generator
+      rootActions: [callAction],
+      proof: "", // Will be filled by proofer
     };
   }
 
@@ -311,7 +417,8 @@ export class ExecutionPlanner {
     value: bigint,
     targetProxyAddress: string, // L1 proxy representing the L2 target
     sourceProxyAddress: string, // L2 proxy representing the original L1 caller
-    originalSender: string      // Original L1 sender address (for L2 proxy deployment)
+    originalSender: string,     // Original L1 sender address (for L2 proxy deployment)
+    timestamp?: number          // L1 block timestamp for deterministic state roots
   ): Promise<ExecutionPlan> {
     const entries: ExecutionEntry[] = [];
 
@@ -341,7 +448,8 @@ export class ExecutionPlanner {
       callData,
       value,
       sourceProxyAddress,
-      originalSender
+      originalSender,
+      timestamp
     );
     console.log(`[Planner] Simulation success: ${simulation.success}, returnData: ${simulation.returnData.slice(0, 18)}...`);
 
@@ -381,7 +489,8 @@ export class ExecutionPlanner {
     return {
       entries,
       rootActionHash,
-      proof: "", // Will be filled by proof-generator
+      rootActions: [callAction],
+      proof: "", // Will be filled by proofer
     };
   }
 
@@ -393,7 +502,8 @@ export class ExecutionPlanner {
     data: string,
     value: bigint,
     fromProxy: string,
-    originalSender: string
+    originalSender: string,
+    timestamp?: number
   ): Promise<{
     returnData: string;
     failed: boolean;
@@ -408,7 +518,7 @@ export class ExecutionPlanner {
         value: "0x" + value.toString(16),
         data: data,
         originalSender: originalSender,
-      }]);
+      }, timestamp]);
 
       return {
         returnData: result.returnData || "0x",
@@ -470,11 +580,12 @@ export class ExecutionPlanner {
   /**
    * Simulate an action on the fullnode
    */
-  private async simulateAction(action: Action): Promise<SimulationResult> {
+  private async simulateAction(action: Action, timestamp?: number): Promise<SimulationResult> {
     // Convert to JSON-safe format for RPC
     const actionJson = actionToJson(action);
     const resultJson = await this.fullnodeProvider.send("syncrollups_simulateAction", [
       actionJson,
+      timestamp,
     ]);
 
     // Convert response back to native types

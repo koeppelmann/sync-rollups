@@ -291,13 +291,58 @@ export class EventProcessor {
 
     // Save checkpoint before processing events for each distinct L1 block
     // This gives us precise rollback targets for reorg recovery
+    // Group consecutive L2ExecutionPerformed events from the same L1 tx for batch replay
     let lastCheckpointedBlock = -1;
-    for (const event of allEvents) {
+    let i = 0;
+    while (i < allEvents.length) {
+      const event = allEvents[i];
       if (event.blockNumber !== lastCheckpointedBlock) {
         lastCheckpointedBlock = event.blockNumber;
         await this.saveCheckpoint(event.blockNumber);
       }
+
+      // Check if this is part of a batch: multiple L2ExecutionPerformed events from same L1 block
+      // Exclude L1-only accounting events (currentState == newState) — they don't produce L2 blocks
+      if (event.eventName === "L2ExecutionPerformed") {
+        const consecutiveEvents = [event];
+        while (
+          i + consecutiveEvents.length < allEvents.length &&
+          allEvents[i + consecutiveEvents.length].eventName === "L2ExecutionPerformed" &&
+          allEvents[i + consecutiveEvents.length].blockNumber === event.blockNumber
+        ) {
+          consecutiveEvents.push(allEvents[i + consecutiveEvents.length]);
+        }
+
+        // Filter to only events that require L2 replay (state actually changes)
+        const batchEvents = consecutiveEvents.filter(
+          (e) => e.args.currentState !== e.args.newState
+        );
+
+        if (batchEvents.length > 1) {
+          console.log(`[EventProcessor] Batch of ${batchEvents.length} L2TXs from L1 block ${event.blockNumber}`);
+          await this.replayBatchExecution(batchEvents);
+          // Process the L1-only accounting events individually
+          for (const e of consecutiveEvents) {
+            if (e.args.currentState === e.args.newState) {
+              await this.processEvent(e);
+            }
+          }
+          i += consecutiveEvents.length;
+          continue;
+        }
+
+        // If only 0-1 events need L2 replay, process all individually
+        if (consecutiveEvents.length > 1) {
+          for (const e of consecutiveEvents) {
+            await this.processEvent(e);
+          }
+          i += consecutiveEvents.length;
+          continue;
+        }
+      }
+
       await this.processEvent(event);
+      i++;
     }
 
     this.lastProcessedBlock = toBlock;
@@ -356,18 +401,50 @@ export class EventProcessor {
       );
     }
 
+    // When currentState === newState, this is an L1-only accounting event
+    // (e.g., ether delta from an L2→L1 withdrawal continuation). No L2 state
+    // change, no L2 block to mine — just update our tracked state.
+    if (currentState === newState) {
+      console.log(
+        `[EventProcessor] L1-only accounting event (currentState == newState), no L2 replay needed`
+      );
+      this.stateManager.updateState(newState, BigInt(blockNumber));
+      return;
+    }
+
     // Check if the L2 EVM already has the correct post-execution state.
     // This happens when the builder's fullnode pre-executed the call during
-    // planL1ToL2CallWithProxy. In that case, skip re-execution.
+    // planL1ToL2CallWithProxy. In that case, we may skip re-execution — but only
+    // if the L2 block timestamp matches the actual L1 block timestamp.
+    // On real chains (non-Anvil), the builder simulates with a predicted timestamp
+    // that may differ from the actual L1 block timestamp. If they don't match,
+    // we must rollback and re-execute with the correct timestamp.
     try {
       const actualL2State = await this.stateManager.getActualStateRoot();
       if (actualL2State === newState && currentState !== newState) {
-        console.log(
-          `[EventProcessor] L2 state already matches newState (pre-executed), skipping replay`
+        // Pre-executed state matches. Verify timestamp correctness.
+        const l1Block = await this.l1Provider.getBlock(blockNumber);
+        const l1Timestamp = l1Block ? Number(l1Block.timestamp) : undefined;
+        const l2BlockNum = await this.stateManager.getL2BlockNumber();
+        const l2Block = await this.stateManager.getL2Provider()!.send(
+          "eth_getBlockByNumber", [`0x${l2BlockNum.toString(16)}`, false]
         );
-        this.stateManager.updateState(newState, BigInt(blockNumber));
-        console.log(`[EventProcessor] State updated to: ${newState.slice(0, 10)}...`);
-        return;
+        const l2Timestamp = l2Block ? parseInt(l2Block.timestamp, 16) : undefined;
+
+        if (l1Timestamp && l2Timestamp && l1Timestamp === l2Timestamp) {
+          console.log(
+            `[EventProcessor] L2 state already matches newState (pre-executed), skipping replay`
+          );
+          this.stateManager.updateState(newState, BigInt(blockNumber));
+          console.log(`[EventProcessor] State updated to: ${newState.slice(0, 10)}...`);
+          return;
+        } else {
+          // Timestamp mismatch — rollback pre-executed block and re-execute with correct L1 timestamp
+          console.log(
+            `[EventProcessor] Pre-executed block has wrong timestamp (L2=${l2Timestamp}, L1=${l1Timestamp}), rolling back to re-execute`
+          );
+          await this.stateManager.rollbackToBlock(l2BlockNum - 1);
+        }
       }
     } catch (e: any) {
       // If we can't check, proceed with normal replay
@@ -381,21 +458,32 @@ export class EventProcessor {
         throw new Error(`L1 transaction ${l1TxHash} not found`);
       }
 
+      // Per state transition spec (Rules 2 & 3):
+      // - coinbase = msg.sender on L1 (the address that called the L1 function)
+      // - timestamp = L1 block timestamp
+      //
+      // The L2 block timestamp MUST match the L1 block timestamp so that
+      // builder simulation and event processor replay produce the same state root.
+      // The builder forces the L1 block timestamp via evm_setNextBlockTimestamp
+      // before mining the L1 block containing the execution.
+      const l1Block = await this.l1Provider.getBlock(blockNumber);
+      const l1Timestamp = l1Block ? l1Block.timestamp : undefined;
+      console.log(`[EventProcessor] Replaying L1 caller=${l1Tx.from}, L1 block timestamp=${l1Timestamp}`);
+
       // Try to decode as a Rollups contract call
       const decoded = this.rollupsInterface.parseTransaction({ data: l1Tx.data });
 
       if (decoded && decoded.name === 'executeL2TX') {
-        // This is a direct L2TX execution — an already-signed L2 transaction.
-        // Instead of sending the raw signed tx (which pays gas to reth's random
-        // coinbase, causing non-determinism), we decode it and replay via the
-        // operator's zero-gas system call.
+        // Broadcast the original signed L2 transaction to reth.
+        // The sender must have sufficient L2 balance (bridged from L1).
+        // Rule 1: exactly one L2 block per L1 function call.
         const rlpEncodedTx = decoded.args[1];
         const { Transaction } = await import("ethers");
         const parsedTx = Transaction.from(rlpEncodedTx);
-        console.log(`[EventProcessor] Decoded executeL2TX: ${parsedTx.from?.slice(0, 10)}... -> ${parsedTx.to ? parsedTx.to.slice(0, 10) + '...' : 'CREATE'}, value=${parsedTx.value}`);
+        console.log(`[EventProcessor] L2TX: from=${parsedTx.from?.slice(0, 10)}... -> ${parsedTx.to ? parsedTx.to.slice(0, 10) + '...' : 'CREATE'}, value=${parsedTx.value}`);
 
-        const txHash = await this.stateManager.replayL2TX(parsedTx);
-        console.log(`[EventProcessor] L2TX replayed: ${txHash}`);
+        const txHash = await this.stateManager.broadcastRawTx(rlpEncodedTx, { timestamp: l1Timestamp });
+        console.log(`[EventProcessor] L2TX executed: ${txHash}`);
       } else if (consumedAction && consumedAction.actionType === 0) {
         // L1→L2 call: use the ExecutionConsumed event's Action struct
         // actionType 0 = CALL
@@ -407,24 +495,30 @@ export class EventProcessor {
         console.log(`[EventProcessor] L1→L2 call (from ExecutionConsumed event)`);
         console.log(`[EventProcessor] L2 target: ${l2Target}, source: ${sourceAddress}`);
 
-        // Ensure the source proxy is deployed on L2
+        // Rule 4 & 5: Preparation txs at the beginning of the block, then user tx.
+        // Rule 1: All in ONE L2 block.
+        // Pass deferMining flag to ensureProxyDeployed → uses sendSystemTx (no auto-mine).
+        const deferMining = { coinbase: undefined, timestamp: l1Timestamp };
         const l2Provider = this.stateManager.getL2Provider();
         const l2ChainIdHex = await l2Provider.send("eth_chainId", []);
         const l2ChainId = BigInt(l2ChainIdHex);
         await this.stateManager.ensureProxyDeployed(
           sourceAddress,
           this.config.rollupId,
-          l2ChainId
+          l2ChainId,
+          deferMining
         );
 
-        // Execute the call directly via operator system call.
-        // msg.sender at the target will be the operator (same as builder simulation).
-        const result = await this.stateManager.systemCall(
+        // Send the main call to txpool (deferred mining)
+        await this.stateManager.sendSystemTx(
           l2Target,
           callData,
           "0x" + value.toString(16)
         );
-        console.log(`[EventProcessor] System call executed: ${result.slice(0, 20)}...`);
+
+        // Mine ONE block containing all preparation txs + main call
+        await this.stateManager.mineBlock({ timestamp: l1Timestamp });
+        console.log(`[EventProcessor] L1→L2 call executed in single block`);
       } else {
         // Fallback: try to parse from L1 tx (legacy path)
         const proxyAddress = l1Tx.to;
@@ -438,14 +532,15 @@ export class EventProcessor {
         const l2Target = await proxyContract.ORIGINAL_ADDRESS();
         console.log(`[EventProcessor] L2 target: ${l2Target}`);
 
-        // Execute via operator system call (matches builder simulation)
+        // Execute via operator system call
         const value = l1Tx.value;
-        const result = await this.stateManager.systemCall(
+        await this.stateManager.sendSystemTx(
           l2Target,
           l1Tx.data,
           "0x" + value.toString(16)
         );
-        console.log(`[EventProcessor] System call executed: ${result.slice(0, 20)}...`);
+        await this.stateManager.mineBlock({ timestamp: l1Timestamp });
+        console.log(`[EventProcessor] Legacy L1→L2 call executed in single block`);
       }
 
       // Verify the state matches what L1 expects
@@ -461,10 +556,75 @@ export class EventProcessor {
       this.stateManager.updateState(newState, BigInt(blockNumber));
       console.log(`[EventProcessor] State updated to: ${newState.slice(0, 10)}...`);
 
+      // Check bridge invariant: L1 etherBalance + operator L2 balance == genesis balance
+      await this.checkBridgeInvariant();
+
     } catch (error: any) {
       console.error(`[EventProcessor] Failed to replay execution: ${error.message}`);
       // Update tracked state anyway to stay in sync with L1
       this.stateManager.updateState(newState, BigInt(blockNumber));
+    }
+  }
+
+  /**
+   * Replay a batch of L2TX events from the same L1 block as a single L2 block.
+   * Each event has its own L1 tx hash (separate executeL2TX calls in same L1 block).
+   * Sends all raw txs to the txpool, then mines one block containing all of them.
+   */
+  private async replayBatchExecution(events: ProcessedEvent[]): Promise<void> {
+    const blockNumber = events[0].blockNumber;
+    const finalNewState = events[events.length - 1].args.newState;
+
+    try {
+      // Fetch L1 block timestamp — all events share the same L1 block
+      const l1Block = await this.l1Provider.getBlock(blockNumber);
+      const l1Timestamp = l1Block ? l1Block.timestamp : undefined;
+      let sentCount = 0;
+
+      // Each event comes from a separate executeL2TX L1 tx
+      for (const event of events) {
+        const l1Tx = await this.l1Provider.getTransaction(event.transactionHash);
+        if (!l1Tx) {
+          console.warn(`[EventProcessor] L1 tx ${event.transactionHash} not found, skipping`);
+          continue;
+        }
+
+        const decoded = this.rollupsInterface.parseTransaction({ data: l1Tx.data });
+        if (decoded && decoded.name === 'executeL2TX') {
+          const rlpEncodedTx = decoded.args[1];
+          await this.stateManager.sendRawTransaction(rlpEncodedTx);
+          sentCount++;
+        }
+      }
+
+      if (sentCount === 0) {
+        throw new Error("No executeL2TX transactions decoded from batch events");
+      }
+
+      // Mine ONE L2 block containing all the transactions (with L1 block timestamp)
+      await this.stateManager.mineBlock({ timestamp: l1Timestamp });
+      console.log(`[EventProcessor] Batch of ${sentCount} L2TXs mined in single L2 block (timestamp=${l1Timestamp})`);
+
+      // Verify final state
+      const actualState = await this.stateManager.getActualStateRoot();
+      if (actualState !== finalNewState) {
+        console.warn(
+          `[EventProcessor] Batch state mismatch! Expected: ${finalNewState.slice(0, 10)}..., Got: ${actualState.slice(0, 10)}...`
+        );
+      }
+
+      // Update tracked state for each event (intermediate states are trusted from L1)
+      for (const event of events) {
+        this.stateManager.updateState(event.args.newState, BigInt(blockNumber));
+      }
+      console.log(`[EventProcessor] Batch state updated to: ${finalNewState.slice(0, 10)}...`);
+
+    } catch (error: any) {
+      console.error(`[EventProcessor] Failed to replay batch: ${error.message}`);
+      // Update tracked state anyway
+      for (const event of events) {
+        this.stateManager.updateState(event.args.newState, BigInt(blockNumber));
+      }
     }
   }
 
@@ -865,5 +1025,32 @@ export class EventProcessor {
     }
 
     return true;
+  }
+
+  /**
+   * Check the bridge invariant after each execution:
+   *   L1 rollup.etherBalance + operator L2 balance == operator genesis balance
+   *
+   * Every ETH bridged from L1 to L2 is disbursed by the operator on L2.
+   * The sum must always equal the operator's genesis allocation.
+   */
+  private async checkBridgeInvariant(): Promise<void> {
+    try {
+      const l1State = await this.getL1State();
+      const l1EtherBalance = BigInt(l1State.etherBalance);
+      const result = await this.stateManager.checkBridgeInvariant(l1EtherBalance);
+      if (!result.holds) {
+        console.error(
+          `[EventProcessor] BRIDGE INVARIANT VIOLATED! ` +
+          `L1 etherBalance (${result.l1EtherBalance}) + ` +
+          `operator L2 balance (${result.operatorL2Balance}) = ` +
+          `${result.l1EtherBalance + result.operatorL2Balance} != ` +
+          `genesis balance (${result.genesisBalance})`
+        );
+      }
+    } catch (e: any) {
+      // Don't fail event processing if invariant check fails
+      console.warn(`[EventProcessor] Could not check bridge invariant: ${e.message}`);
+    }
   }
 }

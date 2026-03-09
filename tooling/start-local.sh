@@ -19,6 +19,11 @@ BUILDER_L2_EVM_PORT=9549
 BUILDER_FULLNODE_RPC_PORT=9550
 BUILDER_PORT=3200
 
+# Proofer fullnode + proofer service
+PROOFER_L2_EVM_PORT=9551
+PROOFER_FULLNODE_RPC_PORT=9552
+PROOFER_PORT=3300
+
 # Ethrex fullnode (alternative L2 client)
 ETHREX_L2_EVM_PORT=9556
 ETHREX_ENGINE_PORT=9561
@@ -30,11 +35,13 @@ ETHREX_BIN="${ETHREX_BIN:-/home/ubuntu/code/ethrex/target/release/ethrex}"
 echo "Stopping existing services..."
 pkill -f "fullnode/fullnode.ts" 2>/dev/null || true
 pkill -f "builder/builder.ts" 2>/dev/null || true
+pkill -f "proofer/proofer.ts" 2>/dev/null || true
 pkill -f "rpc-proxy.ts" 2>/dev/null || true
 pkill -f "l2-rpc-proxy.ts" 2>/dev/null || true
 pkill -f "python3 -m http.server 8080" 2>/dev/null || true
 pkill -f "reth node" 2>/dev/null || true
 pkill -f "sync-rollups-ethrex-fullnode" 2>/dev/null || true
+pkill -f "ethrex --network" 2>/dev/null || true
 lsof -i :$L1_RPC_PORT 2>/dev/null | grep LISTEN | awk '{print $2}' | xargs kill 2>/dev/null || true
 
 # Restart Blockscout with fresh databases
@@ -134,6 +141,31 @@ npm exec tsx fullnode/fullnode.ts -- \
   > logs/fullnode-builder.log 2>&1 &
 sleep 10  # reth needs more startup time than Anvil
 
+# Start proofer fullnode (proofer's own L2 for independent verification)
+echo "Starting PROOFER fullnode..."
+npm exec tsx fullnode/fullnode.ts -- \
+  --rollups "$ROLLUPS_ADDR" \
+  --rollup-id 0 \
+  --l1-rpc http://localhost:$L1_RPC_PORT \
+  --start-block "$DEPLOYMENT_BLOCK" \
+  --l2-port $PROOFER_L2_EVM_PORT \
+  --rpc-port $PROOFER_FULLNODE_RPC_PORT \
+  --initial-state "$GENESIS_STATE" \
+  --contracts-out "$CONTRACTS_OUT" \
+  > logs/fullnode-proofer.log 2>&1 &
+sleep 10  # reth needs more startup time than Anvil
+
+# Start proofer service
+echo "Starting proofer..."
+npm exec tsx proofer/proofer.ts -- \
+  --rollups "$ROLLUPS_ADDR" \
+  --l1-rpc http://localhost:$L1_RPC_PORT \
+  --proof-key "$ADMIN_KEY" \
+  --fullnode http://localhost:$PROOFER_FULLNODE_RPC_PORT \
+  --port $PROOFER_PORT \
+  > logs/proofer.log 2>&1 &
+sleep 3
+
 # Start ethrex fullnode (alternative L2 client)
 if [ -f "$ETHREX_BIN" ]; then
   echo "Starting ETHREX fullnode..."
@@ -163,7 +195,7 @@ else
   echo "Skipping ETHREX fullnode (ethrex binary not found at $ETHREX_BIN)"
 fi
 
-# Start builder (wired only to private builder fullnode)
+# Start builder (wired to private builder fullnode + proofer)
 echo "Starting builder..."
 npm exec tsx builder/builder.ts -- \
   --rollups "$ROLLUPS_ADDR" \
@@ -171,6 +203,7 @@ npm exec tsx builder/builder.ts -- \
   --l1-rpc http://localhost:$L1_RPC_PORT \
   --admin-key "$ADMIN_KEY" \
   --fullnode http://localhost:$BUILDER_FULLNODE_RPC_PORT \
+  --proofer http://localhost:$PROOFER_PORT \
   --port $BUILDER_PORT \
   > logs/builder.log 2>&1 &
 sleep 3
@@ -393,6 +426,32 @@ rm -f ../src/Counter.sol ../src/Logger.sol
 
 echo "Contract verification complete."
 
+# Write environment-specific config files for the UI
+echo ""
+echo "Writing UI config files..."
+HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -z "$HOST_IP" ] && HOST_IP="localhost"
+
+cat > ui/settings.anvil.json <<EOF
+{
+  "l1Rpc": "http://${HOST_IP}:${L1_PROXY_PORT}",
+  "l2Rpc": "http://${HOST_IP}:${PUBLIC_FULLNODE_RPC_PORT}",
+  "l2EvmRpc": "http://${HOST_IP}:${L2_PROXY_PORT}",
+  "builderUrl": "http://${HOST_IP}:${BUILDER_PORT}",
+  "prooferUrl": "http://${HOST_IP}:${PROOFER_PORT}",
+  "ethrexRpc": "http://${HOST_IP}:${ETHREX_STATUS_PORT}",
+  "ethrexEvmRpc": "http://${HOST_IP}:${ETHREX_L2_EVM_PORT}",
+  "blockscoutL1Url": "http://${HOST_IP}:4010",
+  "blockscoutL2Url": "http://${HOST_IP}:4011",
+  "rollupsAddress": "${ROLLUPS_ADDR}",
+  "rollupId": "0",
+  "deploymentBlock": "${DEPLOYMENT_BLOCK}"
+}
+EOF
+# Backward compat: symlink settings.dev.json → settings.anvil.json
+ln -sf settings.anvil.json ui/settings.dev.json
+echo "  Wrote ui/settings.anvil.json"
+
 # Print summary
 echo ""
 echo "============================================"
@@ -421,6 +480,9 @@ echo "  L2 RPC Proxy:           http://localhost:$L2_PROXY_PORT  ← Connect wal
 echo "  Builder Private L2 EVM: http://localhost:$BUILDER_L2_EVM_PORT  (internal)"
 echo "  Builder Fullnode RPC:   http://localhost:$BUILDER_FULLNODE_RPC_PORT  (internal)"
 echo "  Builder API:            http://localhost:$BUILDER_PORT"
+echo "  Proofer L2 EVM:         http://localhost:$PROOFER_L2_EVM_PORT  (internal)"
+echo "  Proofer Fullnode RPC:   http://localhost:$PROOFER_FULLNODE_RPC_PORT  (internal)"
+echo "  Proofer API:            http://localhost:$PROOFER_PORT"
 echo "  Ethrex L2 EVM:          http://localhost:$ETHREX_L2_EVM_PORT"
 echo "  Ethrex Status RPC:      http://localhost:$ETHREX_STATUS_PORT"
 echo "  Dashboard:              http://localhost:8080"
@@ -440,6 +502,6 @@ echo ""
 echo "Logs: ./logs/"
 echo ""
 echo "To stop:"
-echo "  pkill -f 'fullnode|builder|reth|anvil|http.server|rpc-proxy|ethrex'"
+echo "  pkill -f 'fullnode|builder|proofer|reth|anvil|http.server|rpc-proxy|ethrex'"
 echo "  docker compose -f blockscout/l1/docker-compose.yml down"
 echo "  docker compose -f blockscout/l2/docker-compose.yml down"

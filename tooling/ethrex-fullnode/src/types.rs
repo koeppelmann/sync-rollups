@@ -49,6 +49,8 @@ pub struct L2ExecutionPerformed {
     pub new_state: B256,
     pub l1_block_number: u64,
     pub l1_tx_hash: B256,
+    /// L1 block timestamp — used as the L2 block timestamp for deterministic state roots
+    pub l1_block_timestamp: u64,
 }
 
 /// Decoded L1 event: ExecutionConsumed

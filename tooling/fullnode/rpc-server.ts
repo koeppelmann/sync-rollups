@@ -203,6 +203,19 @@ export class RpcServer {
             result = await this.eventProcessor.getL1State();
             break;
 
+          case "syncrollups_checkBridgeInvariant": {
+            const l1State = await this.eventProcessor.getL1State();
+            const l1EtherBalance = BigInt(l1State.etherBalance);
+            const inv = await this.stateManager.checkBridgeInvariant(l1EtherBalance);
+            result = {
+              l1EtherBalance: "0x" + inv.l1EtherBalance.toString(16),
+              operatorL2Balance: "0x" + inv.operatorL2Balance.toString(16),
+              genesisBalance: "0x" + inv.genesisBalance.toString(16),
+              holds: inv.holds,
+            };
+            break;
+          }
+
           case "syncrollups_loadExecutions":
             // Builder notifies us of executions to cache
             const executionsJson = params?.[0] as ExecutionEntryJson[];
@@ -226,13 +239,15 @@ export class RpcServer {
 
           case "syncrollups_simulateAction":
             // Simulate an action and return the result
+            // Optional second param: timestamp (number) for the L2 block.
             const actionJson = params?.[0] as ActionJson;
             if (!actionJson) {
               throw new Error("Missing action parameter");
             }
+            const actionTimestamp = params?.[1] as number | undefined;
             // Convert from JSON format to native types
             const action = actionFromJson(actionJson);
-            const simResult = await this.simulateAction(action);
+            const simResult = await this.simulateAction(action, actionTimestamp);
             // Convert back to JSON-safe format
             result = {
               nextAction: actionToJson(simResult.nextAction),
@@ -242,23 +257,68 @@ export class RpcServer {
             };
             break;
 
+          case "syncrollups_simulateBatch": {
+            // Simulate a batch of L2 transactions in a single block.
+            // Takes an array of signed L2 txs, sends them to txpool, mines one block.
+            // Optional second param: timestamp (number) for the L2 block.
+            // Returns { stateRoot: string, success: boolean }.
+            const signedTxs = params?.[0] as string[];
+            if (!signedTxs || !Array.isArray(signedTxs)) {
+              throw new Error("Missing signed transactions array");
+            }
+            const batchTimestamp = params?.[1] as number | undefined;
+            const batchCurrentState = this.stateManager.getStateRoot();
+            let batchSuccess = true;
+            let batchError: string | undefined;
+            try {
+              for (const rawTx of signedTxs) {
+                await this.stateManager.sendRawTransaction(rawTx);
+              }
+              await this.stateManager.mineBlock({ timestamp: batchTimestamp });
+            } catch (e: any) {
+              batchSuccess = false;
+              batchError = e.message;
+            }
+            const batchNewState = await this.stateManager.getActualStateRoot();
+            result = {
+              currentState: batchCurrentState,
+              newState: batchNewState,
+              success: batchSuccess,
+              error: batchError,
+            };
+            break;
+          }
+
           case "syncrollups_takeSnapshot":
             // Returns current block number as hex string (replaces anvil_snapshot)
             result = await this.stateManager.saveHead();
             break;
 
           case "syncrollups_revertToSnapshot":
-            // Accepts a block number hex string (replaces anvil_revert)
+            // Accepts a block number hex string. Uses rollbackToBlock which
+            // stops reth, runs `reth stage unwind`, and restarts — the only
+            // reliable way to revert state in reth (debug_setHead is a no-op).
             const blockHex = params?.[0] as string;
             if (!blockHex) {
               throw new Error("Missing block number parameter");
             }
-            await this.stateManager.revertToBlock(blockHex);
+            await this.stateManager.rollbackToBlock(parseInt(blockHex, 16));
             result = true;
             break;
 
+          case "syncrollups_mineBlock": {
+            // Mine a block with optional timestamp. Used by builder to re-mine
+            // with corrected L1 timestamp after real-chain timestamp mismatch.
+            const tsHex = params?.[0] as string | undefined;
+            const ts = tsHex ? parseInt(tsHex, 16) : undefined;
+            await this.stateManager.mineBlock({ timestamp: ts });
+            result = true;
+            break;
+          }
+
           case "syncrollups_simulateL1Call":
             // Execute an L1→L2 call on the builder's L2 (used by /prepare-l1-call endpoint)
+            // Optional second param: timestamp (number) for the L2 block.
             const callParams = params?.[0] as {
               from: string;
               to: string;
@@ -269,7 +329,8 @@ export class RpcServer {
             if (!callParams) {
               throw new Error("Missing call parameters");
             }
-            result = await this.simulateL1ToL2Call(callParams);
+            const l1CallTimestamp = params?.[1] as number | undefined;
+            result = await this.simulateL1ToL2Call(callParams, l1CallTimestamp);
             break;
 
           default:
@@ -318,7 +379,7 @@ export class RpcServer {
     value: string;
     data: string;
     originalSender?: string;
-  }): Promise<{
+  }, timestamp?: number): Promise<{
     returnData: string;
     failed: boolean;
     stateDeltas: { rollupId: string; currentState: string; newState: string; etherDelta: string }[];
@@ -330,26 +391,13 @@ export class RpcServer {
     const value = BigInt(params.value);
     let returnData = "0x";
     let failed = false;
-    let preSimBlock: number | null = null;
 
     try {
       // Ensure the source proxy is deployed on L2 using the original sender address.
-      // This is done BEFORE recording preSimBlock so the proxy deployment persists
-      // even if we rollback the simulation (event processor will also deploy it).
       const originalSender = params.originalSender || params.from;
       // Use L2 chain ID as domain — on L2, createCrossChainProxy uses block.chainid
       const l2ChainId = await this.getL2ChainId();
-      const proxyAddress = await this.stateManager.ensureProxyDeployed(
-        originalSender,
-        rollupId,
-        BigInt(l2ChainId)
-      );
 
-      // Record L2 block AFTER proxy deployment so we only rollback simulation blocks,
-      // not the proxy deployment itself. This prevents losing persisted state.
-      preSimBlock = await this.stateManager.getL2BlockNumber();
-
-      const { Interface } = await import("ethers");
       const provider = this.stateManager.getL2Provider();
 
       // Dry-run: call the target directly via eth_call to check if it would succeed.
@@ -387,16 +435,27 @@ export class RpcServer {
         console.log(`[RpcServer] L1→L2 inner call would fail, marking as failed`);
         failed = true;
       } else {
-        // Inner call succeeds — execute directly via operator system call.
-        // On L2, the operator calls the target directly. msg.sender at the target
-        // will be the operator. This matches the fullnode replay which also uses
-        // the operator for system calls.
-        const txHash = await this.stateManager.systemCall(
+        // Match event processor replay: combine proxy deployment + main call
+        // into ONE block (Rules 1, 4, 5 of state transition spec).
+        // Use deferred mining (sendSystemTx) for all txs, then mine once.
+        const deferMining = { coinbase: undefined, timestamp };
+        await this.stateManager.ensureProxyDeployed(
+          originalSender,
+          rollupId,
+          BigInt(l2ChainId),
+          deferMining
+        );
+
+        // Send the main call to txpool (deferred mining)
+        await this.stateManager.sendSystemTx(
           params.to,
           params.data,
           "0x" + value.toString(16)
         );
-        console.log(`[RpcServer] L1→L2 call simulated: ${txHash}`);
+
+        // Mine ONE block with all pending txs (proxy deploy + main call)
+        await this.stateManager.mineBlock({ timestamp });
+        console.log(`[RpcServer] L1→L2 call simulated in single block (timestamp=${timestamp})`);
       }
     } catch (e: any) {
       console.error("[RpcServer] L1→L2 call execution error:", e.message);
@@ -406,21 +465,13 @@ export class RpcServer {
       }
     }
 
-    // Get the actual L2 state root after execution
+    // Get the actual L2 state root after execution.
+    // No rollback needed — the state persists on the builder's L2.
+    // When the L1 event arrives, the event processor detects that the L2 state
+    // already matches newState and skips replay (same pattern as L2TX simulation).
     const newState = failed
       ? currentState
       : await this.stateManager.getActualStateRoot();
-
-    // Rollback the L2 EVM to undo simulation state changes.
-    // The event processor will replay these operations when the L1 event arrives,
-    // producing the same state root on ALL fullnodes (not just the builder).
-    if (preSimBlock !== null) {
-      try {
-        await this.stateManager.rollbackToBlock(preSimBlock);
-      } catch (e: any) {
-        console.error(`[RpcServer] Failed to rollback simulation: ${e.message}`);
-      }
-    }
 
     const stateDeltas: { rollupId: string; currentState: string; newState: string; etherDelta: string }[] = [];
     stateDeltas.push({
@@ -484,7 +535,7 @@ export class RpcServer {
    * For CALL actions: Uses eth_call (read-only). CALL simulations are only used
    * for return data; actual L1→L2 call execution goes through simulateL1ToL2Call.
    */
-  private async simulateAction(action: Action): Promise<SimulationResult> {
+  private async simulateAction(action: Action, timestamp?: number): Promise<SimulationResult> {
     const provider = this.stateManager.getL2Provider();
     const currentState = this.stateManager.getStateRoot();
 
@@ -493,15 +544,11 @@ export class RpcServer {
     let returnData = "0x";
 
     if (action.actionType === ActionType.L2TX) {
-      // Actually execute the L2TX on the builder's L2 (not read-only).
-      // We decode the signed tx and replay via zero-gas system call instead
-      // of sendRawTransaction, because reth --dev mode uses a random coinbase
-      // per instance and any non-zero gas fee would produce different state roots.
+      // Broadcast the original signed L2 transaction to reth.
+      // The real sender must have sufficient L2 balance (bridged from L1).
       try {
-        const { Transaction } = await import("ethers");
-        const parsedTx = Transaction.from(action.data);
-        const txHash = await this.stateManager.replayL2TX(parsedTx);
-        console.log(`[RpcServer] L2TX simulated via system call: ${txHash}`);
+        const txHash = await this.stateManager.broadcastRawTx(action.data, { timestamp });
+        console.log(`[RpcServer] L2TX executed: ${txHash}`);
       } catch (e: any) {
         success = false;
         error = e.message;

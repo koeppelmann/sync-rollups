@@ -84,6 +84,7 @@ export interface RollupState {
 export interface ExecutionPlan {
   entries: ExecutionEntry[];
   rootActionHash: string; // Entry point action hash
+  rootActions: Action[]; // Root actions for each entry (used by proofer for verification)
   proof: string; // Admin signature or ZK proof
 }
 

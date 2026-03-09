@@ -75,6 +75,72 @@ let provider: ethers.JsonRpcProvider;
 // Cache of proxy address -> L2 address mappings (for hints)
 const proxyToL2Cache: Map<string, string> = new Map();
 
+// ============ Upstream RPC Cache (rate-limit protection) ============
+
+interface CacheEntry {
+  result: any;
+  expiresAt: number;
+}
+
+const rpcCache: Map<string, CacheEntry> = new Map();
+
+// Methods that are safe to cache with their TTL in milliseconds
+const CACHEABLE_METHODS: Record<string, number> = {
+  eth_blockNumber: 10000,       // 10s (Gnosis: 5s blocks, but we can tolerate slight lag)
+  eth_chainId: 3600000,         // 1 hour (never changes)
+  net_version: 3600000,         // 1 hour (never changes)
+  eth_getBalance: 15000,        // 15s
+  eth_getCode: 60000,           // 60s (code rarely changes)
+  eth_call: 15000,              // 15s
+  eth_getTransactionCount: 15000, // 15s
+  eth_getBlockByNumber: 10000,  // 10s
+  eth_gasPrice: 15000,          // 15s
+  eth_getLogs: 15000,           // 15s
+  eth_getTransactionReceipt: 30000, // 30s (receipts are immutable)
+  eth_getTransactionByHash: 30000,  // 30s (txs are immutable)
+};
+
+// Build a cache key from method + params
+function getCacheKey(method: string, params: any[]): string | null {
+  // Static methods (no params matter)
+  if (method === "eth_chainId" || method === "net_version" || method === "eth_blockNumber" || method === "eth_gasPrice") {
+    return method;
+  }
+  // All other cacheable methods: key on method + serialized params
+  if (CACHEABLE_METHODS[method]) {
+    return `${method}:${JSON.stringify(params ?? [])}`;
+  }
+  return null;
+}
+
+function getCacheTTL(method: string): number {
+  return CACHEABLE_METHODS[method] ?? 0;
+}
+
+function getCachedResult(method: string, params: any[]): any | null {
+  const key = getCacheKey(method, params);
+  if (!key) return null;
+  const entry = rpcCache.get(key);
+  if (entry && Date.now() < entry.expiresAt) return entry.result;
+  return null;
+}
+
+/** Return stale cached data if available (used as fallback when upstream fails) */
+function getStaleCachedResult(method: string, params: any[]): any | null {
+  const key = getCacheKey(method, params);
+  if (!key) return null;
+  const entry = rpcCache.get(key);
+  return entry ? entry.result : null;
+}
+
+function setCachedResult(method: string, params: any[], result: any): void {
+  const key = getCacheKey(method, params);
+  if (!key) return;
+  const ttl = getCacheTTL(method);
+  if (ttl <= 0) return;
+  rpcCache.set(key, { result, expiresAt: Date.now() + ttl });
+}
+
 // ============ Logging ============
 
 function log(component: string, message: string) {
@@ -121,42 +187,90 @@ async function submitToBuilder(request: BuilderSubmitRequest): Promise<any> {
 // ============ RPC Forwarding ============
 
 async function forwardToRpc(body: any): Promise<any> {
-  try {
-    const response = await fetch(config.rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  const method = body?.method;
+  const params = body?.params ?? [];
 
-    const text = await response.text();
+  // Check cache first
+  const cached = getCachedResult(method, params);
+  if (cached !== null) {
+    return { jsonrpc: "2.0", id: body?.id ?? null, result: cached };
+  }
+
+  // Retry with backoff on 429
+  const maxRetries = 4;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return JSON.parse(text);
-    } catch {
-      const snippet = text.slice(0, 120);
-      log(
-        "L1Proxy",
-        `Upstream RPC returned non-JSON (status ${response.status}): ${snippet}`
-      );
+      const response = await fetch(config.rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (response.status === 429 && attempt < maxRetries) {
+        const delay = 500 * Math.pow(2, attempt); // 500, 1000, 2000, 4000
+        if (attempt === 0) log("L1Proxy", `Rate limited (429) on ${method}, retrying...`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      const text = await response.text();
+      try {
+        const parsed = JSON.parse(text);
+        // Cache successful results
+        if (parsed.result !== undefined) {
+          setCachedResult(method, params, parsed.result);
+        }
+        return parsed;
+      } catch {
+        // Non-JSON response (e.g. 429 HTML page) — try stale cache
+        const stale = getStaleCachedResult(method, params);
+        if (stale !== null) {
+          return { jsonrpc: "2.0", id: body?.id ?? null, result: stale };
+        }
+        const snippet = text.slice(0, 120);
+        log(
+          "L1Proxy",
+          `Upstream RPC returned non-JSON (status ${response.status}): ${snippet}`
+        );
+        return {
+          jsonrpc: "2.0",
+          id: body?.id ?? null,
+          error: {
+            code: -32000,
+            message: `Upstream RPC returned non-JSON (HTTP ${response.status})`,
+          },
+        };
+      }
+    } catch (err: any) {
+      if (attempt < maxRetries) {
+        const delay = 500 * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      // All retries exhausted — try stale cache before returning error
+      const stale = getStaleCachedResult(method, params);
+      if (stale !== null) {
+        log("L1Proxy", `Returning stale cache for ${method} after ${maxRetries} failed retries`);
+        return { jsonrpc: "2.0", id: body?.id ?? null, result: stale };
+      }
+      log("L1Proxy", `Upstream RPC request failed after ${maxRetries} retries: ${err.message}`);
       return {
         jsonrpc: "2.0",
         id: body?.id ?? null,
         error: {
           code: -32000,
-          message: `Upstream RPC returned non-JSON (HTTP ${response.status})`,
+          message: `Upstream RPC request failed: ${err.message}`,
         },
       };
     }
-  } catch (err: any) {
-    log("L1Proxy", `Upstream RPC request failed: ${err.message}`);
-    return {
-      jsonrpc: "2.0",
-      id: body?.id ?? null,
-      error: {
-        code: -32000,
-        message: `Upstream RPC request failed: ${err.message}`,
-      },
-    };
   }
+
+  // Should not reach here, but just in case
+  return {
+    jsonrpc: "2.0",
+    id: body?.id ?? null,
+    error: { code: -32000, message: "Unexpected retry exhaustion" },
+  };
 }
 
 // ============ Hint Registration ============

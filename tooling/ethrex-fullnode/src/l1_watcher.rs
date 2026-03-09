@@ -110,6 +110,7 @@ impl L1Watcher {
                     new_state,
                     l1_block_number: block_number,
                     l1_tx_hash: tx_hash,
+                    l1_block_timestamp: 0, // populated below after block fetch
                 };
 
                 exec_performed_by_tx
@@ -174,6 +175,34 @@ impl L1Watcher {
                     Err(e) => {
                         warn!("Failed to decode ExecutionConsumed: {e}");
                     }
+                }
+            }
+        }
+
+        // Fetch L1 block timestamps for all blocks that have L2ExecutionPerformed events.
+        // The L2 block timestamp must match the L1 block timestamp for deterministic state roots.
+        let unique_blocks: std::collections::HashSet<u64> = exec_performed_by_tx
+            .values()
+            .flat_map(|v| v.iter().map(|e| e.l1_block_number))
+            .collect();
+        let mut block_timestamps: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for block_num in &unique_blocks {
+            match self.client.get_block_by_number(*block_num).await {
+                Ok(block) => {
+                    let ts = parse_u64_hex(block["timestamp"].as_str().unwrap_or("0x0"));
+                    block_timestamps.insert(*block_num, ts);
+                }
+                Err(e) => {
+                    warn!("Failed to fetch L1 block {block_num} for timestamp: {e}");
+                }
+            }
+        }
+
+        // Populate l1_block_timestamp on each L2ExecutionPerformed event
+        for performed_list in exec_performed_by_tx.values_mut() {
+            for event in performed_list.iter_mut() {
+                if let Some(&ts) = block_timestamps.get(&event.l1_block_number) {
+                    event.l1_block_timestamp = ts;
                 }
             }
         }

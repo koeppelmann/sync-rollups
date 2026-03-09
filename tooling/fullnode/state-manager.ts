@@ -5,6 +5,7 @@
  */
 
 import { ChildProcess, spawn, execSync } from "child_process";
+import { createHmac } from "crypto";
 import { JsonRpcProvider, Wallet, Interface, solidityPackedKeccak256 } from "ethers";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
@@ -62,11 +63,18 @@ export class StateManager {
   private engineProcess: ChildProcess | null = null;
   private l2Provider: JsonRpcProvider | null = null;
 
+  // Engine API (auth RPC) for block production
+  private authRpcPort: number = 0;
+  private jwtSecret: string = "";  // hex-encoded JWT secret
+
   // Operator wallet — used to sign system call transactions on the local L2.
   // This is a randomly generated key (NOT a well-known dev account), stored in the
   // data directory. Only this fullnode process knows the key, preventing interference.
   // Since CrossChainManagerL2 has no access control, any address can perform protocol operations.
   private operatorWallet: Wallet | null = null;
+
+  // Tracked operator nonce (avoids stale provider cache between mine cycles)
+  private operatorNonce: number = 0;
 
   // Cached genesis path for reuse in unwindToBlock
   private genesisPath: string | null = null;
@@ -264,7 +272,7 @@ export class StateManager {
       difficulty: "0x0",
       mixHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
       coinbase: "0x0000000000000000000000000000000000000000",
-      baseFeePerGas: "0x0",
+      baseFeePerGas: "0x3B9ACA00",
       number: "0x0",
       gasUsed: "0x0",
       parentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -301,11 +309,13 @@ export class StateManager {
     const p2pPort = 30303 + portOffset;
     const authRpcPort = 8551 + portOffset;
 
+    // Store auth RPC port for engine API calls (block production)
+    this.authRpcPort = authRpcPort;
+
     this.engineProcess = spawn(
       rethBinary,
       [
         "node",
-        "--dev",                        // Auto-mine on each transaction (no empty blocks)
         "--http",
         "--http.port", l2EvmPort.toString(),
         "--http.api", "eth,net,debug,trace,txpool,web3,rpc,reth,miner",
@@ -317,7 +327,7 @@ export class StateManager {
         "--authrpc.port", authRpcPort.toString(), // Unique auth RPC port per instance
         "--txpool.minimal-protocol-fee", "0",   // Allow 0-gas txs for deterministic state
         "--txpool.minimum-priority-fee", "0",   // No minimum tip required
-        "--dev.mnemonic", "test test test test test test test test test test test junk",  // Fixed mnemonic = same coinbase across instances
+        "--txpool.max-account-slots", "256",    // Allow up to 256 pending txs per account (for batch replay)
       ],
       {
         stdio: ["ignore", "ignore", "pipe"],
@@ -374,6 +384,20 @@ export class StateManager {
 
       checkReady();
     });
+
+    // Load JWT secret for engine API authentication
+    const jwtPath = join(dataDir, "reth", "jwt.hex");
+    if (existsSync(jwtPath)) {
+      this.jwtSecret = readFileSync(jwtPath, "utf-8").trim();
+    } else {
+      console.warn(`[StateManager] JWT secret not found at ${jwtPath}, engine API mining unavailable`);
+    }
+
+    // Sync operator nonce from chain state
+    if (this.operatorWallet && this.l2Provider) {
+      const onChainNonce = await this.l2Provider.getTransactionCount(this.operatorWallet.address, "latest");
+      this.operatorNonce = onChainNonce;
+    }
 
     console.log(`[StateManager] reth started on port ${l2EvmPort}`);
   }
@@ -611,6 +635,40 @@ export class StateManager {
   }
 
   /**
+   * Get the operator's genesis balance (constant).
+   */
+  getOperatorGenesisBalance(): bigint {
+    return BigInt(OPERATOR_INITIAL_BALANCE);
+  }
+
+  /**
+   * Check the bridge invariant:
+   *   rollup.etherBalance (L1) + operator.balance (L2) == operator genesis balance
+   *
+   * Every ETH that enters the rollup on L1 (via depositEther / L1→L2 calls) is
+   * disbursed by the operator on L2. The operator's L2 balance decreases by the
+   * same amount the L1 etherBalance increases, so their sum must always equal
+   * the operator's genesis allocation.
+   *
+   * @param l1EtherBalance The rollup's etherBalance from the L1 contract
+   * @returns Object with balances and whether the invariant holds
+   */
+  async checkBridgeInvariant(l1EtherBalance: bigint): Promise<{
+    l1EtherBalance: bigint;
+    operatorL2Balance: bigint;
+    genesisBalance: bigint;
+    holds: boolean;
+  }> {
+    if (!this.l2Provider || !this.operatorWallet) {
+      throw new Error("Engine not started");
+    }
+    const operatorL2Balance = await this.l2Provider.getBalance(this.operatorWallet.address);
+    const genesisBalance = this.getOperatorGenesisBalance();
+    const holds = l1EtherBalance + operatorL2Balance === genesisBalance;
+    return { l1EtherBalance, operatorL2Balance, genesisBalance, holds };
+  }
+
+  /**
    * Update state from L1 event
    */
   updateState(newStateRoot: string, blockNumber: bigint): void {
@@ -778,29 +836,74 @@ export class StateManager {
    * @param value ETH value to send (hex string, default "0x0")
    * @returns The transaction hash
    */
-  async systemCall(to: string, data: string, value: string = "0x0"): Promise<string> {
+  /**
+   * Compute the expected base fee for the next block using the EIP-1559 formula.
+   * This is deterministic: given the same parent block, all fullnodes compute the
+   * same value. Used for system transaction gas pricing.
+   */
+  async getNextBaseFee(): Promise<bigint> {
+    if (!this.l2Provider) {
+      return 1000000000n; // 1 gwei fallback
+    }
+    const block = await this.l2Provider.send("eth_getBlockByNumber", ["latest", false]);
+    const parentBaseFee = BigInt(block.baseFeePerGas || "0x0");
+    const parentGasUsed = BigInt(block.gasUsed || "0x0");
+    const parentGasLimit = BigInt(block.gasLimit || "0x1c9c380");
+    return computeNextBaseFee(parentBaseFee, parentGasUsed, parentGasLimit);
+  }
+
+  /**
+   * Send a system transaction to the txpool WITHOUT mining a block.
+   * Use this for preparation transactions that should share a block with the main tx.
+   * Call mineBlock() afterwards to include all pending txs in one block.
+   */
+  async sendSystemTx(to: string, data: string, value: string = "0x0"): Promise<string> {
     if (!this.operatorWallet) {
       throw new Error("Operator wallet not initialized - call startEngine first");
     }
 
+    const baseFee = await this.getNextBaseFee();
+    const nonce = this.operatorNonce;
     const tx = await this.operatorWallet.sendTransaction({
       to,
       data,
       value: BigInt(value),
-      // Zero gas cost for deterministic execution across fullnode instances.
-      // With baseFeePerGas=0 in genesis (stays 0 forever since 0*anything=0),
-      // using maxFeePerGas=0 means zero gas cost and zero priority fee.
-      // This ensures no miner/coinbase balance entry is created — critical because
-      // reth --dev mode generates a random miner address per instance.
-      // Requires --txpool.minimal-protocol-fee 0 --txpool.minimum-priority-fee 0.
+      nonce,
       gasLimit: 10_000_000n,
-      maxFeePerGas: 0n,
+      maxFeePerGas: baseFee,
+      maxPriorityFeePerGas: 0n,
+      type: 2,
+    });
+    this.operatorNonce++;
+    return tx.hash;
+  }
+
+  async systemCall(
+    to: string,
+    data: string,
+    value: string = "0x0",
+    blockOptions?: { coinbase?: string; timestamp?: number }
+  ): Promise<string> {
+    if (!this.operatorWallet) {
+      throw new Error("Operator wallet not initialized - call startEngine first");
+    }
+
+    const baseFee = await this.getNextBaseFee();
+    const nonce = this.operatorNonce;
+    const tx = await this.operatorWallet.sendTransaction({
+      to,
+      data,
+      value: BigInt(value),
+      nonce,
+      gasLimit: 10_000_000n,
+      maxFeePerGas: baseFee,
       maxPriorityFeePerGas: 0n,
       type: 2,                                // EIP-1559
     });
+    this.operatorNonce++;
 
-    // Wait for the transaction to be mined (reth auto-mines with --dev.block-time)
-    const receipt = await this.waitForReceipt(tx.hash);
+    // Mine a block and wait for the receipt
+    const receipt = await this.waitForReceipt(tx.hash, 10000, blockOptions);
     if (receipt.status === 0) {
       throw new Error(`System call reverted (tx: ${tx.hash})`);
     }
@@ -809,52 +912,45 @@ export class StateManager {
   }
 
   /**
-   * Replay an L2TX via zero-gas operator system call.
-   * Decodes the signed tx and re-sends its effects (to, data, value) from the operator
-   * with zero gas price. This avoids non-determinism from reth's random coinbase.
-   * For contract creates (to=null), sends to address(0) with the creation bytecode as data.
+   * Broadcast a raw signed L2 transaction to reth.
+   * The original signed transaction is sent as-is via eth_sendRawTransaction,
+   * preserving the real sender address. The sender must have sufficient L2
+   * balance (bridged from L1 via depositEther).
    */
-  async replayL2TX(parsedTx: { to: string | null; data: string; value: bigint }): Promise<string> {
-    if (parsedTx.to) {
-      // Regular call
-      return this.systemCall(parsedTx.to, parsedTx.data, "0x" + parsedTx.value.toString(16));
-    } else {
-      // Contract creation — use CREATE2 or just send the initcode via operator
-      // We send a CREATE tx from the operator (to=null)
-      if (!this.operatorWallet) {
-        throw new Error("Operator wallet not initialized");
-      }
-      const tx = await this.operatorWallet.sendTransaction({
-        data: parsedTx.data,
-        value: parsedTx.value,
-        gasLimit: 10_000_000n,
-        maxFeePerGas: 0n,
-        maxPriorityFeePerGas: 0n,
-        type: 2,
-      });
-      const receipt = await this.waitForReceipt(tx.hash);
-      if (receipt.status === 0) {
-        throw new Error(`L2TX CREATE reverted (tx: ${tx.hash})`);
-      }
-      return tx.hash;
+  async broadcastRawTx(
+    rlpEncodedTx: string,
+    blockOptions?: { coinbase?: string; timestamp?: number }
+  ): Promise<string> {
+    const txHash = await this.sendRawTransaction(rlpEncodedTx);
+    const receipt = await this.waitForReceipt(txHash, 10000, blockOptions);
+    if (receipt.status === 0) {
+      throw new Error(`L2TX reverted (tx: ${txHash})`);
     }
+    return txHash;
   }
 
   /**
-   * Wait for a transaction to be mined (reth auto-mines with --dev.block-time)
-   * @param txHash The transaction hash to wait for
-   * @param timeoutMs Maximum time to wait in ms (default 10s)
-   * @returns The transaction receipt
+   * Wait for a transaction to be mined.
+   * Since we don't use --dev auto-mining, this calls mineBlock() to produce a block
+   * via the engine API, then checks for the receipt.
    */
-  async waitForReceipt(txHash: string, timeoutMs: number = 10000): Promise<any> {
+  async waitForReceipt(
+    txHash: string,
+    timeoutMs: number = 10000,
+    blockOptions?: { coinbase?: string; timestamp?: number }
+  ): Promise<any> {
     if (!this.l2Provider) {
       throw new Error("L2 provider not initialized");
     }
+
+    // Mine a block to include the pending transaction
+    await this.mineBlock(blockOptions);
 
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const receipt = await this.l2Provider.getTransactionReceipt(txHash);
       if (receipt) return receipt;
+      // If not yet mined (shouldn't happen since we just mined), wait and retry
       await new Promise(r => setTimeout(r, 200));
     }
     throw new Error(`Transaction ${txHash} not mined within ${timeoutMs}ms`);
@@ -868,7 +964,12 @@ export class StateManager {
    * @param domain The chain ID domain (L1 chain ID)
    * @returns The proxy address on L2
    */
-  async ensureProxyDeployed(originalAddress: string, rollupId: bigint, domain: bigint): Promise<string> {
+  async ensureProxyDeployed(
+    originalAddress: string,
+    rollupId: bigint,
+    domain: bigint,
+    blockOptions?: { coinbase?: string; timestamp?: number }
+  ): Promise<string> {
     if (!this.l2Provider) {
       throw new Error("L2 provider not initialized");
     }
@@ -898,17 +999,30 @@ export class StateManager {
       return proxyAddress; // Already deployed
     }
 
-    // Deploy via system call to CrossChainManagerL2
+    // Deploy via system call to CrossChainManagerL2.
+    // When blockOptions are provided, use sendSystemTx (no mining) so the proxy
+    // deployment shares the same L2 block as the main call (spec rule: preparation
+    // txs at the beginning of the block).
     console.log(`[StateManager] Deploying CrossChainProxy for ${originalAddress} at ${proxyAddress}`);
     const deployCalldata = managerIface.encodeFunctionData("createCrossChainProxy", [
       originalAddress, rollupId
     ]);
-    await this.systemCall(this.config.rollupsAddress, deployCalldata);
 
-    // Verify deployment
-    const codeAfter = await this.l2Provider.send("eth_getCode", [proxyAddress, "latest"]);
-    if (codeAfter === "0x" || codeAfter === "0x0") {
-      throw new Error(`Failed to deploy proxy at ${proxyAddress}`);
+    if (blockOptions) {
+      // Deferred mining: add to txpool, caller will mine later
+      await this.sendSystemTx(this.config.rollupsAddress, deployCalldata);
+      // Can't verify deployment until block is mined — caller must mine first
+    } else {
+      // Immediate mining (builder simulation, no block options)
+      await this.systemCall(this.config.rollupsAddress, deployCalldata);
+    }
+
+    // Verify deployment (only when block was mined immediately)
+    if (!blockOptions) {
+      const codeAfter = await this.l2Provider.send("eth_getCode", [proxyAddress, "latest"]);
+      if (codeAfter === "0x" || codeAfter === "0x0") {
+        throw new Error(`Failed to deploy proxy at ${proxyAddress}`);
+      }
     }
 
     console.log(`[StateManager] CrossChainProxy deployed at ${proxyAddress}`);
@@ -926,6 +1040,113 @@ export class StateManager {
   }
 
   /**
+   * Generate a JWT token for engine API authentication (HS256).
+   */
+  private generateJwt(): string {
+    const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+    const payload = Buffer.from(JSON.stringify({ iat: Math.floor(Date.now() / 1000) })).toString("base64url");
+    const secret = Buffer.from(this.jwtSecret, "hex");
+    const signature = createHmac("sha256", secret)
+      .update(`${header}.${payload}`)
+      .digest("base64url");
+    return `${header}.${payload}.${signature}`;
+  }
+
+  /**
+   * Call the engine API (auth RPC) with JWT authentication.
+   */
+  private async engineApiCall(method: string, params: any[]): Promise<any> {
+    const token = this.generateJwt();
+    const response = await fetch(`http://localhost:${this.authRpcPort}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+    });
+    const result = await response.json() as any;
+    if (result.error) {
+      throw new Error(`Engine API ${method}: ${result.error.message}`);
+    }
+    return result.result;
+  }
+
+  /**
+   * Mine a block using the engine API.
+   *
+   * Without --dev mode, reth doesn't auto-mine. We use the engine API to:
+   * 1. Request a new payload (with suggestedFeeRecipient and timestamp)
+   * 2. Get the built payload (includes pending txpool transactions)
+   * 3. Submit the new payload
+   * 4. Update the fork choice to make it canonical
+   *
+   * Per the state transition spec:
+   * - coinbase = msg.sender of whoever called the L1 function
+   * - timestamp = L1 block timestamp
+   *
+   * @param options.coinbase  The fee recipient / coinbase for this block (default: 0x0...0)
+   * @param options.timestamp The block timestamp in seconds (default: headTimestamp + 1)
+   */
+  async mineBlock(options?: { coinbase?: string; timestamp?: number }): Promise<void> {
+    if (!this.l2Provider) {
+      throw new Error("L2 provider not initialized");
+    }
+
+    // Get the current head block
+    const headBlock = await this.l2Provider.send("eth_getBlockByNumber", ["latest", false]);
+    const headHash = headBlock.hash;
+    const headTimestamp = parseInt(headBlock.timestamp, 16);
+
+    // Use provided timestamp or increment by 1
+    // Ensure timestamp is strictly greater than parent (EVM requirement)
+    let blockTimestamp = options?.timestamp ?? (headTimestamp + 1);
+    if (blockTimestamp <= headTimestamp) {
+      blockTimestamp = headTimestamp + 1;
+    }
+
+    const coinbase = options?.coinbase || "0x0000000000000000000000000000000000000000";
+
+    // Step 1: forkchoiceUpdated with payload attributes to start building a block
+    const payloadAttributes = {
+      timestamp: "0x" + blockTimestamp.toString(16),
+      prevRandao: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      suggestedFeeRecipient: coinbase,
+      withdrawals: [],
+      parentBeaconBlockRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
+    };
+    const fcuResult = await this.engineApiCall("engine_forkchoiceUpdatedV3", [
+      { headBlockHash: headHash, safeBlockHash: headHash, finalizedBlockHash: headHash },
+      payloadAttributes,
+    ]);
+    const payloadId = fcuResult.payloadId;
+    if (!payloadId) {
+      throw new Error("engine_forkchoiceUpdatedV3 did not return payloadId");
+    }
+
+    // Step 2: Get the built payload
+    const payload = await this.engineApiCall("engine_getPayloadV3", [payloadId]);
+    const executionPayload = payload.executionPayload;
+
+    // Step 3: Submit the new payload
+    const newPayloadResult = await this.engineApiCall("engine_newPayloadV3", [
+      executionPayload,
+      [],  // no blob versioned hashes
+      payloadAttributes.parentBeaconBlockRoot,
+    ]);
+    if (newPayloadResult.status !== "VALID") {
+      throw new Error(`engine_newPayloadV3 returned ${newPayloadResult.status}: ${newPayloadResult.validationError}`);
+    }
+
+    // Step 4: Update fork choice to make the new block canonical
+    const newHash = executionPayload.blockHash;
+    await this.engineApiCall("engine_forkchoiceUpdatedV3", [
+      { headBlockHash: newHash, safeBlockHash: newHash, finalizedBlockHash: newHash },
+      null,
+    ]);
+  }
+
+  /**
    * Get transaction receipt
    */
   async getTransactionReceipt(txHash: string): Promise<any> {
@@ -933,5 +1154,35 @@ export class StateManager {
       throw new Error("L2 provider not initialized");
     }
     return await this.l2Provider.getTransactionReceipt(txHash);
+  }
+}
+
+/**
+ * Compute the next block's base fee using the EIP-1559 formula.
+ * This must be identical across all fullnode implementations for determinism.
+ *
+ * Formula (EIP-1559):
+ *   gasTarget = parentGasLimit / 2
+ *   if parentGasUsed == gasTarget:  nextBaseFee = parentBaseFee
+ *   if parentGasUsed > gasTarget:   nextBaseFee = parentBaseFee + max(1, parentBaseFee * (parentGasUsed - gasTarget) / gasTarget / 8)
+ *   if parentGasUsed < gasTarget:   nextBaseFee = parentBaseFee - parentBaseFee * (gasTarget - parentGasUsed) / gasTarget / 8
+ */
+export function computeNextBaseFee(
+  parentBaseFee: bigint,
+  parentGasUsed: bigint,
+  parentGasLimit: bigint,
+): bigint {
+  const gasTarget = parentGasLimit / 2n;
+  if (gasTarget === 0n) return parentBaseFee;
+
+  if (parentGasUsed === gasTarget) {
+    return parentBaseFee;
+  } else if (parentGasUsed > gasTarget) {
+    const delta = parentBaseFee * (parentGasUsed - gasTarget) / gasTarget / 8n;
+    return parentBaseFee + (delta > 0n ? delta : 1n);
+  } else {
+    const delta = parentBaseFee * (gasTarget - parentGasUsed) / gasTarget / 8n;
+    const newBaseFee = parentBaseFee - delta;
+    return newBaseFee > 0n ? newBaseFee : 0n;
   }
 }

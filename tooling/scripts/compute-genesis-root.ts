@@ -145,7 +145,7 @@ async function main() {
     gasLimit: "0x1c9c380", difficulty: "0x0",
     mixHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
     coinbase: "0x0000000000000000000000000000000000000000",
-    baseFeePerGas: "0x0", number: "0x0", gasUsed: "0x0",
+    baseFeePerGas: "0x3B9ACA00", number: "0x0", gasUsed: "0x0",
     parentHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
     alloc,
   };
