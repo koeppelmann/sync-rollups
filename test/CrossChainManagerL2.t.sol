@@ -356,8 +356,7 @@ contract CrossChainManagerL2Test is Test {
         _loadEntry(keccak256(abi.encode(callAction)), _resultAction(returnData));
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        assertEq(decoded, returnData);
+        assertEq(ret, returnData);
     }
 
     function test_ExecuteL2Call_FailedResultReverts() public {
@@ -391,7 +390,7 @@ contract CrossChainManagerL2Test is Test {
         s;
     }
 
-    function test_ExecuteL2Call_ConsumesInLifoOrder() public {
+    function test_ExecuteL2Call_ConsumesInFifoOrder() public {
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.getValue, ());
         Action memory callAction = Action({
@@ -416,12 +415,13 @@ contract CrossChainManagerL2Test is Test {
         entries[1].nextAction = _resultAction(abi.encode(uint256(222)));
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries);
+        // _consumeExecution takes executions[0] (swap-and-pop from front) → FIFO
         (bool s1, bytes memory r1) = proxy.call(callData);
         assertTrue(s1);
-        assertEq(abi.decode(abi.decode(r1, (bytes)), (uint256)), 222);
+        assertEq(abi.decode(r1, (uint256)), 111);
         (bool s2, bytes memory r2) = proxy.call(callData);
         assertTrue(s2);
-        assertEq(abi.decode(abi.decode(r2, (bytes)), (uint256)), 111);
+        assertEq(abi.decode(r2, (uint256)), 222);
         vm.expectRevert(CrossChainManagerL2.ExecutionNotFound.selector);
         (bool s3,) = proxy.call(callData);
         s3;
@@ -838,8 +838,7 @@ contract CrossChainManagerL2Test is Test {
         manager.loadExecutionTable(entries);
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        assertEq(decoded, abi.encode(uint256(777)));
+        assertEq(ret, abi.encode(uint256(777)));
     }
 
     // ── _resolveScopes catch path at root scope ──
@@ -911,8 +910,7 @@ contract CrossChainManagerL2Test is Test {
         manager.loadExecutionTable(entries);
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        assertEq(decoded, abi.encode(uint256(888)));
+        assertEq(ret, abi.encode(uint256(888)));
     }
 
     // ── _handleScopeRevert: InvalidRevertData ──
@@ -1198,12 +1196,13 @@ contract CrossChainManagerL2Test is Test {
         bytes32 resultHash = keccak256(abi.encode(result1));
         StateDelta[] memory emptyDeltas = new StateDelta[](0);
         ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        // _consumeExecution takes [0] first (FIFO), so secondCall must come first
         entries[0].stateDeltas = emptyDeltas;
         entries[0].actionHash = resultHash;
-        entries[0].nextAction = _emptyResult();
+        entries[0].nextAction = secondCall;
         entries[1].stateDeltas = emptyDeltas;
         entries[1].actionHash = resultHash;
-        entries[1].nextAction = secondCall;
+        entries[1].nextAction = _emptyResult();
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries);
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
@@ -1389,8 +1388,7 @@ contract CrossChainManagerL2Test is Test {
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
         assertEq(target.value(), 99);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        uint256 val = abi.decode(decoded, (uint256));
+        uint256 val = abi.decode(ret, (uint256));
         assertEq(val, 99);
     }
 
