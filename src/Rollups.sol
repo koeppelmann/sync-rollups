@@ -16,7 +16,7 @@ struct RollupConfig {
 /// @title Rollups
 /// @notice L1 contract managing rollup state roots, ZK-proven batch posting, and cross-chain call execution
 /// @dev Execution entries are posted via `postBatch()` with a ZK proof. Immediate entries (actionHash == 0)
-///      update state on the spot. Deferred entries are stored in an execution table keyed by action hash.
+///      update state on the spot. Deferred entries are stored in a flat execution table.
 ///      When a CrossChainProxy forwards a call to `executeCrossChainCall()`, the contract reconstructs the
 ///      CALL action, hashes it, looks up a matching execution (whose state deltas match on-chain state),
 ///      applies the deltas, and returns the pre-computed next action. Nested calls are resolved via
@@ -34,8 +34,8 @@ contract Rollups is ICrossChainManager {
     /// @notice Mapping from rollup ID to rollup configuration
     mapping(uint256 rollupId => RollupConfig config) public rollups;
 
-    /// @notice Mapping from action hash to pre-computed executions
-    mapping(bytes32 actionHash => ExecutionEntry[] executions) internal _executions;
+    /// @notice Array of pre-computed executions
+    ExecutionEntry[] public executions;
 
     /// @notice Mapping of authorized CrossChainProxy contracts to their identity
     mapping(address proxy => ProxyInfo info) public authorizedProxies;
@@ -109,6 +109,9 @@ contract Rollups is ICrossChainManager {
     /// @notice Error when a state delta's currentState doesn't match the rollup's current state root
     error StateRootMismatch();
 
+    /// @notice Error when execution is attempted in a different block than the last state update
+    error ExecutionNotInCurrentBlock();
+
     /// @notice Error when a scope reverts, carrying the next action to continue with
     /// @param nextAction The ABI-encoded next action to continue with
     /// @param stateRoot The state root to restore when catching the revert
@@ -179,7 +182,6 @@ contract Rollups is ICrossChainManager {
         }
 
         // --- Build public inputs ---
-
         bytes32[] memory entryHashes = new bytes32[](entries.length);
         for (uint256 i = 0; i < entries.length; i++) {
             // Gather verification keys for each delta's rollup
@@ -215,6 +217,9 @@ contract Rollups is ICrossChainManager {
 
         _verifyProof(proof, publicInputsHash);
 
+        // Delete previous execution table
+        delete executions;
+
         // --- Process entries ---
         for (uint256 i = 0; i < entries.length; i++) {
             if (entries[i].actionHash == bytes32(0)) {
@@ -228,7 +233,7 @@ contract Rollups is ICrossChainManager {
                 _applyStateDeltas(entries[i].stateDeltas);
             } else {
                 // Deferred: store in execution table
-                _executions[entries[i].actionHash].push(entries[i]);
+                executions.push(entries[i]);
             }
         }
 
@@ -256,6 +261,11 @@ contract Rollups is ICrossChainManager {
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
         if (proxyInfo.originalAddress == address(0)) {
             revert UnauthorizedProxy();
+        }
+
+        // Executions can only be consumed in the same block they were posted
+        if (lastStateUpdateBlock != block.number) {
+            revert ExecutionNotInCurrentBlock();
         }
 
         uint256 proxyRollupId = proxyInfo.originalRollupId;
@@ -295,6 +305,11 @@ contract Rollups is ICrossChainManager {
     /// @param rlpEncodedTx The RLP-encoded transaction data
     /// @return result The result data from the execution
     function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes memory result) {
+        // Executions can only be consumed in the same block they were posted
+        if (lastStateUpdateBlock != block.number) {
+            revert ExecutionNotInCurrentBlock();
+        }
+
         // Build the L2TX action
         Action memory action = Action({
             actionType: ActionType.L2TX,
@@ -328,7 +343,7 @@ contract Rollups is ICrossChainManager {
         Action memory action
     ) external returns (Action memory nextAction) {
         // Only Rollups contract (self) or authorized proxies can call
-        if (msg.sender != address(this) && authorizedProxies[msg.sender].originalAddress == address(0)) {
+        if (msg.sender != address(this)) {
             revert UnauthorizedProxy();
         }
 
@@ -372,6 +387,10 @@ contract Rollups is ICrossChainManager {
 
         return nextAction;
     }
+
+    // ──────────────────────────────────────────────
+    //  Internal helpers
+    // ──────────────────────────────────────────────
 
     /// @notice Executes a single CALL at the current scope and returns the next action
     /// @dev Does NOT loop - returns immediately after getting nextAction
@@ -425,20 +444,16 @@ contract Rollups is ICrossChainManager {
         return (currentScope, nextAction);
     }
 
-    // ──────────────────────────────────────────────
-    //  Internal helpers
-    // ──────────────────────────────────────────────
-
     /// @notice Finds a matching execution for the given action hash, applies state deltas, and returns the next action
     /// @dev Matches by checking that all deltas' currentState match their rollup's on-chain stateRoot
     /// @param actionHash The action hash to look up
     /// @return nextAction The next action to perform
     function _findAndApplyExecution(bytes32 actionHash, Action memory action) internal returns (Action memory nextAction) {
-        ExecutionEntry[] storage executions = _executions[actionHash];
+        // Search the flat executions array for a matching entry
+        for (uint256 i = 0; i < executions.length; i++) {
+            ExecutionEntry storage execution = executions[i];
 
-        // Search from the last entry backwards to find matching execution
-        for (uint256 i = executions.length; i > 0; i--) {
-            ExecutionEntry storage execution = executions[i - 1];
+            if (execution.actionHash != actionHash) continue;
 
             // Check if all state deltas match current rollup states
             bool allMatch = true;
@@ -456,10 +471,10 @@ contract Rollups is ICrossChainManager {
                 // Copy nextAction to memory before removing from storage
                 nextAction = execution.nextAction;
 
-                // Remove the execution from storage (swap-and-pop)
+                // Remove the execution from storage (swap-and-pop) TODO check optimal way to do this
                 uint256 lastIndex = executions.length - 1;
-                if (i - 1 != lastIndex) {
-                    executions[i - 1] = executions[lastIndex];
+                if (i != lastIndex) {
+                    executions[i] = executions[lastIndex];
                 }
                 executions.pop();
 

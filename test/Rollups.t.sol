@@ -627,22 +627,6 @@ contract RollupsTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  newScope: RESULT action passes through (line 394-395 break)
-    // ──────────────────────────────────────────────
-
-    function test_NewScope_ResultPassesThrough() public {
-        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
-        address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
-
-        uint256[] memory scope = new uint256[](0);
-        Action memory action = _emptyAction();
-
-        vm.prank(proxyAddr);
-        Action memory result = rollups.newScope(scope, action);
-        assertEq(uint256(result.actionType), uint256(ActionType.RESULT));
-    }
-
-    // ──────────────────────────────────────────────
     //  Scope navigation: CALL at matching scope (lines 375-377)
     //  Covers: _processCallAtScope (409-453), _resolveScopes CALL path (540-543)
     //  _scopesMatch (613-618), _isChildScope (625-630), _appendToScope (600-606)
@@ -2130,16 +2114,16 @@ contract RollupsTest is Test {
         uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
 
-        // Call proxy with no execution loaded -> ExecutionNotFound bubbles through proxy
+        // Call proxy with no execution loaded -> ExecutionNotInCurrentBlock bubbles through proxy
         bytes memory callData = abi.encodeCall(TestTarget.setValue, (1));
         (bool success, bytes memory retData) = proxyAddr.call(callData);
         assertFalse(success);
-        // Verify the revert selector is ExecutionNotFound
+        // Verify the revert selector is ExecutionNotInCurrentBlock
         bytes4 selector;
         assembly {
             selector := mload(add(retData, 32))
         }
-        assertEq(selector, Rollups.ExecutionNotFound.selector);
+        assertEq(selector, Rollups.ExecutionNotInCurrentBlock.selector);
     }
 
     // ──────────────────────────────────────────────
@@ -2152,9 +2136,9 @@ contract RollupsTest is Test {
         CrossChainProxy proxy = CrossChainProxy(payable(proxyAddr));
 
         // Non-manager callers are routed through _fallback() (cross-chain path),
-        // which calls executeCrossChainCall and reverts with ExecutionNotFound
+        // which calls executeCrossChainCall and reverts with ExecutionNotInCurrentBlock
         vm.prank(alice);
-        vm.expectRevert(Rollups.ExecutionNotFound.selector);
+        vm.expectRevert(Rollups.ExecutionNotInCurrentBlock.selector);
         proxy.executeOnBehalf(address(target), abi.encodeCall(TestTarget.setValue, (42)));
     }
 
