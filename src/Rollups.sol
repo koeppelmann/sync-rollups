@@ -16,7 +16,7 @@ struct RollupConfig {
 /// @title Rollups
 /// @notice L1 contract managing rollup state roots, ZK-proven batch posting, and cross-chain call execution
 /// @dev Execution entries are posted via `postBatch()` with a ZK proof. Immediate entries (actionHash == 0)
-///      update state on the spot. Deferred entries are stored in an execution table keyed by action hash.
+///      update state on the spot. Deferred entries are stored in a flat execution table.
 ///      When a CrossChainProxy forwards a call to `executeCrossChainCall()`, the contract reconstructs the
 ///      CALL action, hashes it, looks up a matching execution (whose state deltas match on-chain state),
 ///      applies the deltas, and returns the pre-computed next action. Nested calls are resolved via
@@ -34,8 +34,8 @@ contract Rollups is ICrossChainManager {
     /// @notice Mapping from rollup ID to rollup configuration
     mapping(uint256 rollupId => RollupConfig config) public rollups;
 
-    /// @notice Mapping from action hash to pre-computed executions
-    mapping(bytes32 actionHash => ExecutionEntry[] executions) internal _executions;
+    /// @notice Array of pre-computed executions
+    ExecutionEntry[] public executions;
 
     /// @notice Mapping of authorized CrossChainProxy contracts to their identity
     mapping(address proxy => ProxyInfo info) public authorizedProxies;
@@ -70,6 +70,15 @@ contract Rollups is ICrossChainManager {
     /// @notice Emitted when an execution is found and applied
     event ExecutionConsumed(bytes32 indexed actionHash, Action action);
 
+    /// @notice Emitted when a cross-chain call is executed via proxy
+    event CrossChainCallExecuted(bytes32 indexed actionHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value);
+
+    /// @notice Emitted when a precomputed L2 transaction is executed
+    event L2TXExecuted(bytes32 indexed actionHash, uint256 indexed rollupId, bytes rlpEncodedTx);
+
+    /// @notice Emitted when a batch is posted via postBatch
+    event BatchPosted(ExecutionEntry[] entries, bytes32 publicInputsHash);
+
     /// @notice Error when proof verification fails
     error InvalidProof();
 
@@ -85,9 +94,6 @@ contract Rollups is ICrossChainManager {
     /// @notice Error when state was already updated in this block
     error StateAlreadyUpdatedThisBlock();
 
-    /// @notice Error when the sum of ether increments is not zero
-    error EtherIncrementsSumNotZero();
-
     /// @notice Error when a rollup would have negative ether balance
     error InsufficientRollupBalance();
 
@@ -99,6 +105,12 @@ contract Rollups is ICrossChainManager {
 
     /// @notice Error when the ether delta from state deltas doesn't match actual ETH flow
     error EtherDeltaMismatch();
+
+    /// @notice Error when a state delta's currentState doesn't match the rollup's current state root
+    error StateRootMismatch();
+
+    /// @notice Error when execution is attempted in a different block than the last state update
+    error ExecutionNotInCurrentBlock();
 
     /// @notice Error when a scope reverts, carrying the next action to continue with
     /// @param nextAction The ABI-encoded next action to continue with
@@ -170,7 +182,6 @@ contract Rollups is ICrossChainManager {
         }
 
         // --- Build public inputs ---
-
         bytes32[] memory entryHashes = new bytes32[](entries.length);
         for (uint256 i = 0; i < entries.length; i++) {
             // Gather verification keys for each delta's rollup
@@ -183,8 +194,8 @@ contract Rollups is ICrossChainManager {
                 abi.encodePacked(
                     abi.encode(entries[i].stateDeltas),
                     abi.encode(vks),
-                    entries[i].actionHash, // TODO ?¿
-                    abi.encode(entries[i].nextAction)
+                    entries[i].actionHash,
+                    abi.encode(entries[i].nextAction) // update to flatten actions TODO
                 )
             );
         }
@@ -206,29 +217,27 @@ contract Rollups is ICrossChainManager {
 
         _verifyProof(proof, publicInputsHash);
 
+        // Delete previous execution table
+        delete executions;
+
         // --- Process entries ---
-
-        int256 totalEtherDelta = 0;
-
         for (uint256 i = 0; i < entries.length; i++) {
             if (entries[i].actionHash == bytes32(0)) {
-                // Immediate: apply state deltas now
-                _applyStateDeltas(entries[i].stateDeltas);
-                //TODO check state roots are checked evyerhwer, maybe create another struct to sned just l2 txs
-                // Track ether deltas for conservation check
+                // verify state roots match current state, then apply deltas
                 for (uint256 j = 0; j < entries[i].stateDeltas.length; j++) {
-                    totalEtherDelta += entries[i].stateDeltas[j].etherDelta;
+                    StateDelta memory delta = entries[i].stateDeltas[j];
+                    if (rollups[delta.rollupId].stateRoot != delta.currentState) {
+                        revert StateRootMismatch();
+                    }
                 }
+                _applyStateDeltas(entries[i].stateDeltas);
             } else {
                 // Deferred: store in execution table
-                _executions[entries[i].actionHash].push(entries[i]);
+                executions.push(entries[i]);
             }
         }
 
-        if (totalEtherDelta != 0) {
-            revert EtherIncrementsSumNotZero();
-        }
-
+        emit BatchPosted(entries, publicInputsHash);
         lastStateUpdateBlock = block.number;
     }
 
@@ -254,6 +263,11 @@ contract Rollups is ICrossChainManager {
             revert UnauthorizedProxy();
         }
 
+        // Executions can only be consumed in the same block they were posted
+        if (lastStateUpdateBlock != block.number) {
+            revert ExecutionNotInCurrentBlock();
+        }
+
         uint256 proxyRollupId = proxyInfo.originalRollupId;
         address proxyOriginalAddr = proxyInfo.originalAddress;
 
@@ -276,6 +290,7 @@ contract Rollups is ICrossChainManager {
         });
 
         bytes32 actionHash = keccak256(abi.encode(action));
+        emit CrossChainCallExecuted(actionHash, msg.sender, sourceAddress, callData, msg.value);
         Action memory nextAction = _findAndApplyExecution(actionHash, action);
 
        return _resolveScopes(nextAction);
@@ -290,6 +305,11 @@ contract Rollups is ICrossChainManager {
     /// @param rlpEncodedTx The RLP-encoded transaction data
     /// @return result The result data from the execution
     function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes memory result) {
+        // Executions can only be consumed in the same block they were posted
+        if (lastStateUpdateBlock != block.number) {
+            revert ExecutionNotInCurrentBlock();
+        }
+
         // Build the L2TX action
         Action memory action = Action({
             actionType: ActionType.L2TX,
@@ -304,6 +324,7 @@ contract Rollups is ICrossChainManager {
         });
 
         bytes32 currentActionHash = keccak256(abi.encode(action));
+        emit L2TXExecuted(currentActionHash, rollupId, rlpEncodedTx);
         Action memory nextAction = _findAndApplyExecution(currentActionHash, action);
 
         return _resolveScopes(nextAction);
@@ -322,7 +343,7 @@ contract Rollups is ICrossChainManager {
         Action memory action
     ) external returns (Action memory nextAction) {
         // Only Rollups contract (self) or authorized proxies can call
-        if (msg.sender != address(this) && authorizedProxies[msg.sender].originalAddress == address(0)) {
+        if (msg.sender != address(this)) {
             revert UnauthorizedProxy();
         }
 
@@ -366,6 +387,10 @@ contract Rollups is ICrossChainManager {
 
         return nextAction;
     }
+
+    // ──────────────────────────────────────────────
+    //  Internal helpers
+    // ──────────────────────────────────────────────
 
     /// @notice Executes a single CALL at the current scope and returns the next action
     /// @dev Does NOT loop - returns immediately after getting nextAction
@@ -419,20 +444,16 @@ contract Rollups is ICrossChainManager {
         return (currentScope, nextAction);
     }
 
-    // ──────────────────────────────────────────────
-    //  Internal helpers
-    // ──────────────────────────────────────────────
-
     /// @notice Finds a matching execution for the given action hash, applies state deltas, and returns the next action
     /// @dev Matches by checking that all deltas' currentState match their rollup's on-chain stateRoot
     /// @param actionHash The action hash to look up
     /// @return nextAction The next action to perform
     function _findAndApplyExecution(bytes32 actionHash, Action memory action) internal returns (Action memory nextAction) {
-        ExecutionEntry[] storage executions = _executions[actionHash];
+        // Search the flat executions array for a matching entry
+        for (uint256 i = 0; i < executions.length; i++) {
+            ExecutionEntry storage execution = executions[i];
 
-        // Search from the last entry backwards to find matching execution
-        for (uint256 i = executions.length; i > 0; i--) {
-            ExecutionEntry storage execution = executions[i - 1];
+            if (execution.actionHash != actionHash) continue;
 
             // Check if all state deltas match current rollup states
             bool allMatch = true;
@@ -447,27 +468,13 @@ contract Rollups is ICrossChainManager {
             if (allMatch) {
                 // Found matching execution - apply all state deltas and ether deltas
                 _applyStateDeltas(execution.stateDeltas);
-                
-                // TODO this works but might be cleaner so check both action and next action and proess both value deltas
-                // The problem wiht this is that prover should be aware to substract ether in the delta in the result not in the call (which coudl make sense)
-                int256 executionEtherDelta;
-                // Track ether deltas from state transitions
-                for (uint256 j = 0; j < execution.stateDeltas.length; j++) {
-                    executionEtherDelta += execution.stateDeltas[j].etherDelta;
-                }
-                // Verify ether accounting: state delta ether changes must match actual ETH flow
-                if (executionEtherDelta != _etherDelta) {
-                    revert EtherDeltaMismatch();
-                }
-                _etherDelta = 0;
-
                 // Copy nextAction to memory before removing from storage
                 nextAction = execution.nextAction;
 
-                // Remove the execution from storage (swap-and-pop)
+                // Remove the execution from storage (swap-and-pop) TODO check optimal way to do this
                 uint256 lastIndex = executions.length - 1;
-                if (i - 1 != lastIndex) {
-                    executions[i - 1] = executions[lastIndex];
+                if (i != lastIndex) {
+                    executions[i] = executions[lastIndex];
                 }
                 executions.pop();
 
@@ -479,12 +486,15 @@ contract Rollups is ICrossChainManager {
         revert ExecutionNotFound();
     }
 
-    /// @notice Applies state deltas and ether balance changes (each delta specifies its own rollupId)
+    /// @notice Applies state deltas, ether balance changes, and verifies ether accounting against _etherDelta
     function _applyStateDeltas(StateDelta[] memory deltas) internal {
+        int256 totalEtherDelta;
+
         for (uint256 i = 0; i < deltas.length; i++) {
             StateDelta memory delta = deltas[i];
             RollupConfig storage config = rollups[delta.rollupId];
             config.stateRoot = delta.newState;
+            totalEtherDelta += delta.etherDelta;
 
             if (delta.etherDelta < 0) {
                 uint256 decrement = uint256(-delta.etherDelta);
@@ -498,6 +508,15 @@ contract Rollups is ICrossChainManager {
 
             emit L2ExecutionPerformed(delta.rollupId, delta.currentState, delta.newState);
         }
+
+        // Verify ether accounting: state delta ether changes must match actual ETH flow
+        if (totalEtherDelta != _etherDelta) {
+            revert EtherDeltaMismatch();
+        }
+
+        // reset _etherDelta
+        _etherDelta = 0;
+
     }
 
     /// @notice Handles scope navigation and returns the final RESULT, reverting if execution fails

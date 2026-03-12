@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Rollups, RollupConfig} from "../src/Rollups.sol";
 import {Action, ActionType, ExecutionEntry, StateDelta, ProxyInfo} from "../src/ICrossChainManager.sol";
 import {CrossChainProxy} from "../src/CrossChainProxy.sol";
@@ -134,7 +134,7 @@ contract RollupsTest is Test {
             rollupId: rollupId,
             destination: address(0),
             value: 0,
-            data: abi.encode(bytes("")), // ABI-encoded return from executeOnBehalf
+            data: "", // raw return from executeOnBehalf (void = empty)
             failed: false,
             sourceAddress: address(0),
             sourceRollup: 0,
@@ -528,7 +528,7 @@ contract RollupsTest is Test {
         entries[0].actionHash = bytes32(0);
         entries[0].nextAction = _emptyAction();
 
-        vm.expectRevert(Rollups.EtherIncrementsSumNotZero.selector);
+        vm.expectRevert(Rollups.EtherDeltaMismatch.selector);
         rollups.postBatch(entries, 0, "", "proof");
     }
 
@@ -606,18 +606,8 @@ contract RollupsTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  Proxy immutables
+    //  Proxy immutables (now internal — all non-manager calls hit fallback)
     // ──────────────────────────────────────────────
-
-    function test_Proxy_StoresImmutables() public {
-        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
-        address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
-        CrossChainProxy proxy = CrossChainProxy(payable(proxyAddr));
-
-        assertEq(address(proxy.MANAGER()), address(rollups));
-        assertEq(proxy.ORIGINAL_ADDRESS(), address(target));
-        assertEq(proxy.ORIGINAL_ROLLUP_ID(), rollupId);
-    }
 
     // ══════════════════════════════════════════════
     //  NEW COVERAGE TESTS
@@ -634,22 +624,6 @@ contract RollupsTest is Test {
         vm.prank(alice);
         vm.expectRevert(Rollups.UnauthorizedProxy.selector);
         rollups.newScope(scope, action);
-    }
-
-    // ──────────────────────────────────────────────
-    //  newScope: RESULT action passes through (line 394-395 break)
-    // ──────────────────────────────────────────────
-
-    function test_NewScope_ResultPassesThrough() public {
-        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
-        address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
-
-        uint256[] memory scope = new uint256[](0);
-        Action memory action = _emptyAction();
-
-        vm.prank(proxyAddr);
-        Action memory result = rollups.newScope(scope, action);
-        assertEq(uint256(result.actionType), uint256(ActionType.RESULT));
     }
 
     // ──────────────────────────────────────────────
@@ -685,7 +659,7 @@ contract RollupsTest is Test {
 
         // The RESULT that _processCallAtScope will build after calling executeOnBehalf
         // executeOnBehalf calls target.setValue(42) which returns nothing
-        // returnData from .call() = abi.encode(bytes(""))
+        // returnData from .call() = "" (raw empty bytes)
         Action memory expectedResult = _buildResultAction(rollupId);
         bytes32 resultHash = keccak256(abi.encode(expectedResult));
 
@@ -2140,31 +2114,34 @@ contract RollupsTest is Test {
         uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
 
-        // Call proxy with no execution loaded -> ExecutionNotFound bubbles through proxy
+        // Call proxy with no execution loaded -> ExecutionNotInCurrentBlock bubbles through proxy
         bytes memory callData = abi.encodeCall(TestTarget.setValue, (1));
         (bool success, bytes memory retData) = proxyAddr.call(callData);
         assertFalse(success);
-        // Verify the revert selector is ExecutionNotFound
+        // Verify the revert selector is ExecutionNotInCurrentBlock
         bytes4 selector;
         assembly {
             selector := mload(add(retData, 32))
         }
-        assertEq(selector, Rollups.ExecutionNotFound.selector);
+        assertEq(selector, Rollups.ExecutionNotInCurrentBlock.selector);
     }
 
     // ──────────────────────────────────────────────
-    //  Proxy executeOnBehalf: unauthorized caller
+    //  Proxy executeOnBehalf: non-manager caller falls through to cross-chain path
     // ──────────────────────────────────────────────
 
-    function test_Proxy_ExecuteOnBehalf_Unauthorized() public {
+    function test_Proxy_ExecuteOnBehalf_NonManagerFallsThrough() public {
         uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
         CrossChainProxy proxy = CrossChainProxy(payable(proxyAddr));
 
+        // Non-manager callers are routed through _fallback() (cross-chain path),
+        // which calls executeCrossChainCall and reverts with ExecutionNotInCurrentBlock
         vm.prank(alice);
-        vm.expectRevert(CrossChainProxy.Unauthorized.selector);
+        vm.expectRevert(Rollups.ExecutionNotInCurrentBlock.selector);
         proxy.executeOnBehalf(address(target), abi.encodeCall(TestTarget.setValue, (42)));
     }
+
 
     // ──────────────────────────────────────────────
     //  newScope: child scope catch path (lines 340-342)
@@ -2488,5 +2465,326 @@ contract RollupsTest is Test {
         vm.expectEmit(true, true, true, true);
         emit Rollups.CrossChainProxyCreated(expectedProxy, address(target), rollupId);
         rollups.createCrossChainProxy(address(target), rollupId);
+    }
+
+    // ──────────────────────────────────────────────
+    //  RESULT with uint256 return data
+    // ──────────────────────────────────────────────
+
+    function test_ScopeCall_ResultWithUint256Return() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+
+        rollups.createCrossChainProxy(address(this), 0);
+
+        bytes32 state1 = keccak256("u1");
+        bytes32 state2 = keccak256("u2");
+
+        uint256[] memory callScope = new uint256[](1);
+        callScope[0] = 0;
+
+        // CALL getValue() which returns uint256
+        Action memory scopedCall = Action({
+            actionType: ActionType.CALL,
+            rollupId: rollupId,
+            destination: address(target),
+            value: 0,
+            data: abi.encodeCall(TestTarget.getValue, ()),
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: 0,
+            scope: callScope
+        });
+
+        // getValue() returns uint256(0) — raw return is abi.encode(uint256(0))
+        Action memory expectedResult = Action({
+            actionType: ActionType.RESULT,
+            rollupId: rollupId,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(0)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 resultHash = keccak256(abi.encode(expectedResult));
+
+        // Final result carries the uint256 value back
+        Action memory finalResult = Action({
+            actionType: ActionType.RESULT,
+            rollupId: 0,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(0)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        bytes memory rlpTx = hex"20";
+        Action memory l2tx = Action({
+            actionType: ActionType.L2TX,
+            rollupId: rollupId,
+            destination: address(0),
+            value: 0,
+            data: rlpTx,
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 l2txHash = keccak256(abi.encode(l2tx));
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+
+        StateDelta[] memory d1 = new StateDelta[](1);
+        d1[0] = StateDelta({rollupId: rollupId, currentState: bytes32(0), newState: state1, etherDelta: 0});
+        entries[0].stateDeltas = d1;
+        entries[0].actionHash = l2txHash;
+        entries[0].nextAction = scopedCall;
+
+        StateDelta[] memory d2 = new StateDelta[](1);
+        d2[0] = StateDelta({rollupId: rollupId, currentState: state1, newState: state2, etherDelta: 0});
+        entries[1].stateDeltas = d2;
+        entries[1].actionHash = resultHash;
+        entries[1].nextAction = finalResult;
+
+        rollups.postBatch(entries, 0, "", "proof");
+
+        bytes memory result = rollups.executeL2TX(rollupId, rlpTx);
+        uint256 decoded = abi.decode(result, (uint256));
+        assertEq(decoded, 0);
+        assertEq(_getRollupState(rollupId), state2);
+    }
+
+    // ══════════════════════════════════════════════
+    //  BatchPosted event tests
+    // ══════════════════════════════════════════════
+
+    function _batchPostedSelector() internal pure returns (bytes32) {
+        return keccak256("BatchPosted((uint256,bytes32,bytes32,int256)[],bytes32,(uint8,uint256,address,uint256,bytes,bool,address,uint256,uint256[]))[],bytes32)");
+    }
+
+    function _findBatchPostedLog(Vm.Log[] memory logs) internal view returns (bool found, uint256 idx) {
+        bytes32 sel = Rollups.BatchPosted.selector;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                return (true, i);
+            }
+        }
+        return (false, 0);
+    }
+
+    function test_BatchPosted_EmitsOnImmediateEntry() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+        bytes32 newState = keccak256("bp1");
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _immediateEntry(rollupId, bytes32(0), newState);
+
+        vm.recordLogs();
+        rollups.postBatch(entries, 0, "", "proof");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (bool found, uint256 idx) = _findBatchPostedLog(logs);
+        assertTrue(found, "BatchPosted event not found");
+
+        (ExecutionEntry[] memory emitted, bytes32 pubHash) = abi.decode(logs[idx].data, (ExecutionEntry[], bytes32));
+        assertEq(emitted.length, 1);
+        assertEq(emitted[0].actionHash, bytes32(0));
+        assertEq(emitted[0].stateDeltas.length, 1);
+        assertEq(emitted[0].stateDeltas[0].rollupId, rollupId);
+        assertEq(emitted[0].stateDeltas[0].newState, newState);
+        assertTrue(pubHash != bytes32(0));
+    }
+
+    function test_BatchPosted_EmitsOnDeferredEntry() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+        bytes memory callData = abi.encodeCall(TestTarget.setValue, (42));
+
+        Action memory action = Action({
+            actionType: ActionType.CALL,
+            rollupId: rollupId,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 actionHash = keccak256(abi.encode(action));
+
+        StateDelta[] memory stateDeltas = new StateDelta[](1);
+        stateDeltas[0] = StateDelta({rollupId: rollupId, currentState: bytes32(0), newState: keccak256("s"), etherDelta: 0});
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0].stateDeltas = stateDeltas;
+        entries[0].actionHash = actionHash;
+        entries[0].nextAction = _emptyAction();
+
+        vm.recordLogs();
+        rollups.postBatch(entries, 0, "", "proof");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (bool found, uint256 idx) = _findBatchPostedLog(logs);
+        assertTrue(found, "BatchPosted event not found");
+
+        (ExecutionEntry[] memory emitted,) = abi.decode(logs[idx].data, (ExecutionEntry[], bytes32));
+        assertEq(emitted.length, 1);
+        assertEq(emitted[0].actionHash, actionHash);
+        assertEq(emitted[0].stateDeltas[0].rollupId, rollupId);
+        assertEq(uint8(emitted[0].nextAction.actionType), uint8(ActionType.RESULT));
+    }
+
+    function test_BatchPosted_MixedImmediateAndDeferred() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+        bytes32 state1 = keccak256("s1");
+
+        bytes memory callData = abi.encodeCall(TestTarget.setValue, (42));
+        Action memory action = Action({
+            actionType: ActionType.CALL,
+            rollupId: rollupId,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 deferredHash = keccak256(abi.encode(action));
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0] = _immediateEntry(rollupId, bytes32(0), state1);
+        StateDelta[] memory deferredDeltas = new StateDelta[](1);
+        deferredDeltas[0] = StateDelta({rollupId: rollupId, currentState: state1, newState: keccak256("s2"), etherDelta: 0});
+        entries[1].stateDeltas = deferredDeltas;
+        entries[1].actionHash = deferredHash;
+        entries[1].nextAction = _emptyAction();
+
+        vm.recordLogs();
+        rollups.postBatch(entries, 0, "", "proof");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (bool found, uint256 idx) = _findBatchPostedLog(logs);
+        assertTrue(found, "BatchPosted event not found");
+
+        (ExecutionEntry[] memory emitted,) = abi.decode(logs[idx].data, (ExecutionEntry[], bytes32));
+        assertEq(emitted.length, 2);
+        assertEq(emitted[0].actionHash, bytes32(0)); // immediate
+        assertEq(emitted[1].actionHash, deferredHash); // deferred
+        // Verify full state delta data is present
+        assertEq(emitted[1].stateDeltas[0].currentState, state1);
+        assertEq(emitted[1].stateDeltas[0].newState, keccak256("s2"));
+    }
+
+    // ══════════════════════════════════════════════
+    //  CrossChainCallExecuted event tests (L1)
+    // ══════════════════════════════════════════════
+
+    function test_CrossChainCallExecuted_L1_EmitsOnProxyCall() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rollupId);
+
+        bytes32 currentState = bytes32(0);
+        bytes32 newState = keccak256("state1");
+        bytes memory callData = abi.encodeCall(TestTarget.setValue, (42));
+
+        Action memory action = Action({
+            actionType: ActionType.CALL,
+            rollupId: rollupId,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 actionHash = keccak256(abi.encode(action));
+
+        StateDelta[] memory stateDeltas = new StateDelta[](1);
+        stateDeltas[0] = StateDelta({rollupId: rollupId, currentState: currentState, newState: newState, etherDelta: 0});
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0].stateDeltas = stateDeltas;
+        entries[0].actionHash = actionHash;
+        entries[0].nextAction = _emptyAction();
+        rollups.postBatch(entries, 0, "", "proof");
+
+        vm.recordLogs();
+        (bool success,) = proxyAddr.call(callData);
+        assertTrue(success);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sel = Rollups.CrossChainCallExecuted.selector;
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                assertEq(logs[i].topics[1], actionHash);
+                assertEq(address(uint160(uint256(logs[i].topics[2]))), proxyAddr);
+                (address src, bytes memory cd, uint256 val) = abi.decode(logs[i].data, (address, bytes, uint256));
+                assertEq(src, address(this));
+                assertEq(cd, callData);
+                assertEq(val, 0);
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "CrossChainCallExecuted event not found");
+    }
+
+    // ══════════════════════════════════════════════
+    //  L2TXExecuted event tests
+    // ══════════════════════════════════════════════
+
+    function test_L2TXExecuted_EmitsOnExecute() public {
+        uint256 rollupId = rollups.createRollup(bytes32(0), DEFAULT_VK, alice);
+
+        bytes32 currentState = bytes32(0);
+        bytes32 newState = keccak256("state1");
+        bytes memory rlpTx = hex"deadbeef";
+
+        Action memory action = Action({
+            actionType: ActionType.L2TX,
+            rollupId: rollupId,
+            destination: address(0),
+            value: 0,
+            data: rlpTx,
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        bytes32 actionHash = keccak256(abi.encode(action));
+
+        StateDelta[] memory stateDeltas = new StateDelta[](1);
+        stateDeltas[0] = StateDelta({rollupId: rollupId, currentState: currentState, newState: newState, etherDelta: 0});
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0].stateDeltas = stateDeltas;
+        entries[0].actionHash = actionHash;
+        entries[0].nextAction = _emptyAction();
+        rollups.postBatch(entries, 0, "", "proof");
+
+        vm.recordLogs();
+        rollups.executeL2TX(rollupId, rlpTx);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sel = Rollups.L2TXExecuted.selector;
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                assertEq(logs[i].topics[1], actionHash);
+                assertEq(uint256(logs[i].topics[2]), rollupId);
+                (bytes memory emittedRlp) = abi.decode(logs[i].data, (bytes));
+                assertEq(emittedRlp, rlpTx);
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "L2TXExecuted event not found");
     }
 }

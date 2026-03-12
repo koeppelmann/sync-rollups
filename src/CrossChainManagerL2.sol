@@ -43,8 +43,23 @@ contract CrossChainManagerL2 is ICrossChainManager {
     /// @notice Error when revert data from a child scope is too short to decode
     error InvalidRevertData();
 
+    /// @notice Error when ETH transfer to system address fails
+    error EtherTransferFailed();
+
     /// @notice Emitted when a new CrossChainProxy is deployed and registered
     event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId);
+
+    /// @notice Emitted when execution entries are loaded into the execution table
+    event ExecutionTableLoaded(ExecutionEntry[] entries);
+
+    /// @notice Emitted when an execution entry is consumed from the execution table
+    event ExecutionConsumed(bytes32 indexed actionHash, Action action);
+
+    /// @notice Emitted when a cross-chain call is executed via proxy
+    event CrossChainCallExecuted(bytes32 indexed actionHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value);
+
+    /// @notice Emitted when an incoming cross-chain call is executed via system address
+    event IncomingCrossChainCallExecuted(bytes32 indexed actionHash, address destination, uint256 value, bytes data, address sourceAddress, uint256 sourceRollup, uint256[] scope);
 
     /// @param _rollupId The rollup ID this L2 instance belongs to
     /// @param _systemAddress The privileged address allowed to load execution tables and call executeIncomingCrossChainCall
@@ -69,6 +84,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
             _executions[entries[i].actionHash].push(entries[i]);
         }
         pendingEntryCount += entries.length;
+        emit ExecutionTableLoaded(entries);
     }
 
     // ──────────────────────────────────────────────
@@ -94,9 +110,16 @@ contract CrossChainManagerL2 is ICrossChainManager {
             sourceRollup: ROLLUP_ID,
             scope: new uint256[](0)
         });
+        
+        // burn ether — return to system address
+        if (msg.value > 0) {
+            (bool success,) = SYSTEM_ADDRESS.call{value: msg.value}("");
+            if (!success) revert EtherTransferFailed();
+        }
 
         bytes32 actionHash = keccak256(abi.encode(action));
-        Action memory nextAction = _consumeExecution(actionHash);
+        emit CrossChainCallExecuted(actionHash, msg.sender, sourceAddress, callData, msg.value);
+        Action memory nextAction = _consumeExecution(actionHash, action);
         return _resolveScopes(nextAction);
     }
 
@@ -116,7 +139,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         address sourceAddress,
         uint256 sourceRollup,
         uint256[] calldata scope
-    ) external onlySystemAddress returns (bytes memory result) {
+    ) external payable onlySystemAddress returns (bytes memory result) {
         Action memory action = Action({
             actionType: ActionType.CALL,
             rollupId: ROLLUP_ID,
@@ -129,18 +152,10 @@ contract CrossChainManagerL2 is ICrossChainManager {
             scope: scope
         });
 
-        uint256[] memory emptyScope = new uint256[](0);
-        Action memory nextAction;
-        try this.newScope(emptyScope, action) returns (Action memory retAction) {
-            nextAction = retAction;
-        } catch (bytes memory revertData) {
-            nextAction = _handleScopeRevert(revertData);
-        }
+        bytes32 actionHash = keccak256(abi.encode(action));
+        emit IncomingCrossChainCallExecuted(actionHash, destination, value, data, sourceAddress, sourceRollup, scope);
 
-        if (nextAction.actionType != ActionType.RESULT || nextAction.failed) {
-            revert CallExecutionFailed();
-        }
-        return nextAction.data;
+        return _resolveScopes(action);
     }
 
     // ──────────────────────────────────────────────
@@ -223,15 +238,18 @@ contract CrossChainManagerL2 is ICrossChainManager {
     }
 
     /// @notice Consumes the last execution entry for the given action hash
-    function _consumeExecution(bytes32 actionHash) internal returns (Action memory nextAction) {
+    function _consumeExecution(bytes32 actionHash, Action memory action) internal returns (Action memory nextAction) {
         ExecutionEntry[] storage executions = _executions[actionHash];
         if (executions.length == 0) revert ExecutionNotFound();
 
-        uint256 lastIndex = executions.length - 1;
-        nextAction = executions[lastIndex].nextAction;
+        // Save the next action before removing the entry
+        nextAction = executions[0].nextAction;
+        // Swap-and-pop: move the last entry into the consumed slot, then remove the last element
+        executions[0] = executions[executions.length - 1];
         executions.pop();
         pendingEntryCount--;
 
+        emit ExecutionConsumed(actionHash, action);
         return nextAction;
     }
 
@@ -292,7 +310,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         });
 
         bytes32 resultHash = keccak256(abi.encode(resultAction));
-        nextAction = _consumeExecution(resultHash);
+        nextAction = _consumeExecution(resultHash, resultAction);
 
         return (currentScope, nextAction);
     }
@@ -331,7 +349,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         });
 
         bytes32 revertHash = keccak256(abi.encode(revertContinueAction));
-        return _consumeExecution(revertHash);
+        return _consumeExecution(revertHash, revertContinueAction);
     }
 
     /// @notice Appends an element to a scope array, creating a new child scope level

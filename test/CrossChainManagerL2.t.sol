@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {CrossChainManagerL2} from "../src/CrossChainManagerL2.sol";
 import {CrossChainProxy} from "../src/CrossChainProxy.sol";
 import {Action, ActionType, ExecutionEntry, StateDelta, ProxyInfo} from "../src/ICrossChainManager.sol";
@@ -356,8 +356,7 @@ contract CrossChainManagerL2Test is Test {
         _loadEntry(keccak256(abi.encode(callAction)), _resultAction(returnData));
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        assertEq(decoded, returnData);
+        assertEq(ret, returnData);
     }
 
     function test_ExecuteL2Call_FailedResultReverts() public {
@@ -391,7 +390,7 @@ contract CrossChainManagerL2Test is Test {
         s;
     }
 
-    function test_ExecuteL2Call_ConsumesInLifoOrder() public {
+    function test_ExecuteL2Call_ConsumesInFifoOrder() public {
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.getValue, ());
         Action memory callAction = Action({
@@ -416,12 +415,13 @@ contract CrossChainManagerL2Test is Test {
         entries[1].nextAction = _resultAction(abi.encode(uint256(222)));
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries);
+        // _consumeExecution takes executions[0] (swap-and-pop from front) → FIFO
         (bool s1, bytes memory r1) = proxy.call(callData);
         assertTrue(s1);
-        assertEq(abi.decode(abi.decode(r1, (bytes)), (uint256)), 222);
+        assertEq(abi.decode(r1, (uint256)), 111);
         (bool s2, bytes memory r2) = proxy.call(callData);
         assertTrue(s2);
-        assertEq(abi.decode(abi.decode(r2, (bytes)), (uint256)), 111);
+        assertEq(abi.decode(r2, (uint256)), 222);
         vm.expectRevert(CrossChainManagerL2.ExecutionNotFound.selector);
         (bool s3,) = proxy.call(callData);
         s3;
@@ -471,7 +471,7 @@ contract CrossChainManagerL2Test is Test {
         uint256 sourceRollup = 1;
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (77));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -494,7 +494,7 @@ contract CrossChainManagerL2Test is Test {
         uint256 sourceRollup = 1;
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (55));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -517,7 +517,7 @@ contract CrossChainManagerL2Test is Test {
         uint256 sourceRollup = 7;
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (33));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -544,7 +544,7 @@ contract CrossChainManagerL2Test is Test {
         uint256 sourceRollup = 1;
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (77));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -578,7 +578,7 @@ contract CrossChainManagerL2Test is Test {
         uint256 sourceRollup = 1;
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (77));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -637,7 +637,7 @@ contract CrossChainManagerL2Test is Test {
             sourceRollup: nestedSourceRollup,
             scope: new uint256[](0)
         });
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromNestedCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -694,7 +694,7 @@ contract CrossChainManagerL2Test is Test {
         childScope[0] = 0;
         Action memory callAtChildScope =
             _makeCallAction(TEST_ROLLUP_ID, address(target), 0, callData, sourceAddr, sourceRollup, childScope);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromChildCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -807,7 +807,7 @@ contract CrossChainManagerL2Test is Test {
         Action memory callAtChildScope = _makeCallAction(
             TEST_ROLLUP_ID, address(target), 0, nestedCallData, nestedSource, nestedSourceRollup, childScope
         );
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromChildCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -838,8 +838,7 @@ contract CrossChainManagerL2Test is Test {
         manager.loadExecutionTable(entries);
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        assertEq(decoded, abi.encode(uint256(777)));
+        assertEq(ret, abi.encode(uint256(777)));
     }
 
     // ── _resolveScopes catch path at root scope ──
@@ -873,7 +872,7 @@ contract CrossChainManagerL2Test is Test {
             TEST_ROLLUP_ID, address(target), 0, nestedData, nestedSource, nestedRollup, new uint256[](0)
         );
         // After executing the nested call, the result is consumed.
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromNested = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -911,8 +910,7 @@ contract CrossChainManagerL2Test is Test {
         manager.loadExecutionTable(entries);
         (bool success, bytes memory ret) = proxy.call(callData);
         assertTrue(success);
-        bytes memory decoded = abi.decode(ret, (bytes));
-        assertEq(decoded, abi.encode(uint256(888)));
+        assertEq(ret, abi.encode(uint256(888)));
     }
 
     // ── _handleScopeRevert: InvalidRevertData ──
@@ -937,12 +935,10 @@ contract CrossChainManagerL2Test is Test {
         uint256[] memory scope = new uint256[](0);
         uint256 ethValue = 1 ether;
         vm.deal(address(manager), 10 ether);
-        // executeOnBehalf returns abi.encode(bytes("")) for a call with no return data
-        // But with empty calldata + value, it calls receive() which returns nothing.
-        // The low-level .call returns (true, ""). executeOnBehalf returns bytes("").
-        // Then the outer .call to sourceProxy.call{value}(executeOnBehalf) returns
-        // abi.encode(bytes("")) as returnData.
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        // executeOnBehalf returns raw bytes from the destination call.
+        // With empty calldata + value, it calls receive() which returns nothing.
+        // The raw return is empty bytes.
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -968,7 +964,7 @@ contract CrossChainManagerL2Test is Test {
         manager.createCrossChainProxy(sourceAddr, sourceRollup);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (88));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1018,7 +1014,7 @@ contract CrossChainManagerL2Test is Test {
         uint256 sourceRollup = 1;
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (77));
         uint256[] memory scope = new uint256[](0);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1118,7 +1114,7 @@ contract CrossChainManagerL2Test is Test {
         deepScope[1] = 1;
         Action memory callAtDeepScope =
             _makeCallAction(TEST_ROLLUP_ID, address(target), 0, callData, sourceAddr, sourceRollup, deepScope);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1151,7 +1147,7 @@ contract CrossChainManagerL2Test is Test {
         deepScope[1] = 0;
         Action memory callAtDeepScope =
             _makeCallAction(TEST_ROLLUP_ID, address(target), 0, callData, sourceAddr, sourceRollup, deepScope);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1185,7 +1181,7 @@ contract CrossChainManagerL2Test is Test {
             _makeCallAction(TEST_ROLLUP_ID, address(target), 0, callData1, sourceAddr1, sourceRollup1, emptyScope);
         Action memory secondCall =
             _makeCallAction(TEST_ROLLUP_ID, address(target), 0, callData2, sourceAddr2, sourceRollup2, emptyScope);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory result1 = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1200,12 +1196,13 @@ contract CrossChainManagerL2Test is Test {
         bytes32 resultHash = keccak256(abi.encode(result1));
         StateDelta[] memory emptyDeltas = new StateDelta[](0);
         ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        // _consumeExecution takes [0] first (FIFO), so secondCall must come first
         entries[0].stateDeltas = emptyDeltas;
         entries[0].actionHash = resultHash;
-        entries[0].nextAction = _emptyResult();
+        entries[0].nextAction = secondCall;
         entries[1].stateDeltas = emptyDeltas;
         entries[1].actionHash = resultHash;
-        entries[1].nextAction = secondCall;
+        entries[1].nextAction = _emptyResult();
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries);
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
@@ -1223,7 +1220,7 @@ contract CrossChainManagerL2Test is Test {
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (44));
         uint256[] memory scope = new uint256[](1);
         scope[0] = 0;
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1251,7 +1248,7 @@ contract CrossChainManagerL2Test is Test {
         childScope[0] = 0;
         Action memory callAtChildScope =
             _makeCallAction(TEST_ROLLUP_ID, address(target), 0, callData, sourceAddr, sourceRollup, childScope);
-        bytes memory expectedReturnData = abi.encode(bytes(""));
+        bytes memory expectedReturnData = "";
         Action memory resultFromCall = Action({
             actionType: ActionType.RESULT,
             rollupId: TEST_ROLLUP_ID,
@@ -1286,19 +1283,361 @@ contract CrossChainManagerL2Test is Test {
 
     // ── CrossChainProxy direct tests ──
 
-    function test_Proxy_StoresImmutables() public {
+    // test_Proxy_StoresImmutables removed — immutables are now internal,
+    // so getter calls hit fallback (transparent proxy behavior).
+
+    function test_Proxy_ExecuteOnBehalf_NonManagerFallsThrough() public {
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
         CrossChainProxy p = CrossChainProxy(payable(proxy));
-        assertEq(address(p.MANAGER()), address(manager));
-        assertEq(p.ORIGINAL_ADDRESS(), address(target));
-        assertEq(p.ORIGINAL_ROLLUP_ID(), TEST_ROLLUP_ID);
+        // Non-manager callers are routed through _fallback() (cross-chain path),
+        // which calls executeCrossChainCall and reverts with ExecutionNotFound
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(CrossChainManagerL2.ExecutionNotFound.selector);
+        p.executeOnBehalf(address(target), abi.encodeCall(L2TestTarget.setValue, (42)));
     }
 
-    function test_Proxy_ExecuteOnBehalf_RevertsIfNotManager() public {
+    // ── RESULT with uint256 return data ──
+
+    function test_ExecuteIncomingCrossChainCall_ResultWithUint256() public {
+        address sourceAddr = address(0xBEEF);
+        uint256 sourceRollup = 1;
+        // setAndReturn(42) returns uint256(42)
+        bytes memory callData = abi.encodeCall(L2TestTarget.setAndReturn, (42));
+        uint256[] memory scope = new uint256[](0);
+
+        // After executeOnBehalf, raw return = abi.encode(uint256(42))
+        Action memory resultFromCall = Action({
+            actionType: ActionType.RESULT,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(42)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        // Final result also carries the uint256
+        Action memory finalResult = _resultAction(abi.encode(uint256(42)));
+        _loadEntry(keccak256(abi.encode(resultFromCall)), finalResult);
+
+        vm.prank(SYSTEM_ADDRESS);
+        bytes memory result =
+            manager.executeIncomingCrossChainCall(address(target), 0, callData, sourceAddr, sourceRollup, scope);
+
+        assertEq(target.value(), 42);
+        uint256 decoded = abi.decode(result, (uint256));
+        assertEq(decoded, 42);
+    }
+
+    function test_ExecuteCrossChainCall_ResultWithUint256() public {
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
-        CrossChainProxy p = CrossChainProxy(payable(proxy));
-        vm.prank(address(0xDEAD));
-        vm.expectRevert(CrossChainProxy.Unauthorized.selector);
-        p.executeOnBehalf(address(target), abi.encodeCall(L2TestTarget.setValue, (42)));
+        bytes memory callData = abi.encodeCall(L2TestTarget.setAndReturn, (99));
+
+        Action memory callAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // After executeOnBehalf calls setAndReturn(99), raw return = abi.encode(uint256(99))
+        Action memory nestedCall = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        Action memory resultFromCall = Action({
+            actionType: ActionType.RESULT,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(uint256(99)),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        Action memory finalResult = _resultAction(abi.encode(uint256(99)));
+
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = emptyDeltas;
+        entries[0].actionHash = keccak256(abi.encode(callAction));
+        entries[0].nextAction = nestedCall;
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = keccak256(abi.encode(resultFromCall));
+        entries[1].nextAction = finalResult;
+        vm.prank(SYSTEM_ADDRESS);
+        manager.loadExecutionTable(entries);
+
+        (bool success, bytes memory ret) = proxy.call(callData);
+        assertTrue(success);
+        assertEq(target.value(), 99);
+        uint256 val = abi.decode(ret, (uint256));
+        assertEq(val, 99);
+    }
+
+    // ══════════════════════════════════════════════
+    //  Event tests
+    // ══════════════════════════════════════════════
+
+    // ── ExecutionTableLoaded ──
+
+    function _findExecutionTableLoadedLog(Vm.Log[] memory logs) internal view returns (bool found, uint256 idx) {
+        bytes32 sel = CrossChainManagerL2.ExecutionTableLoaded.selector;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                return (true, i);
+            }
+        }
+        return (false, 0);
+    }
+
+    function test_ExecutionTableLoaded_EmitsOnLoad() public {
+        bytes32 hash1 = bytes32(uint256(1));
+        bytes32 hash2 = bytes32(uint256(2));
+
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = emptyDeltas;
+        entries[0].actionHash = hash1;
+        entries[0].nextAction = _emptyResult();
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = hash2;
+        entries[1].nextAction = _emptyResult();
+
+        vm.recordLogs();
+        vm.prank(SYSTEM_ADDRESS);
+        manager.loadExecutionTable(entries);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (bool found, uint256 idx) = _findExecutionTableLoadedLog(logs);
+        assertTrue(found, "ExecutionTableLoaded event not found");
+
+        (ExecutionEntry[] memory emitted) = abi.decode(logs[idx].data, (ExecutionEntry[]));
+        assertEq(emitted.length, 2);
+        assertEq(emitted[0].actionHash, hash1);
+        assertEq(emitted[1].actionHash, hash2);
+        assertEq(uint8(emitted[0].nextAction.actionType), uint8(ActionType.RESULT));
+    }
+
+    function test_ExecutionTableLoaded_EmptyBatch() public {
+        ExecutionEntry[] memory entries = new ExecutionEntry[](0);
+
+        vm.recordLogs();
+        vm.prank(SYSTEM_ADDRESS);
+        manager.loadExecutionTable(entries);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (bool found, uint256 idx) = _findExecutionTableLoadedLog(logs);
+        assertTrue(found, "ExecutionTableLoaded event not found for empty batch");
+
+        (ExecutionEntry[] memory emitted) = abi.decode(logs[idx].data, (ExecutionEntry[]));
+        assertEq(emitted.length, 0);
+    }
+
+    // ── ExecutionConsumed ──
+
+    function test_ExecutionConsumed_EmitsOnConsume() public {
+        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
+        Action memory callAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+        bytes32 actionHash = keccak256(abi.encode(callAction));
+        _loadEntry(actionHash, _emptyResult());
+
+        vm.recordLogs();
+        (bool success,) = proxy.call(callData);
+        assertTrue(success);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sel = CrossChainManagerL2.ExecutionConsumed.selector;
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                assertEq(logs[i].topics[1], actionHash);
+                // Decode the Action from event data
+                (Action memory emittedAction) = abi.decode(logs[i].data, (Action));
+                assertEq(uint8(emittedAction.actionType), uint8(ActionType.CALL));
+                assertEq(emittedAction.rollupId, TEST_ROLLUP_ID);
+                assertEq(emittedAction.destination, address(target));
+                assertEq(emittedAction.sourceAddress, address(this));
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "ExecutionConsumed event not found");
+    }
+
+    function test_ExecutionConsumed_EmitsForEachConsumption() public {
+        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
+        Action memory callAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+        bytes32 actionHash = keccak256(abi.encode(callAction));
+
+        // Load 2 entries with the same action hash
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = emptyDeltas;
+        entries[0].actionHash = actionHash;
+        entries[0].nextAction = _emptyResult();
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = actionHash;
+        entries[1].nextAction = _emptyResult();
+        vm.prank(SYSTEM_ADDRESS);
+        manager.loadExecutionTable(entries);
+
+        vm.recordLogs();
+        (bool s1,) = proxy.call(callData);
+        assertTrue(s1);
+        (bool s2,) = proxy.call(callData);
+        assertTrue(s2);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sel = CrossChainManagerL2.ExecutionConsumed.selector;
+        uint256 consumedCount = 0;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                assertEq(logs[i].topics[1], actionHash);
+                consumedCount++;
+            }
+        }
+        assertEq(consumedCount, 2);
+    }
+
+    // ── CrossChainCallExecuted ──
+
+    function test_CrossChainCallExecuted_EmitsOnProxyCall() public {
+        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
+        Action memory callAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: address(this),
+            sourceRollup: TEST_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+        bytes32 actionHash = keccak256(abi.encode(callAction));
+        _loadEntry(actionHash, _emptyResult());
+
+        vm.recordLogs();
+        (bool success,) = proxy.call(callData);
+        assertTrue(success);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sel = CrossChainManagerL2.CrossChainCallExecuted.selector;
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                assertEq(logs[i].topics[1], actionHash);
+                assertEq(address(uint160(uint256(logs[i].topics[2]))), proxy);
+                (address src, bytes memory cd, uint256 val) = abi.decode(logs[i].data, (address, bytes, uint256));
+                assertEq(src, address(this));
+                assertEq(cd, callData);
+                assertEq(val, 0);
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "CrossChainCallExecuted event not found");
+    }
+
+    // ── IncomingCrossChainCallExecuted ──
+
+    function test_IncomingCrossChainCallExecuted_EmitsOnRemoteCall() public {
+        address sourceAddr = address(0xBEEF);
+        uint256 sourceRollup = 1;
+        bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (77));
+        uint256[] memory scope = new uint256[](0);
+
+        bytes memory expectedReturnData = "";
+        Action memory resultFromCall = Action({
+            actionType: ActionType.RESULT,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: expectedReturnData,
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+        _loadEntry(keccak256(abi.encode(resultFromCall)), _emptyResult());
+
+        vm.recordLogs();
+        vm.prank(SYSTEM_ADDRESS);
+        manager.executeIncomingCrossChainCall(address(target), 0, callData, sourceAddr, sourceRollup, scope);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        // Compute expected action hash
+        Action memory expectedAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: TEST_ROLLUP_ID,
+            destination: address(target),
+            value: 0,
+            data: callData,
+            failed: false,
+            sourceAddress: sourceAddr,
+            sourceRollup: sourceRollup,
+            scope: scope
+        });
+        bytes32 expectedHash = keccak256(abi.encode(expectedAction));
+
+        bytes32 sel = CrossChainManagerL2.IncomingCrossChainCallExecuted.selector;
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sel) {
+                assertEq(logs[i].topics[1], expectedHash);
+                (address dest, uint256 val, bytes memory data, address src, uint256 srcRollup, uint256[] memory sc) =
+                    abi.decode(logs[i].data, (address, uint256, bytes, address, uint256, uint256[]));
+                assertEq(dest, address(target));
+                assertEq(val, 0);
+                assertEq(data, callData);
+                assertEq(src, sourceAddr);
+                assertEq(srcRollup, sourceRollup);
+                assertEq(sc.length, 0);
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "IncomingCrossChainCallExecuted event not found");
     }
 }
