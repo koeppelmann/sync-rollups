@@ -1,0 +1,14 @@
+{
+  "l1Rpc": "http://51.210.221.124:18545",
+  "l2Rpc": "http://51.210.221.124:28545",
+  "l2EvmRpc": "http://51.210.221.124:28545",
+  "builderUrl": "",
+  "prooferUrl": "",
+  "ethrexRpc": "",
+  "ethrexEvmRpc": "",
+  "blockscoutL1Url": "http://51.210.221.124:10001",
+  "blockscoutL2Url": "http://51.210.221.124:20001",
+  "rollupsAddress": "0x17435ccE3d1B4fA2e5f8A08eD921D57C6762A180",
+  "rollupId": "1",
+  "deploymentBlock": "4"
+}

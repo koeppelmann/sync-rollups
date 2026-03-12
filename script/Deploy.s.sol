@@ -39,10 +39,9 @@ contract Deploy is Script {
             console.log("MockZKVerifier deployed at:", zkVerifier);
         }
 
-        // Deploy Rollups (also deploys L2Proxy implementation internally)
+        // Deploy Rollups
         Rollups rollups = new Rollups(zkVerifier, startingRollupId);
         console.log("Rollups deployed at:", address(rollups));
-        console.log("L2Proxy implementation:", rollups.l2ProxyImplementation());
 
         vm.stopBroadcast();
     }

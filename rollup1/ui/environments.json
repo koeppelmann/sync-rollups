@@ -1,0 +1,10 @@
+{
+  "anvil": {
+    "label": "Anvil Local",
+    "settingsFile": "settings.anvil.json",
+    "walletsFile": "wallets.anvil.json",
+    "l1ChainId": 31337,
+    "l1ExplorerUrl": "http://localhost:4000",
+    "l2ExplorerUrl": "http://localhost:4001"
+  }
+}
