@@ -255,10 +255,12 @@ bridge_eth() {
   local AMOUNT=$3
   local AMOUNT_WEI=$4
 
-  # 1. Ask builder to prepare the L1→L2 call (loads execution table)
+  # 1. Ask builder to prepare L1→L2 call with deferMine=true.
+  # This sends postBatch to mempool (automine off) but does NOT mine.
+  # We'll co-mine the user's tx + postBatch in the same block below.
   local PREPARE_RESULT=$(curl -s -X POST http://localhost:$BUILDER_PORT/prepare-l1-call \
     -H "Content-Type: application/json" \
-    -d "{\"l2Target\":\"$SENDER\",\"value\":\"$AMOUNT_WEI\",\"data\":\"0x\",\"sourceAddress\":\"$SENDER\"}")
+    -d "{\"l2Target\":\"$SENDER\",\"value\":\"$AMOUNT_WEI\",\"data\":\"0x\",\"sourceAddress\":\"$SENDER\",\"deferMine\":true}")
 
   local SUCCESS=$(echo "$PREPARE_RESULT" | jq -r '.success')
   if [ "$SUCCESS" != "true" ]; then
@@ -269,19 +271,37 @@ bridge_eth() {
   local PROXY_ADDR=$(echo "$PREPARE_RESULT" | jq -r '.proxyAddress')
   echo "  Sending $AMOUNT via proxy $PROXY_ADDR..."
 
-  # 2. Send ETH to the proxy on L1 (triggers cross-chain execution)
-  cast send --private-key "$SENDER_KEY" \
+  # 2. Get the pending nonce (accounts for the builder's postBatch in mempool)
+  local PENDING_NONCE=$(cast nonce "$SENDER" --block pending --rpc-url http://localhost:$L1_RPC_PORT)
+
+  # 3. Sign and submit the user's tx to Anvil's mempool (automine is still off)
+  local SIGNED_TX=$(cast mktx --private-key "$SENDER_KEY" \
     "$PROXY_ADDR" \
     --value "$AMOUNT" \
-    --rpc-url http://localhost:$L1_RPC_PORT > /dev/null 2>&1
+    --gas-limit 500000 \
+    --nonce "$PENDING_NONCE" \
+    --rpc-url http://localhost:$L1_RPC_PORT)
+
+  # Submit raw tx (non-blocking — goes to mempool)
+  curl -s http://localhost:$L1_RPC_PORT -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"$SIGNED_TX\"],\"id\":1}" > /dev/null
+
+  # 4. Mine both postBatch + user tx in the same block, then restore automine
+  curl -s http://localhost:$L1_RPC_PORT -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"evm_mine","params":[],"id":2}' > /dev/null
+  curl -s http://localhost:$L1_RPC_PORT -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"evm_setAutomine","params":[true],"id":3}' > /dev/null
 
   echo "  Bridged $AMOUNT to $SENDER on L2"
 }
 
 bridge_eth "$ACCOUNT1" "$ACCOUNT1_KEY" "$BRIDGE_AMOUNT" "$BRIDGE_AMOUNT_WEI"
-sleep 10
+sleep 20
 bridge_eth "$ACCOUNT2" "$ACCOUNT2_KEY" "$BRIDGE_AMOUNT" "$BRIDGE_AMOUNT_WEI"
-sleep 10
+sleep 20
 
 echo "Bridge complete."
 

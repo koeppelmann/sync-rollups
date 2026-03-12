@@ -112,6 +112,7 @@ pub mod event_sigs {
 }
 
 /// Function selectors
+#[allow(dead_code)]
 pub mod fn_selectors {
     /// executeL2TX(uint256,bytes) — first 4 bytes of keccak256
     pub fn execute_l2tx() -> [u8; 4] {

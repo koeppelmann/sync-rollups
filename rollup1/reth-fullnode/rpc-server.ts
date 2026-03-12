@@ -406,28 +406,7 @@ export class RpcServer {
       const { Interface, AbiCoder, keccak256 } = await import("ethers");
       const rollupsAddr = this.stateManager.getRollupsAddress();
 
-      // Check if this is a plain value transfer or a contract call
-      const isPlainValueTransfer = (!params.data || params.data === "0x" || params.data === "0x00" || params.data.length <= 2) && value > 0n;
-
-      if (isPlainValueTransfer) {
-        // Plain value transfer: send directly to target.
-        // executeIncomingCrossChainCall is not payable, so we can't route value through it.
-        const deferMining = { coinbase: undefined, timestamp };
-        await this.stateManager.ensureProxyDeployed(
-          originalSender,
-          rollupId,
-          BigInt(l2ChainId),
-          deferMining
-        );
-        await this.stateManager.sendSystemTx(
-          params.to,
-          params.data,
-          "0x" + value.toString(16)
-        );
-        await this.stateManager.mineBlock({ timestamp });
-        console.log(`[RpcServer] L1→L2 plain value transfer simulated (timestamp=${timestamp})`);
-      } else {
-      // Contract call: route through loadExecutionTable + executeIncomingCrossChainCall
+      // Route through loadExecutionTable + executeIncomingCrossChainCall (now payable)
       // so target sees msg.sender = sourceProxy (for access control).
 
       // CrossChainManagerL2.executeIncomingCrossChainCall requires execution
@@ -459,12 +438,11 @@ export class RpcServer {
         rawReturnData = e.data || "0x";
       }
 
-      // Step 2: Wrap return data as abi.encode(bytes(rawReturnData)) to match
-      // what sourceProxy.call() returns from executeOnBehalf
+      // Step 2: Use raw return data as-is to match what _processCallAtScope captures.
+      // CrossChainProxy.executeOnBehalf uses assembly return, so the caller's .call()
+      // gets the raw bytes from the destination — NOT ABI-wrapped.
       const abiCoder = AbiCoder.defaultAbiCoder();
-      const proxyReturnData = callFailed
-        ? rawReturnData
-        : abiCoder.encode(["bytes"], [rawReturnData]);
+      const proxyReturnData = rawReturnData;
 
       // Step 3: Build the RESULT action matching what _processCallAtScope builds
       const RESULT_ACTION_TYPE = 1;
@@ -552,7 +530,6 @@ export class RpcServer {
       } catch (e: any) {
         console.log(`[RpcServer] L1→L2 simulated (receipt check failed: ${e.message?.slice(0, 60)})`);
       }
-      } // end contract call else
     } catch (e: any) {
       console.error("[RpcServer] L1→L2 call execution error:", e.message);
       failed = true;

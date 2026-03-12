@@ -421,6 +421,7 @@ fund_l2_account_via_l1_to_l2() {
       --rpc-url "${L1_RPC_URL}" \
       "${FUND_PROXY_ADDR}" \
       --value "${FUND_ETH}ether" \
+      --gas-limit 500000 \
       --json | jq -r '.transactionHash'
   )"
   log "Funding tx hash: ${FUND_L1_TX_HASH}"

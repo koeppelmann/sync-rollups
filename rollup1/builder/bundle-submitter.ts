@@ -33,7 +33,20 @@ export interface BundleResult {
   txHashes: string[];
 }
 
-export class BundleSubmitter {
+/**
+ * Common interface for L1 bundle submission.
+ * Implementations: BundleSubmitter (Flashbots/Titan/etc.), MockBundleSubmitter (Anvil).
+ */
+export interface IL1BundleSubmitter {
+  submitAndWait(
+    signedRawTxs: string[],
+    targetBlock: number,
+    provider: JsonRpcProvider,
+    timestamp?: number
+  ): Promise<BundleResult>;
+}
+
+export class BundleSubmitter implements IL1BundleSubmitter {
   private relays: BundleRelayConfig[];
   /** Auth signer — any key works; used for Flashbots rate-limit identity. */
   private authWallet: Wallet;
@@ -57,7 +70,8 @@ export class BundleSubmitter {
   async submitAndWait(
     signedRawTxs: string[],
     targetBlock: number,
-    provider: JsonRpcProvider
+    provider: JsonRpcProvider,
+    timestamp?: number   // ignored — real chains control timestamps via slot timing
   ): Promise<BundleResult> {
     const targetBlockHex = "0x" + targetBlock.toString(16);
 

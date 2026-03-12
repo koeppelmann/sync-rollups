@@ -3305,10 +3305,9 @@
 
     // Function selectors
     const EXECUTE_L2TX_SELECTOR = '0x3f40cf69'; // executeL2TX(uint256,bytes)
-    const EXECUTE_L2_EXECUTION_SELECTOR = '0x367f4c42'; // executeL2Execution(bytes32)
-    const CREATE_L2_PROXY_SELECTOR = '0x838dddae'; // createL2ProxyContract(address,uint256)
-    // Keep multiple known selectors for loadL2Executions to support ABI variants in local builds.
-    const LOAD_L2_EXECUTIONS_SELECTORS = new Set(['0xc950ec6e', '0xd48f837a', '0x0bd4dac9']);
+    const EXECUTE_CROSS_CHAIN_CALL_SELECTOR = '0x9af53259'; // executeCrossChainCall(address,bytes)
+    const CREATE_CROSS_CHAIN_PROXY_SELECTOR = '0x2dd72120'; // createCrossChainProxy(address,uint256)
+    const POST_BATCH_SELECTOR = '0x92cbb26e'; // postBatch(ExecutionEntry[],uint256,bytes,bytes)
 
     // Parse full L2 transaction details from executeL2TX calldata
     function parseL2TxDetails(inputData) {
@@ -3594,12 +3593,12 @@
               if (!hasPrepEvents) {
                 const selector = getTxSelector(tx.data);
                 let methodLabel = 'Unknown Rollups call';
-                if (selector === EXECUTE_L2_EXECUTION_SELECTOR) {
-                  methodLabel = 'executeL2Execution';
-                } else if (selector === CREATE_L2_PROXY_SELECTOR) {
-                  methodLabel = 'createL2ProxyContract';
-                } else if (selector && LOAD_L2_EXECUTIONS_SELECTORS.has(selector)) {
-                  methodLabel = 'loadL2Executions';
+                if (selector === EXECUTE_CROSS_CHAIN_CALL_SELECTOR) {
+                  methodLabel = 'executeCrossChainCall';
+                } else if (selector === CREATE_CROSS_CHAIN_PROXY_SELECTOR) {
+                  methodLabel = 'createCrossChainProxy';
+                } else if (selector === POST_BATCH_SELECTOR) {
+                  methodLabel = 'postBatch';
                 }
                 l2Transactions.push({
                   type: 'ROLLUPS_ADMIN',

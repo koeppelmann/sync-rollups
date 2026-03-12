@@ -219,101 +219,78 @@ impl EventProcessor {
                 );
 
                 let next_base_fee = self.get_next_base_fee().await?;
-                let is_plain_value_transfer = call_data.is_empty() && value > U256::ZERO;
 
-                if is_plain_value_transfer {
-                    // Plain value transfer: send directly to target (no executeIncomingCrossChainCall
-                    // since that function is not payable).
-                    info!("Plain value transfer to {:?}", l2_target);
-                    self.ensure_proxy_deployed(&source_address, next_base_fee).await?;
-                    let raw_tx = self.tx_signer.sign_tx(
-                        &l2_target,
-                        call_data,
-                        value,
-                        10_000_000,
-                        next_base_fee,
-                    )?;
-                    self.l2_client.send_raw_transaction(&raw_tx).await?;
-                    let (block_hash, _state_root) = self.engine.mine_block(&self.l2_client, None, Some(performed.l1_block_timestamp)).await?;
-                    info!("Plain value transfer executed in block {block_hash}");
-                } else {
-                    // Contract call: route through loadExecutionTable + executeIncomingCrossChainCall
-                    // so target sees msg.sender = sourceProxy (for access control).
+                // Route all L1→L2 calls through loadExecutionTable + executeIncomingCrossChainCall
+                // (now payable, so value transfers work too).
 
-                    // Step 1: Dry-run to predict return data from the destination call.
-                    // We simulate from operator as a simple eth_call. The actual L2
-                    // execution goes through sourceProxy.executeOnBehalf, but using
-                    // operator as from keeps the dry-run deterministic across clients.
-                    let target_hex = format!("{:?}", l2_target);
-                    let value_hex = format!("0x{:x}", value);
-                    let data_hex = format!("0x{}", hex::encode(call_data));
-                    let operator_hex = format!("{:?}", self.tx_signer.address);
-                    let (raw_return_data, call_success) = self.l2_client.eth_call_full(
-                        &operator_hex, &target_hex, &value_hex, &data_hex
-                    ).await?;
-                    info!(
-                        "Dry-run eth_call: success={}, return_data={}",
-                        call_success,
-                        &raw_return_data[..std::cmp::min(raw_return_data.len(), 70)]
-                    );
-                    let raw_return_bytes = hex::decode(
-                        raw_return_data.strip_prefix("0x").unwrap_or(&raw_return_data)
-                    ).unwrap_or_default();
+                // Step 1: Dry-run to predict return data from the destination call.
+                let target_hex = format!("{:?}", l2_target);
+                let value_hex = format!("0x{:x}", value);
+                let data_hex = format!("0x{}", hex::encode(call_data));
+                let operator_hex = format!("{:?}", self.tx_signer.address);
+                let (raw_return_data, call_success) = self.l2_client.eth_call_full(
+                    &operator_hex, &target_hex, &value_hex, &data_hex
+                ).await?;
+                info!(
+                    "Dry-run eth_call: success={}, return_data={}",
+                    call_success,
+                    &raw_return_data[..std::cmp::min(raw_return_data.len(), 70)]
+                );
+                let raw_return_bytes = hex::decode(
+                    raw_return_data.strip_prefix("0x").unwrap_or(&raw_return_data)
+                ).unwrap_or_default();
 
-                    // Step 2: Build proxy return data = abi.encode(bytes(rawReturnData))
-                    let proxy_return_data = if call_success {
-                        abi_encode_bytes(&raw_return_bytes)
-                    } else {
-                        raw_return_bytes.clone()
-                    };
+                // Step 2: Use raw return data as-is to match what _processCallAtScope captures.
+                // CrossChainProxy.executeOnBehalf uses assembly return, so the caller's .call()
+                // gets the raw bytes from the destination — NOT ABI-wrapped.
+                let proxy_return_data = raw_return_bytes.clone();
 
-                    // Step 3: Build the RESULT action
-                    let rollup_id = U256::from(self.rollup_id);
-                    let result_action_encoded = abi_encode_action(
-                        1, rollup_id, Address::ZERO, U256::ZERO,
-                        &proxy_return_data, !call_success,
-                        Address::ZERO, U256::ZERO, &[],
-                    );
+                // Step 3: Build the RESULT action
+                let rollup_id = U256::from(self.rollup_id);
+                let result_action_encoded = abi_encode_action(
+                    1, rollup_id, Address::ZERO, U256::ZERO,
+                    &proxy_return_data, !call_success,
+                    Address::ZERO, U256::ZERO, &[],
+                );
 
-                    // Step 4: Hash it — abi.encode(action) wraps dynamic tuple with 0x20 offset
-                    let mut abi_encoded = Vec::new();
-                    abi_encoded.extend_from_slice(&encode_u256(0x20));
-                    abi_encoded.extend_from_slice(&result_action_encoded);
-                    let result_hash = keccak256_bytes(&abi_encoded);
-                    info!(
-                        "RESULT action: rollupId={}, failed={}, data_len={}, proxy_data_len={}, hash=0x{}",
-                        self.rollup_id,
-                        !call_success,
-                        raw_return_bytes.len(),
-                        proxy_return_data.len(),
-                        hex::encode(&result_hash.0),
-                    );
+                // Step 4: Hash it — abi.encode(action) wraps dynamic tuple with 0x20 offset
+                let mut abi_encoded = Vec::new();
+                abi_encoded.extend_from_slice(&encode_u256(0x20));
+                abi_encoded.extend_from_slice(&result_action_encoded);
+                let result_hash = keccak256_bytes(&abi_encoded);
+                info!(
+                    "RESULT action: rollupId={}, failed={}, data_len={}, proxy_data_len={}, hash=0x{}",
+                    self.rollup_id,
+                    !call_success,
+                    raw_return_bytes.len(),
+                    proxy_return_data.len(),
+                    hex::encode(&result_hash.0),
+                );
 
-                    // Step 5: Build loadExecutionTable calldata
-                    let load_calldata = build_load_execution_table_calldata(&result_hash);
+                // Step 5: Build loadExecutionTable calldata
+                let load_calldata = build_load_execution_table_calldata(&result_hash);
 
-                    // Step 6: Send loadExecutionTable as system tx
-                    let load_tx = self.tx_signer.sign_tx(
-                        &self.rollups_address, &load_calldata,
-                        U256::ZERO, 10_000_000, next_base_fee,
-                    )?;
-                    self.l2_client.send_raw_transaction(&load_tx).await?;
+                // Step 6: Send loadExecutionTable as system tx
+                let load_tx = self.tx_signer.sign_tx(
+                    &self.rollups_address, &load_calldata,
+                    U256::ZERO, 10_000_000, next_base_fee,
+                )?;
+                self.l2_client.send_raw_transaction(&load_tx).await?;
 
-                    // Step 7: Send executeIncomingCrossChainCall
-                    let exec_calldata = build_execute_incoming_calldata(
-                        &l2_target, value, call_data, &source_address,
-                        consumed.action.source_rollup,
-                    );
-                    let exec_tx = self.tx_signer.sign_tx(
-                        &self.rollups_address, &exec_calldata,
-                        value, 10_000_000, next_base_fee,
-                    )?;
-                    self.l2_client.send_raw_transaction(&exec_tx).await?;
+                // Step 7: Send executeIncomingCrossChainCall (payable — value forwarded)
+                let exec_calldata = build_execute_incoming_calldata(
+                    &l2_target, value, call_data, &source_address,
+                    consumed.action.source_rollup,
+                );
+                let exec_tx = self.tx_signer.sign_tx(
+                    &self.rollups_address, &exec_calldata,
+                    value, 10_000_000, next_base_fee,
+                )?;
+                self.l2_client.send_raw_transaction(&exec_tx).await?;
 
-                    // Step 8: Mine one block with both txs
-                    let (block_hash, _state_root) = self.engine.mine_block(&self.l2_client, None, Some(performed.l1_block_timestamp)).await?;
-                    info!("L1→L2 call executed via loadExecutionTable + executeIncomingCrossChainCall in block {block_hash}");
-                }
+                // Step 8: Mine one block with both txs
+                let (block_hash, _state_root) = self.engine.mine_block(&self.l2_client, None, Some(performed.l1_block_timestamp)).await?;
+                info!("L1→L2 call executed via loadExecutionTable + executeIncomingCrossChainCall in block {block_hash}");
                 return Ok(());
             }
             // For L2TX and other action types, fall through to L1 tx decoding
@@ -386,68 +363,6 @@ impl EventProcessor {
         let batch_timestamp = batch[0].0.l1_block_timestamp;
         let (block_hash, _state_root) = self.engine.mine_block(&self.l2_client, None, Some(batch_timestamp)).await?;
         info!("Batch of {} L2TXs mined in block {} (timestamp={})", sent_count, block_hash, batch_timestamp);
-
-        Ok(())
-    }
-
-    /// Ensure a CrossChainProxy is deployed on L2 for the given address.
-    /// If not deployed, sends a deployment tx to the txpool (no mining).
-    /// Compute the CrossChainProxy address for a given originalAddress on L2
-    async fn compute_proxy_address(&self, original_address: &Address) -> Result<Address> {
-        let rollups_hex = format!("{:?}", self.rollups_address);
-        let selector = fn_selectors::compute_cross_chain_proxy_address();
-        let mut calldata = Vec::from(selector);
-        calldata.extend_from_slice(&[0u8; 12]);
-        calldata.extend_from_slice(original_address.as_slice());
-        let mut rollup_bytes = [0u8; 32];
-        rollup_bytes[24..32].copy_from_slice(&self.rollup_id.to_be_bytes());
-        calldata.extend_from_slice(&rollup_bytes);
-        let mut domain_bytes = [0u8; 32];
-        domain_bytes[24..32].copy_from_slice(&self.l2_chain_id.to_be_bytes());
-        calldata.extend_from_slice(&domain_bytes);
-
-        let calldata_hex = format!("0x{}", hex::encode(&calldata));
-        let result = self.l2_client.eth_call(&rollups_hex, &calldata_hex).await?;
-
-        let result_bytes = hex::decode(result.strip_prefix("0x").unwrap_or(&result))?;
-        if result_bytes.len() < 32 {
-            eyre::bail!("computeCrossChainProxyAddress returned invalid data");
-        }
-        Ok(Address::from_slice(&result_bytes[12..32]))
-    }
-
-    async fn ensure_proxy_deployed(&mut self, original_address: &Address, max_fee_per_gas: u64) -> Result<()> {
-        let proxy_address = self.compute_proxy_address(original_address).await?;
-        let proxy_hex = format!("{:?}", proxy_address);
-
-        // Check if proxy already has code
-        let code = self.l2_client.get_code(&proxy_hex).await?;
-        if code != "0x" && code != "0x0" {
-            return Ok(()); // Already deployed
-        }
-
-        info!("Deploying CrossChainProxy for {:?} at {:?}", original_address, proxy_address);
-
-        // Deploy via createCrossChainProxy(address, uint256)
-        let deploy_selector = fn_selectors::create_cross_chain_proxy();
-        let mut deploy_data = Vec::from(deploy_selector);
-        deploy_data.extend_from_slice(&[0u8; 12]);
-        deploy_data.extend_from_slice(original_address.as_slice());
-        let mut rollup_bytes = [0u8; 32];
-        rollup_bytes[24..32].copy_from_slice(&self.rollup_id.to_be_bytes());
-        deploy_data.extend_from_slice(&rollup_bytes);
-
-        let raw_tx = self.tx_signer.sign_tx(
-            &self.rollups_address,
-            &deploy_data,
-            U256::ZERO,
-            10_000_000,
-            max_fee_per_gas,
-        )?;
-
-        // Send to txpool (no mining — will be included in the next mineBlock)
-        self.l2_client.send_raw_transaction(&raw_tx).await?;
-        info!("CrossChainProxy deployment tx sent");
 
         Ok(())
     }

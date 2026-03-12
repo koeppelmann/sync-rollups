@@ -248,15 +248,10 @@ export class ExecutionPlanner {
     const isPlainTransfer = !l2CallData || l2CallData === "0x" || l2CallData === "0x00";
     const targetCode = await this.l1Provider.getCode(l1Target);
     if (isPlainTransfer && targetCode === "0x") {
-      // EOA value transfer — always succeeds. The return data from
-      // _processCallAtScope is ABI-encoded: executeOnBehalf returns
-      // bytes memory, which ABI-encodes the inner call's empty return.
-      // abi.encode(bytes("")) = offset(0x20) + length(0x00)
-      const abiEncodedEmptyBytes =
-        "0x" +
-        "0000000000000000000000000000000000000000000000000000000000000020" +
-        "0000000000000000000000000000000000000000000000000000000000000000";
-      l1CallResult = { returnData: abiEncodedEmptyBytes, failed: false };
+      // EOA value transfer — always succeeds with empty return data.
+      // CrossChainProxy.executeOnBehalf uses assembly return, so the outer
+      // .call() in _processCallAtScope gets the raw bytes (not ABI-wrapped).
+      l1CallResult = { returnData: "0x", failed: false };
     } else {
       l1CallResult = await this.simulateL1Call(
         sourceProxyOnL1,
@@ -334,7 +329,7 @@ export class ExecutionPlanner {
 
   /**
    * Plan an L1-to-L2 call (old method - kept for compatibility)
-   * This is called when an L1 contract calls an L2Proxy
+   * This is called when an L1 contract calls a CrossChainProxy
    */
   async planL1ToL2Call(
     l2Target: string,
@@ -403,7 +398,7 @@ export class ExecutionPlanner {
    * Plan an L1-to-L2 call with proper proxy context
    * This is used by the /prepare-l1-call endpoint
    *
-   * IMPORTANT: The action hash must match exactly what L2Proxy.fallback() produces:
+   * IMPORTANT: The action hash must match exactly what CrossChainProxy.fallback() produces:
    * - rollupId: _getOriginalRollupId() (the target rollup)
    * - destination: _getOriginalAddress() (the L2 target)
    * - sourceAddress: address(this) (the target proxy address on L1)
@@ -421,7 +416,8 @@ export class ExecutionPlanner {
     sourceProxyAddress: string, // L2 proxy representing the original L1 caller
     originalSender: string,     // Original L1 sender address (for L2 proxy deployment)
     timestamp?: number,         // L1 block timestamp for deterministic state roots
-    overrideCurrentState?: string // Use this instead of L1 state when correction pending
+    overrideCurrentState?: string, // Use this instead of L1 state when correction pending
+    proxyRollupId?: bigint      // Proxy's originalRollupId (from authorizedProxies); defaults to config.rollupId
   ): Promise<ExecutionPlan> {
     const entries: ExecutionEntry[] = [];
 
@@ -432,10 +428,12 @@ export class ExecutionPlanner {
     console.log(`[Planner] Current L1 state: ${currentState.slice(0, 18)}...${overrideCurrentState ? " (corrected)" : ""}`);
 
     // Build CALL action matching Rollups.executeCrossChainCall:
+    // - rollupId = proxyInfo.originalRollupId (from the proxy contract)
     // - sourceAddress = msg.sender passed by proxy = the original L1 caller
     // - sourceRollup = MAINNET_ROLLUP_ID = 0
+    const actionRollupId = proxyRollupId ?? this.config.rollupId;
     const callAction = createCallAction(
-      this.config.rollupId,  // rollupId = proxyInfo.originalRollupId
+      actionRollupId,        // rollupId = proxyInfo.originalRollupId
       l2Target,              // destination = proxyInfo.originalAddress
       value,                 // msg.value
       callData,              // callData from proxy fallback

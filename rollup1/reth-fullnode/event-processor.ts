@@ -27,15 +27,13 @@ const ROLLUPS_ABI = [
   // Read functions we need
   "function rollups(uint256) view returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)",
   "function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
+  "function authorizedProxies(address) view returns (address originalAddress, uint64 originalRollupId)",
   // Functions we need to decode L1 transactions
   "function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes)",
 ];
 
-// CrossChainProxy ABI for reading identity
-const CROSS_CHAIN_PROXY_ABI = [
-  "function ORIGINAL_ADDRESS() external view returns (address)",
-  "function ORIGINAL_ROLLUP_ID() external view returns (uint256)",
-];
+// CrossChainProxy immutables are internal in the new contract.
+// Use authorizedProxies(address) on the Rollups/CrossChainManagerL2 contract to look up proxy identity.
 
 interface ProcessedEvent {
   blockNumber: number;
@@ -542,29 +540,7 @@ export class EventProcessor {
         console.log(`[EventProcessor] L1→L2 call (from ExecutionConsumed event)`);
         console.log(`[EventProcessor] L2 target: ${l2Target}, source: ${sourceAddress}, sourceRollup: ${consumedAction.sourceRollup}, value: ${value}`);
 
-        // Check if this is a plain value transfer (no calldata) or a contract call
-        const isPlainValueTransfer = (!callData || callData === "0x" || callData === "0x00" || callData.length <= 2) && value > 0n;
-        if (isPlainValueTransfer) {
-          // Plain value transfer: send directly to target (old path).
-          // executeIncomingCrossChainCall is not payable, so we can't route
-          // value through it. For EOA transfers, msg.sender doesn't matter.
-          console.log(`[EventProcessor] Plain value transfer to ${l2Target}`);
-          const deferMining = { coinbase: undefined, timestamp: l1Timestamp };
-          const l2Provider = this.stateManager.getL2Provider();
-          const l2ChainIdHex = await l2Provider.send("eth_chainId", []);
-          const l2ChainId = BigInt(l2ChainIdHex);
-          await this.stateManager.ensureProxyDeployed(
-            sourceAddress,
-            this.config.rollupId,
-            l2ChainId,
-            deferMining
-          );
-          await this.stateManager.sendSystemTx(l2Target, callData, "0x" + value.toString(16));
-          await this.stateManager.mineBlock({ timestamp: l1Timestamp });
-          console.log(`[EventProcessor] Plain value transfer executed in single block`);
-        } else {
-
-        // CrossChainManagerL2.executeIncomingCrossChainCall requires execution
+        // CrossChainManagerL2.executeIncomingCrossChainCall (now payable) requires execution
         // entries to be loaded via loadExecutionTable BEFORE calling it.
         // The flow inside _processCallAtScope:
         //   1. Calls sourceProxy.executeOnBehalf(destination, data) — gets returnData
@@ -603,13 +579,11 @@ export class EventProcessor {
           rawReturnData = e.data || "0x";
         }
 
-        // Step 2: The returnData in the RESULT action is what sourceProxy.call()
-        // returns, which is abi.encode(bytes(rawReturnData)) for success, or the
-        // raw revert data for failure.
+        // Step 2: Use raw return data as-is to match what _processCallAtScope captures.
+        // CrossChainProxy.executeOnBehalf uses assembly return, so the caller's .call()
+        // gets the raw bytes from the destination — NOT ABI-wrapped.
         const abiCoder = AbiCoder.defaultAbiCoder();
-        const proxyReturnData = callFailed
-          ? rawReturnData
-          : abiCoder.encode(["bytes"], [rawReturnData]);
+        const proxyReturnData = rawReturnData;
 
         // Step 3: Build the RESULT action matching what _processCallAtScope builds
         const RESULT_ACTION_TYPE = 1; // ActionType.RESULT
@@ -686,7 +660,6 @@ export class EventProcessor {
         // Step 9: Mine one block with both txs
         await this.stateManager.mineBlock({ timestamp: l1Timestamp });
         console.log(`[EventProcessor] L1→L2 call executed via loadExecutionTable + executeIncomingCrossChainCall`);
-        } // end contract call path
       } else {
         // Fallback: try to parse from L1 tx (legacy path)
         const proxyAddress = l1Tx.to;
@@ -696,8 +669,9 @@ export class EventProcessor {
 
         console.log(`[EventProcessor] L1→L2 call via proxy ${proxyAddress.slice(0, 10)}... (legacy path)`);
 
-        const proxyContract = new Contract(proxyAddress, CROSS_CHAIN_PROXY_ABI, this.l1Provider);
-        const l2Target = await proxyContract.ORIGINAL_ADDRESS();
+        // Look up proxy identity via authorizedProxies on the Rollups contract
+        const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
+        const l2Target = proxyInfo[0]; // originalAddress
         console.log(`[EventProcessor] L2 target: ${l2Target}`);
 
         // Execute via operator system call

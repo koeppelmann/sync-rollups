@@ -7,7 +7,8 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { Contract, JsonRpcProvider, Wallet, Transaction, solidityPackedKeccak256 } from "ethers";
 import { ExecutionPlanner, ExecutionPlannerConfig } from "./execution-planner.js";
-import { BundleSubmitter, SEPOLIA_RELAYS } from "./bundle-submitter.js";
+import { BundleSubmitter, IL1BundleSubmitter, SEPOLIA_RELAYS } from "./bundle-submitter.js";
+import { MockBundleSubmitter } from "./mock-bundle-submitter.js";
 import {
   ActionType,
   ExecutionEntry,
@@ -119,9 +120,8 @@ export class Builder {
   private rollupsContract: Contract;
   private server: ReturnType<typeof createServer> | null = null;
   private isAnvilL1 = false; // Detected at startup
-  private isEthereumMainnet = false; // chain ID 1 or 11155111 — uses Flashbots bundle submission
   private l1ChainId = 0n;
-  private bundleSubmitter: BundleSubmitter | null = null;
+  private bundleSubmitter: IL1BundleSubmitter | null = null;
   // Anvil allows 30M gas per block; real chains like Gnosis have lower limits (17M)
   private postBatchGasLimit = 30_000_000n;
   private execL2TXGasLimit = 1_000_000n;
@@ -186,7 +186,10 @@ export class Builder {
       await this.l1Provider.send("evm_setAutomine", [true]);
       this.isAnvilL1 = true;
       this.postBatchGasLimit = 30_000_000n;
-      console.log("[Builder] L1 type: Anvil (deterministic timestamp control)");
+      const network = await this.l1Provider.getNetwork();
+      this.l1ChainId = network.chainId;
+      this.bundleSubmitter = new MockBundleSubmitter(this.l1Provider);
+      console.log("[Builder] L1 type: Anvil (MockBundleSubmitter, deterministic timestamp control)");
     } catch {
       this.isAnvilL1 = false;
       // Real chains have lower block gas limits (Gnosis: 17M, Ethereum: 30M)
@@ -197,7 +200,6 @@ export class Builder {
       const network = await this.l1Provider.getNetwork();
       this.l1ChainId = network.chainId;
       if (this.l1ChainId === 1n) {
-        this.isEthereumMainnet = true;
         this.bundleSubmitter = new BundleSubmitter(this.adminWallet);
         console.log("[Builder] L1 type: Ethereum mainnet (Flashbots bundle submission)");
       } else if (this.l1ChainId === 11155111n) {
@@ -405,12 +407,6 @@ export class Builder {
 
     const l1ChainId = (await this.l1Provider.getNetwork()).chainId;
 
-    // On Anvil, disable automine so no L1 blocks are mined between choosing
-    // the timestamp and using it.
-    if (this.isAnvilL1) {
-      await this.l1Provider.send("evm_setAutomine", [false]);
-    }
-
     let execReceiptHash: string;
     let entryCount = 0;
 
@@ -543,35 +539,10 @@ export class Builder {
         },
       }));
 
-      if (this.isAnvilL1) {
-        // Anvil: precise timestamp control with automine off
-        let nonce = await this.adminWallet.getNonce();
-        console.log(`[Builder] Starting with nonce ${nonce}`);
-
-        const postBatchTx = await this.rollupsContract.postBatch(
-          entriesData, 0, "0x", proof,
-          { nonce, gasLimit: this.postBatchGasLimit }
-        );
-        nonce++;
-
-        await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp - 1]);
-        await this.l1Provider.send("evm_mine", []);
-        await postBatchTx.wait();
-        console.log(`[Builder] Executions loaded: ${postBatchTx.hash}`);
-
-        const execTx = await this.rollupsContract.executeL2TX(
-          this.config.rollupId, signedTx,
-          { nonce, gasLimit: this.execL2TXGasLimit }
-        );
-
-        await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp]);
-        await this.l1Provider.send("evm_mine", []);
-        const execReceipt = await execTx.wait();
-        execReceiptHash = execReceipt!.hash;
-      } else if (this.isEthereumMainnet && this.bundleSubmitter) {
-        // Ethereum mainnet: Flashbots bundle submission.
-        // Sign all txs locally and submit as an atomic bundle targeting the next block.
-        // If the bundle misses, roll back L2, re-simulate with a new timestamp, and retry.
+      if (this.bundleSubmitter) {
+        // Bundle submission: sign all txs and submit atomically via L1 builder.
+        // MockBundleSubmitter (Anvil): automine control + timestamp setting.
+        // BundleSubmitter (Flashbots/Titan): atomic bundle targeting next block.
         const feeData = await this.l1Provider.getFeeData();
         const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
         const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
@@ -604,7 +575,7 @@ export class Builder {
         const currentBlock = await this.l1Provider.getBlockNumber();
         const targetBlock = currentBlock + 1;
         const result = await this.bundleSubmitter.submitAndWait(
-          signedRawTxs, targetBlock, this.l1Provider
+          signedRawTxs, targetBlock, this.l1Provider, simTimestamp
         );
 
         if (!result.included) {
@@ -756,10 +727,6 @@ export class Builder {
         }
       }
       throw e;
-    } finally {
-      if (this.isAnvilL1) {
-        await this.l1Provider.send("evm_setAutomine", [true]);
-      }
     }
 
     // Get new state
@@ -832,48 +799,63 @@ export class Builder {
       },
     }));
 
-    if (this.isAnvilL1) {
-      // Anvil: all txs in one block with precise timestamp
-      await this.l1Provider.send("evm_setAutomine", [false]);
+    if (this.bundleSubmitter) {
+      // Bundle submission: [postBatch, executeL2TX, ...] atomically.
+      const feeData = await this.l1Provider.getFeeData();
+      const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
+      const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
 
-      try {
-        let nonce = await this.adminWallet.getNonce();
+      let nonce = await this.adminWallet.getNonce("pending");
+      const signedRawTxs: string[] = [];
 
-        const loadTx = await this.rollupsContract.postBatch(
-          entriesData, 0, "0x", proof,
-          { nonce, gasLimit: this.postBatchGasLimit }
-        );
+      signedRawTxs.push(await this.signContractTx("postBatch",
+        [entriesData, 0, "0x", proof],
+        { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+      ));
+      nonce++;
+
+      for (const signedTx of signedTxs) {
+        signedRawTxs.push(await this.signContractTx("executeL2TX",
+          [this.config.rollupId, signedTx],
+          { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+        ));
         nonce++;
-
-        const execPromises = [];
-        for (const signedTx of signedTxs) {
-          const execTx = await this.rollupsContract.executeL2TX(
-            this.config.rollupId, signedTx,
-            { nonce, gasLimit: this.execL2TXGasLimit }
-          );
-          execPromises.push(execTx);
-          nonce++;
-        }
-
-        await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp]);
-        await this.l1Provider.send("evm_mine", []);
-
-        const receipts = await Promise.all(execPromises.map((tx) => tx.wait()));
-        const lastReceipt = receipts[receipts.length - 1];
-
-        console.log(`[Builder] Batch executed in L1 block, ${receipts.length} L2TXs`);
-
-        const rollupData = await this.rollupsContract.rollups(this.config.rollupId);
-
-        return {
-          success: true,
-          l1TxHash: lastReceipt.hash,
-          executionsLoaded: plan.entries.length,
-          stateRoot: rollupData.stateRoot,
-        };
-      } finally {
-        await this.l1Provider.send("evm_setAutomine", [true]);
       }
+
+      console.log(`[Builder] Bundle: postBatch + ${signedTxs.length} L2TXs (nonces ${nonce - signedRawTxs.length}..${nonce - 1})`);
+
+      const currentBlock = await this.l1Provider.getBlockNumber();
+      const targetBlock = currentBlock + 1;
+      const result = await this.bundleSubmitter.submitAndWait(
+        signedRawTxs, targetBlock, this.l1Provider, simTimestamp
+      );
+
+      if (!result.included) {
+        throw new Error(`Batch bundle not included in block ${targetBlock}.`);
+      }
+
+      console.log(`[Builder] Batch executed in block ${result.blockNumber}, ${signedTxs.length} L2TXs`);
+
+      // Verify timestamp
+      const bundleBlock = await this.l1Provider.getBlock(result.blockNumber);
+      const actualTs = bundleBlock ? Number(bundleBlock.timestamp) : 0;
+      if (actualTs !== simTimestamp) {
+        console.warn(`[Builder] Batch timestamp mismatch: expected=${simTimestamp}, actual=${actualTs}`);
+        await this.correctTimestampIfNeeded(
+          { blockNumber: result.blockNumber, hash: result.txHashes[result.txHashes.length - 1] } as any,
+          simTimestamp,
+          signedTxs
+        );
+      }
+
+      const rollupData = await this.rollupsContract.rollups(this.config.rollupId);
+
+      return {
+        success: true,
+        l1TxHash: result.txHashes[result.txHashes.length - 1],
+        executionsLoaded: plan.entries.length,
+        stateRoot: rollupData.stateRoot,
+      };
     } else {
       // Beacon chain: wait for the right slot, then submit all txs simultaneously.
       const nextSlotTs = await this.waitForNextSlot();
@@ -1057,6 +1039,13 @@ export class Builder {
       const simTimestamp = await this.chooseSimTimestamp();
       console.log(`[Builder] L1→L2 simulation timestamp: ${simTimestamp}`);
 
+      // Query the proxy's actual originalRollupId
+      let proxyRollupId = this.config.rollupId;
+      if (!needsProxyDeploy) {
+        const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
+        proxyRollupId = BigInt(proxyInfo.originalRollupId);
+      }
+
       // Plan the L1->L2 call execution
       const plan = await this.planner.planL1ToL2CallWithProxy(
         l2Target,
@@ -1065,7 +1054,9 @@ export class Builder {
         proxyAddress,
         sourceProxyAddress,
         sourceAddress,
-        simTimestamp
+        simTimestamp,
+        undefined,     // overrideCurrentState
+        proxyRollupId
       );
       console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
 
@@ -1133,8 +1124,10 @@ export class Builder {
         },
       }));
 
-      if (this.isEthereumMainnet && this.bundleSubmitter) {
-        // Ethereum mainnet: bundle [createProxy?, postBatch, userTx] atomically
+      if (this.bundleSubmitter) {
+        // Bundle submission: [createProxy?, postBatch, userTx] atomically.
+        // MockBundleSubmitter (Anvil): automine control + timestamp setting.
+        // BundleSubmitter (Flashbots/Titan): atomic bundle targeting next block.
         const feeData = await this.l1Provider.getFeeData();
         const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
         const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
@@ -1168,7 +1161,7 @@ export class Builder {
         const currentBlock = await this.l1Provider.getBlockNumber();
         const targetBlock = currentBlock + 1;
         const result = await this.bundleSubmitter.submitAndWait(
-          signedRawTxs, targetBlock, this.l1Provider
+          signedRawTxs, targetBlock, this.l1Provider, simTimestamp
         );
 
         if (!result.included) {
@@ -1197,36 +1190,6 @@ export class Builder {
       return {
         success: true,
         l1TxHash: userTxHash,
-        executionsLoaded: plan.entries.length,
-        ...(stateRoot ? { stateRoot } : {}),
-      };
-    } else if (this.isAnvilL1) {
-      // Anvil: deploy proxy if needed, then postBatch + mine
-      if (needsProxyDeploy) {
-        await this.deployProxy(l2Target, this.config.rollupId);
-        console.log("[Builder] Proxy deployed");
-      }
-
-      // Load executions on L1
-      const loadTxHash = await this.postBatchOnL1(plan.entries, proof);
-      console.log(`[Builder] Executions loaded: ${loadTxHash}`);
-
-      // Broadcast user's L1 transaction
-      const txResponse = await this.l1Provider.broadcastTransaction(signedTx);
-      console.log(`[Builder] User transaction broadcast: ${txResponse.hash}`);
-
-      let stateRoot: string | undefined;
-      try {
-        const receipt = await this.l1Provider.waitForTransaction(txResponse.hash, 1, 5000);
-        if (receipt) {
-          const rollupData = await this.rollupsContract.rollups(this.config.rollupId);
-          stateRoot = rollupData.stateRoot;
-        }
-      } catch {}
-
-      return {
-        success: true,
-        l1TxHash: txResponse.hash,
         executionsLoaded: plan.entries.length,
         ...(stateRoot ? { stateRoot } : {}),
       };
@@ -1387,7 +1350,15 @@ export class Builder {
       const simTimestamp = await this.chooseSimTimestamp();
       console.log(`[Builder] L1→L2 simulation timestamp: ${simTimestamp}`);
 
-      // 3. Plan the execution with proper source context
+      // 3. Query the proxy's actual originalRollupId (may differ from config.rollupId
+      //    if the proxy was created by a different endpoint, e.g. prepare-l2-call)
+      const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
+      const proxyRollupId = BigInt(proxyInfo.originalRollupId);
+      if (proxyRollupId !== this.config.rollupId) {
+        console.log(`[Builder] Proxy rollupId=${proxyRollupId} differs from config=${this.config.rollupId}`);
+      }
+
+      // 3b. Plan the execution with proper source context
       let plan = await this.planner.planL1ToL2CallWithProxy(
         l2Target,
         data,
@@ -1396,7 +1367,8 @@ export class Builder {
         sourceProxyAddress,
         sourceAddress,  // Original L1 sender for L2 proxy deployment
         simTimestamp,
-        prepNeedsCorrection ? prepCorrectionTarget : undefined
+        prepNeedsCorrection ? prepCorrectionTarget : undefined,
+        proxyRollupId
       );
       console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
 
@@ -1464,25 +1436,26 @@ export class Builder {
           );
           postBatchTxHash = postBatchTx.hash;
 
+          // Set the next block timestamp for when mining happens
+          await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp]);
+
           if (deferMine) {
             // deferMine: leave postBatch in mempool, caller will mine
-            // Set the next block timestamp so when the caller mines, it uses simTimestamp
-            await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp]);
             console.log(`[Builder] postBatch sent (deferred mine): ${postBatchTx.hash}`);
             // NOTE: automine stays OFF — caller must mine and re-enable
           } else {
-            await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp - 1]);
-            await this.l1Provider.send("evm_mine", []);
-            await postBatchTx.wait();
-            console.log(`[Builder] Executions loaded on L1: ${postBatchTx.hash}`);
-
-            // Force the NEXT L1 block timestamp to match our simulation.
-            await this.l1Provider.send("evm_setNextBlockTimestamp", [simTimestamp]);
+            // Non-deferMine: postBatch is in mempool with automine OFF.
+            // The user's tx will arrive shortly. Poll for it and mine both together.
+            // (ExecutionNotInCurrentBlock requires postBatch + consumption in same block)
+            console.log(`[Builder] postBatch in mempool, waiting for user tx to co-mine...`);
+            this.waitForUserTxAndMine(postBatchTx.hash);
           }
-        } finally {
+        } catch (e) {
+          // On error, restore automine
           if (!deferMine) {
             await this.l1Provider.send("evm_setAutomine", [true]);
           }
+          throw e;
         }
       } else {
         // Real L1: submit correction (if needed) + postBatch simultaneously
@@ -1949,6 +1922,53 @@ export class Builder {
     // is now correct. L1 still has the wrong state (from simulated timestamp), but
     // the next L2TX submission will bundle the setStateByOwner correction atomically
     // with the postBatch, avoiding timing gaps.
+  }
+
+  /**
+   * Anvil helper: poll pending txs and mine when user's tx arrives alongside postBatch.
+   * This ensures postBatch + user tx land in the same block (ExecutionNotInCurrentBlock).
+   * Runs asynchronously (fire-and-forget from handlePrepareL1Call).
+   */
+  private waitForUserTxAndMine(postBatchTxHash: string): void {
+    const POLL_INTERVAL = 200; // ms
+    const TIMEOUT = 60_000; // 60s max wait
+    const startTime = Date.now();
+
+    const poll = async () => {
+      let pollCount = 0;
+      while (Date.now() - startTime < TIMEOUT) {
+        try {
+          // Check pending tx count — Anvil's pending block includes mempool txs
+          const countHex = await this.l1Provider.send("eth_getBlockTransactionCountByNumber", ["pending"]);
+          const txCount = parseInt(countHex, 16);
+          if (pollCount % 25 === 0) {
+            console.log(`[Builder] Poller: ${txCount} pending tx(s) (poll #${pollCount})`);
+          }
+          pollCount++;
+          if (txCount >= 2) {
+            // User tx arrived — mine both together
+            await this.l1Provider.send("evm_mine", []);
+            await this.l1Provider.send("evm_setAutomine", [true]);
+            console.log(`[Builder] Co-mined postBatch + user tx in same block`);
+            return;
+          }
+        } catch (err: any) {
+          console.warn(`[Builder] Poller error: ${err.message}`);
+        }
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      }
+      // Timeout — mine whatever is pending and restore automine
+      console.warn(`[Builder] Timed out waiting for user tx, mining postBatch alone`);
+      try {
+        await this.l1Provider.send("evm_mine", []);
+        await this.l1Provider.send("evm_setAutomine", [true]);
+      } catch {}
+    };
+
+    poll().catch((err) => {
+      console.error(`[Builder] waitForUserTxAndMine error:`, err);
+      this.l1Provider.send("evm_setAutomine", [true]).catch(() => {});
+    });
   }
 
   /**

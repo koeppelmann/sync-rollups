@@ -41,15 +41,6 @@ export interface StateDelta {
 }
 
 /**
- * Represents a state commitment for a rollup (used in postBatch)
- */
-export interface StateCommitment {
-  rollupId: bigint;
-  newState: string; // bytes32
-  etherIncrement: bigint; // int256
-}
-
-/**
  * Represents a pre-computed execution that can affect multiple rollups
  */
 export interface ExecutionEntry {
