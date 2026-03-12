@@ -28,14 +28,23 @@ contract IntegrationTest is Test {
     // ── L1 contracts ──
     Rollups public rollups;
     MockZKVerifier public verifier;
+    Counter public counterL1; // C: Counter on L1 (for scenarios 2 & 4)
 
     // ── L2 contracts ──
     CrossChainManagerL2 public managerL2;
-    Counter public counterL2; // The actual Counter deployed on L2
+    Counter public counterL2; // B: Counter on L2
+    CounterAndProxy public counterAndProxyL2; // D: CounterAndProxy on L2
 
     // ── L1 application contracts ──
-    CounterAndProxy public counterAndProxy; // Deployed on L1
-    address public counterProxy; // CrossChainProxy for Counter on L1 (Counter' on L1)
+    CounterAndProxy public counterAndProxy; // A: CounterAndProxy on L1
+    address public counterProxy; // B': CrossChainProxy for Counter on L1 (Counter' on L1)
+
+    // ── L2 proxies ──
+    address public counterProxyL2; // C': proxy for counterL1 on L2
+    address public counterAndProxyProxyL2; // A': proxy for counterAndProxy (A) on L2
+
+    // ── L1 proxies for L2 contracts ──
+    address public counterAndProxyL2ProxyL1; // D': proxy for counterAndProxyL2 (D) on L1
 
     // ── Constants ──
     uint256 constant L2_ROLLUP_ID = 1;
@@ -57,15 +66,29 @@ contract IntegrationTest is Test {
         // Deploy L2
         managerL2 = new CrossChainManagerL2(L2_ROLLUP_ID, SYSTEM_ADDRESS);
 
-        // Deploy Counter on L2
+        // Deploy Counter on L2 (B)
         counterL2 = new Counter();
 
-        // On L1: create CrossChainProxy for the L2 Counter (Counter')
-        // This proxy represents (counterL2.address, L2_ROLLUP_ID) on L1
+        // Deploy Counter on L1 (C)
+        counterL1 = new Counter();
+
+        // On L1: create CrossChainProxy for the L2 Counter (B')
         counterProxy = rollups.createCrossChainProxy(address(counterL2), L2_ROLLUP_ID);
 
-        // Deploy CounterAndProxy on L1, pointing at Counter' (the CrossChainProxy)
+        // Deploy CounterAndProxy on L1 (A), pointing at B' (the CrossChainProxy)
         counterAndProxy = new CounterAndProxy(counterProxy);
+
+        // C': proxy for counterL1 (C) on L2, so L2 contracts can call L1's Counter
+        counterProxyL2 = managerL2.createCrossChainProxy(address(counterL1), MAINNET_ROLLUP_ID);
+
+        // D: CounterAndProxy on L2, targeting C'
+        counterAndProxyL2 = new CounterAndProxy(counterProxyL2);
+
+        // A': proxy for counterAndProxy (A) on L2 (for Scenario 3)
+        counterAndProxyProxyL2 = managerL2.createCrossChainProxy(address(counterAndProxy), MAINNET_ROLLUP_ID);
+
+        // D': proxy for counterAndProxyL2 (D) on L1 (for Scenario 4)
+        counterAndProxyL2ProxyL1 = rollups.createCrossChainProxy(address(counterAndProxyL2), L2_ROLLUP_ID);
     }
 
     function _getRollupState(uint256 rollupId) internal view returns (bytes32) {
@@ -180,5 +203,330 @@ contract IntegrationTest is Test {
         assertEq(counterAndProxy.targetCounter(), 1, "CP.targetCounter should be 1");
         assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
         assertEq(counterL2.counter(), 1, "L2 Counter should be 1");
+    }
+
+    // ═══════════════════════════════════════════════
+    //  Test 2: Alice -> D (-> C') -> C (L2 calls L1, simple reverse)
+    // ═══════════════════════════════════════════════
+
+    /// @notice L2-originated call: D calls C' (proxy for L1 Counter), resolved on L1 via executeL2TX,
+    ///         then on L2 via execution table consumption.
+    function test_Scenario2_L2CallsL1_Simple() public {
+        bytes memory incrementCallData = abi.encodeWithSelector(Counter.increment.selector);
+        bytes memory rlpEncodedTx = hex"deadbeef"; // Dummy L2 tx data
+
+        // ════════════════════════════════════════════
+        //  Phase 1: L1 — Execute Counter via executeL2TX
+        // ════════════════════════════════════════════
+
+        // The L2TX action that executeL2TX will build
+        Action memory l2txAction = Action({
+            actionType: ActionType.L2TX,
+            rollupId: L2_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: rlpEncodedTx,
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: MAINNET_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // The CALL action that will be returned as nextAction from the L2TX lookup
+        // This calls Counter on L1 (C), with source = counterAndProxyL2 (D) from L2
+        Action memory callToC = Action({
+            actionType: ActionType.CALL,
+            rollupId: MAINNET_ROLLUP_ID,
+            destination: address(counterL1),
+            value: 0,
+            data: incrementCallData,
+            failed: false,
+            sourceAddress: address(counterAndProxyL2),
+            sourceRollup: L2_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // After _processCallAtScope executes the CALL:
+        // D' (proxy for counterAndProxyL2 on L1) calls executeOnBehalf(counterL1, increment)
+        // Counter.increment() returns 1
+        // returnData = abi.encode(abi.encode(uint256(1)))
+        Action memory resultFromL1Execution = Action({
+            actionType: ActionType.RESULT,
+            rollupId: MAINNET_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(abi.encode(uint256(1))),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        // Terminal RESULT (returned after consuming the result hash)
+        Action memory terminalResult = resultFromL1Execution;
+
+        bytes32 currentState = keccak256("l2-initial-state");
+        bytes32 newState = keccak256("l2-state-after-d-calls-c");
+
+        StateDelta[] memory stateDeltas = new StateDelta[](1);
+        stateDeltas[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: currentState,
+            newState: newState,
+            etherDelta: 0
+        });
+
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+
+        // postBatch with 2 deferred entries:
+        // Entry 1: hash(L2TX) -> CALL to C (with L2 state delta)
+        // Entry 2: hash(RESULT) -> terminal RESULT (empty deltas)
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = stateDeltas;
+        entries[0].actionHash = keccak256(abi.encode(l2txAction));
+        entries[0].nextAction = callToC;
+
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = keccak256(abi.encode(resultFromL1Execution));
+        entries[1].nextAction = terminalResult;
+
+        rollups.postBatch(entries, 0, "", "proof");
+
+        // Trigger via executeL2TX
+        rollups.executeL2TX(L2_ROLLUP_ID, rlpEncodedTx);
+
+        assertEq(counterL1.counter(), 1, "Counter on L1 should be 1 after executeL2TX");
+        assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
+
+        // ════════════════════════════════════════════
+        //  Phase 2: L2 — Alice calls D, resolves from execution table
+        // ════════════════════════════════════════════
+
+        // The CALL action that executeCrossChainCall will build when D calls C'
+        Action memory l2CallAction = Action({
+            actionType: ActionType.CALL,
+            rollupId: MAINNET_ROLLUP_ID,
+            destination: address(counterL1),
+            value: 0,
+            data: incrementCallData,
+            failed: false,
+            sourceAddress: address(counterAndProxyL2),
+            sourceRollup: L2_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // Load L2 execution table: hash(CALL) -> RESULT
+        ExecutionEntry[] memory l2Entries = new ExecutionEntry[](1);
+        l2Entries[0].stateDeltas = emptyDeltas;
+        l2Entries[0].actionHash = keccak256(abi.encode(l2CallAction));
+        l2Entries[0].nextAction = resultFromL1Execution;
+
+        vm.prank(SYSTEM_ADDRESS);
+        managerL2.loadExecutionTable(l2Entries);
+
+        // Alice calls D.increment() -> D calls C' -> executeCrossChainCall -> consumes execution -> RESULT(1)
+        vm.prank(alice);
+        counterAndProxyL2.increment();
+
+        // ── Final assertions ──
+        assertEq(counterL1.counter(), 1, "Counter on L1 should be 1");
+        assertEq(counterAndProxyL2.counter(), 1, "D.counter should be 1");
+        assertEq(counterAndProxyL2.targetCounter(), 1, "D.targetCounter should be 1");
+        assertEq(managerL2.pendingEntryCount(), 0, "All L2 execution entries consumed");
+    }
+
+    // ═══════════════════════════════════════════════
+    //  Test 3: Alice -> A' (-> A -> B') -> B (nested, L2 side)
+    // ═══════════════════════════════════════════════
+
+    /// @notice Nested cross-chain call on L2. Alice calls A' (proxy for A on L2),
+    ///         which triggers scope navigation: A' -> A -> B' -> B.
+    ///         The scope tree has CALL#1 at scope [] and CALL#2 at scope [0].
+    function test_Scenario3_NestedL2Call() public {
+        bytes memory incrementCallData = abi.encodeWithSelector(Counter.increment.selector);
+
+        // CALL#1: Alice -> A' (proxy for counterAndProxy on MAINNET)
+        // executeCrossChainCall builds this when A' is called
+        Action memory call1 = Action({
+            actionType: ActionType.CALL,
+            rollupId: MAINNET_ROLLUP_ID,
+            destination: address(counterAndProxy),
+            value: 0,
+            data: incrementCallData,
+            failed: false,
+            sourceAddress: alice,
+            sourceRollup: L2_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // CALL#2: A calls B' -> Counter on L2 at scope [0]
+        // When _processCallAtScope executes CALL#1, A' calls executeOnBehalf(counterAndProxy, increment).
+        // But wait — A (counterAndProxy) is on L1, and A' is its proxy on L2.
+        // executeOnBehalf calls counterAndProxy.increment() locally.
+        // counterAndProxy.increment() calls counterProxy (B') which calls executeCrossChainCall.
+        // executeCrossChainCall builds a CALL for (counterL2, L2_ROLLUP_ID) with source=counterAndProxy.
+        // But on L2, the executeCrossChainCall is on managerL2, and the proxy B' is on L2... wait.
+        //
+        // Actually: On L2, A' is a proxy for A (counterAndProxy on MAINNET).
+        // When Alice calls A' on L2, the fallback calls managerL2.executeCrossChainCall(alice, increment()).
+        // Manager builds CALL#1: {CALL, MAINNET_ROLLUP_ID, counterAndProxy, increment, source=alice, sourceRollup=L2}
+        // _consumeExecution(hash(CALL#1)) returns CALL#2.
+        // CALL#2 is at scope [0], so newScope navigates there.
+        // At scope [0], _processCallAtScope is called:
+        //   - sourceProxy = computeProxy(counterAndProxy, MAINNET_ROLLUP_ID, chainid)
+        //   - This is A' itself (already created in setUp)
+        //   - A'.executeOnBehalf(counterL2, increment) -> Counter.increment() returns 1
+        //   - Builds RESULT -> _consumeExecution(resultHash) -> terminal RESULT
+
+        uint256[] memory scope0 = new uint256[](1);
+        scope0[0] = 0;
+
+        Action memory call2 = Action({
+            actionType: ActionType.CALL,
+            rollupId: L2_ROLLUP_ID,
+            destination: address(counterL2),
+            value: 0,
+            data: incrementCallData,
+            failed: false,
+            sourceAddress: address(counterAndProxy),
+            sourceRollup: MAINNET_ROLLUP_ID,
+            scope: scope0
+        });
+
+        // RESULT from executing Counter.increment() on L2 via A'.executeOnBehalf
+        Action memory resultFromExecution = Action({
+            actionType: ActionType.RESULT,
+            rollupId: L2_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(abi.encode(uint256(1))),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+
+        // Load L2 execution table with 2 entries:
+        // Entry 1: hash(CALL#1) -> CALL#2
+        // Entry 2: hash(RESULT) -> terminal RESULT
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = emptyDeltas;
+        entries[0].actionHash = keccak256(abi.encode(call1));
+        entries[0].nextAction = call2;
+
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = keccak256(abi.encode(resultFromExecution));
+        entries[1].nextAction = resultFromExecution;
+
+        vm.prank(SYSTEM_ADDRESS);
+        managerL2.loadExecutionTable(entries);
+
+        // Alice calls A' on L2 (proxy for counterAndProxy on MAINNET)
+        vm.prank(alice);
+        (bool success,) = address(counterAndProxyProxyL2).call(incrementCallData);
+        assertTrue(success, "Call to A' should succeed");
+
+        // ── Final assertions ──
+        assertEq(counterL2.counter(), 1, "Counter on L2 should be 1 (executed via scope navigation)");
+        assertEq(managerL2.pendingEntryCount(), 0, "All L2 execution entries consumed");
+    }
+
+    // ═══════════════════════════════════════════════
+    //  Test 4: Alice -> D' (-> D -> C') -> C (nested, L1 side)
+    // ═══════════════════════════════════════════════
+
+    /// @notice Nested cross-chain call on L1. Alice calls D' (proxy for D on L1),
+    ///         which triggers scope navigation: D' -> D -> C' -> C.
+    ///         The scope tree has CALL#1 at scope [] and CALL#2 at scope [0].
+    function test_Scenario4_NestedL1Call() public {
+        bytes memory incrementCallData = abi.encodeWithSelector(Counter.increment.selector);
+
+        // CALL#1: Alice calls D' (proxy for counterAndProxyL2 on L2)
+        // executeCrossChainCall builds this when D' is called
+        Action memory call1 = Action({
+            actionType: ActionType.CALL,
+            rollupId: L2_ROLLUP_ID,
+            destination: address(counterAndProxyL2),
+            value: 0,
+            data: incrementCallData,
+            failed: false,
+            sourceAddress: alice,
+            sourceRollup: MAINNET_ROLLUP_ID,
+            scope: new uint256[](0)
+        });
+
+        // CALL#2: D calls C' -> Counter on L1 at scope [0]
+        // After consuming CALL#1, nextAction is CALL#2 which navigates to scope [0].
+        // At scope [0], _processCallAtScope:
+        //   - sourceProxy = computeProxy(counterAndProxyL2, L2_ROLLUP_ID, chainid)
+        //   - This is D' itself (already created in setUp)
+        //   - D'.executeOnBehalf(counterL1, increment) -> Counter.increment() returns 1
+        //   - Builds RESULT -> _findAndApplyExecution(resultHash) -> terminal RESULT
+
+        uint256[] memory scope0 = new uint256[](1);
+        scope0[0] = 0;
+
+        Action memory call2 = Action({
+            actionType: ActionType.CALL,
+            rollupId: MAINNET_ROLLUP_ID,
+            destination: address(counterL1),
+            value: 0,
+            data: incrementCallData,
+            failed: false,
+            sourceAddress: address(counterAndProxyL2),
+            sourceRollup: L2_ROLLUP_ID,
+            scope: scope0
+        });
+
+        // RESULT from executing Counter.increment() on L1 via D'.executeOnBehalf
+        Action memory resultFromExecution = Action({
+            actionType: ActionType.RESULT,
+            rollupId: MAINNET_ROLLUP_ID,
+            destination: address(0),
+            value: 0,
+            data: abi.encode(abi.encode(uint256(1))),
+            failed: false,
+            sourceAddress: address(0),
+            sourceRollup: 0,
+            scope: new uint256[](0)
+        });
+
+        bytes32 currentState = keccak256("l2-initial-state");
+        bytes32 newState = keccak256("l2-state-after-nested-l1-call");
+
+        StateDelta[] memory stateDeltas = new StateDelta[](1);
+        stateDeltas[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: currentState,
+            newState: newState,
+            etherDelta: 0
+        });
+
+        StateDelta[] memory emptyDeltas = new StateDelta[](0);
+
+        // postBatch with 2 deferred entries:
+        // Entry 1: hash(CALL#1) -> CALL#2 (with L2 state delta)
+        // Entry 2: hash(RESULT) -> terminal RESULT (empty deltas)
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0].stateDeltas = stateDeltas;
+        entries[0].actionHash = keccak256(abi.encode(call1));
+        entries[0].nextAction = call2;
+
+        entries[1].stateDeltas = emptyDeltas;
+        entries[1].actionHash = keccak256(abi.encode(resultFromExecution));
+        entries[1].nextAction = resultFromExecution;
+
+        rollups.postBatch(entries, 0, "", "proof");
+
+        // Alice calls D' on L1 (proxy for counterAndProxyL2 on L2)
+        vm.prank(alice);
+        (bool success,) = address(counterAndProxyL2ProxyL1).call(incrementCallData);
+        assertTrue(success, "Call to D' should succeed");
+
+        // ── Final assertions ──
+        assertEq(counterL1.counter(), 1, "Counter on L1 should be 1 (executed via scope navigation)");
+        assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
     }
 }

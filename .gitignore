@@ -18,5 +18,5 @@ dist/
 node_modules/
 
 # Runtime state
-tooling/state/
-tooling/logs/
+state/
+logs/
