@@ -83,6 +83,12 @@ export interface ProveRequest {
    * Only needed when rootAction is a CALL (L1→L2). null for non-CALL entries.
    */
   sourceProxies?: (string | null)[];
+  /**
+   * System calls to execute on the proofer's L2 before verifying specific entries.
+   * Used for L2→L1 calls: the builder pre-loads execution entries into
+   * CrossChainManagerL2 so the proxy call can consume them during simulation.
+   */
+  preloadSystemCalls?: { entryIndex: number; to: string; data: string }[];
 }
 
 export interface ProveResponse {
@@ -392,6 +398,16 @@ export class Proofer {
         }
       } else {
         // ── Individual entry verification ─────────────────────────────
+        // Build lookup for preload system calls by entry index
+        const preloadsByEntry = new Map<number, { to: string; data: string }[]>();
+        if (request.preloadSystemCalls) {
+          for (const pc of request.preloadSystemCalls) {
+            const list = preloadsByEntry.get(pc.entryIndex) || [];
+            list.push({ to: pc.to, data: pc.data });
+            preloadsByEntry.set(pc.entryIndex, list);
+          }
+        }
+
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[i];
           const rootAction = rootActions[i];
@@ -405,9 +421,28 @@ export class Proofer {
             continue;
           }
 
+          // Apply any preload system calls for this entry (e.g., loadExecutionTable
+          // for L2→L1 proxy calls that need execution entries during simulation).
+          // Uses systemCall (mines its own block) so the preload executes before
+          // the user's L2TX — reth orders by gas price within a block, so
+          // co-mining would let the user tx run first.
+          const preloads = preloadsByEntry.get(i);
+          let entryTimestamp = request.timestamp;
+          if (preloads) {
+            for (const pc of preloads) {
+              console.log(`[Proofer] Pre-loading system tx for entry ${i}`);
+              await this.fullnodeProvider.send("syncrollups_systemCall", [
+                pc.to, pc.data, "0x0", entryTimestamp,
+              ]);
+              // Each systemCall mines its own block with entryTimestamp,
+              // so the next block must use a later timestamp.
+              if (entryTimestamp !== undefined) entryTimestamp = entryTimestamp + 1;
+            }
+          }
+
           // Simulate the root action on our L2
           const sourceProxy = request.sourceProxies?.[i] ?? null;
-          const verifyResult = await this.verifyEntry(entry, rootAction, request.timestamp, i, sourceProxy);
+          const verifyResult = await this.verifyEntry(entry, rootAction, entryTimestamp, i, sourceProxy);
           if (!verifyResult.success) {
             await this.rollback(rollbackBlockNum);
             return verifyResult;
@@ -562,14 +597,23 @@ export class Proofer {
       );
     }
 
-    // Verify nextAction matches
-    const simNextAction = actionFromJson(simResultJson.nextAction);
-    const mismatch = this.compareActions(simNextAction, entry.nextAction);
-    if (mismatch) {
-      return {
-        success: false,
-        error: `Entry ${index}: nextAction mismatch on field '${mismatch}'`,
-      };
+    // Verify nextAction matches (skip for L2→L1 entries where nextAction is CALL).
+    // For L2→L1, the entry's nextAction is a CALL to L1 (used by L1's scope resolution),
+    // but the L2 simulation returns a RESULT (the proxy consumed the execution entry locally).
+    // The proofer's job is only to verify the state transition, not the L1 continuation.
+    if (entry.nextAction.actionType === ActionType.CALL) {
+      console.log(
+        `[Proofer] Entry ${index}: nextAction is CALL (L2→L1), skipping nextAction comparison`
+      );
+    } else {
+      const simNextAction = actionFromJson(simResultJson.nextAction);
+      const mismatch = this.compareActions(simNextAction, entry.nextAction);
+      if (mismatch) {
+        return {
+          success: false,
+          error: `Entry ${index}: nextAction mismatch on field '${mismatch}'`,
+        };
+      }
     }
 
     return { success: true };

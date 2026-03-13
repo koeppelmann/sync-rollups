@@ -255,9 +255,10 @@ export class EventProcessor {
 
     for (const event of executionEvents) {
       if (event instanceof EventLog) {
-        // Find the first ExecutionConsumed event from the same tx
+        // Find ExecutionConsumed events from the same tx
         const consumed = consumedByTxHash.get(event.transactionHash);
         const firstConsumed = consumed?.[0];
+        const secondConsumed = consumed?.[1]; // Present for L2→L1 calls (RESULT from L1 execution)
         allEvents.push({
           blockNumber: event.blockNumber,
           logIndex: event.index,
@@ -277,6 +278,18 @@ export class EventProcessor {
               failed: firstConsumed[1][5],
               sourceAddress: firstConsumed[1][6],
               sourceRollup: firstConsumed[1][7],
+            } : null,
+            // Second consumed action (RESULT from L1 call in L2→L1 flow)
+            // When present, this L2TX triggered an L2→L1 cross-chain call
+            l2ToL1Result: secondConsumed ? {
+              actionType: Number(secondConsumed[1][0]),
+              rollupId: secondConsumed[1][1],
+              destination: secondConsumed[1][2],
+              value: secondConsumed[1][3],
+              data: secondConsumed[1][4],
+              failed: secondConsumed[1][5],
+              sourceAddress: secondConsumed[1][6],
+              sourceRollup: secondConsumed[1][7],
             } : null,
           },
         });
@@ -403,7 +416,7 @@ export class EventProcessor {
           `[EventProcessor] L2ExecutionPerformed at block ${blockNumber}: ${args.currentState.slice(0, 10)}... -> ${args.newState.slice(0, 10)}...`
         );
         // Replay the execution on L2 EVM using action data from ExecutionConsumed event
-        await this.replayExecution(args.currentState, args.newState, blockNumber, transactionHash, args.consumedAction);
+        await this.replayExecution(args.currentState, args.newState, blockNumber, transactionHash, args.consumedAction, args.l2ToL1Result);
         this.lastEventWasStateUpdate = false;
         break;
 
@@ -421,7 +434,8 @@ export class EventProcessor {
     newState: string,
     blockNumber: number,
     l1TxHash: string,
-    consumedAction?: { actionType: number; rollupId: bigint; destination: string; value: bigint; data: string; failed: boolean; sourceAddress: string; sourceRollup: bigint } | null
+    consumedAction?: { actionType: number; rollupId: bigint; destination: string; value: bigint; data: string; failed: boolean; sourceAddress: string; sourceRollup: bigint } | null,
+    l2ToL1Result?: { actionType: number; rollupId: bigint; data: string; failed: boolean; [key: string]: any } | null
   ): Promise<void> {
     console.log(
       `[EventProcessor] Replaying execution from L1 tx ${l1TxHash.slice(0, 10)}...`
@@ -469,26 +483,20 @@ export class EventProcessor {
           console.log(
             `[EventProcessor] L2 state already matches newState (pre-executed), skipping replay`
           );
-          this.stateManager.updateState(newState, BigInt(blockNumber), l2BlockNum);
-          console.log(`[EventProcessor] State updated to: ${newState.slice(0, 10)}...`);
-          return;
         } else {
-          // Timestamp mismatch — rollback pre-executed block and re-execute with correct L1 timestamp
+          // Timestamp mismatch — on real chains (non-Anvil) this is expected since
+          // the builder simulates with a predicted timestamp. Accept the pre-executed
+          // state to maintain consistency with builder and proofer. Rolling back and
+          // re-executing with the L1 timestamp would produce a different state root,
+          // causing divergence between nodes.
           console.log(
-            `[EventProcessor] Pre-executed block has wrong timestamp (L2=${l2Timestamp}, L1=${l1Timestamp}), rolling back to re-execute`
+            `[EventProcessor] Pre-executed state matches newState (L2 ts=${l2Timestamp}, L1 ts=${l1Timestamp}), ` +
+            `accepting pre-executed state for consistency`
           );
-          try {
-            await this.stateManager.rollbackToBlock(l2BlockNum - 1);
-          } catch (rollbackErr: any) {
-            if (rollbackErr.message?.includes('Rollback undershoot')) {
-              // Engine API blocks weren't persisted before reth was stopped.
-              // We need a full replay to recover — throw a sentinel error.
-              console.error(`[EventProcessor] ${rollbackErr.message}`);
-              throw new Error('FULL_REPLAY_NEEDED');
-            }
-            throw rollbackErr;
-          }
         }
+        this.stateManager.updateState(newState, BigInt(blockNumber), l2BlockNum);
+        console.log(`[EventProcessor] State updated to: ${newState.slice(0, 10)}...`);
+        return;
       }
     } catch (e: any) {
       if (e.message === 'FULL_REPLAY_NEEDED') throw e;
@@ -523,12 +531,32 @@ export class EventProcessor {
         // The sender must have sufficient L2 balance (bridged from L1).
         // Rule 1: exactly one L2 block per L1 function call.
         const rlpEncodedTx = decoded.args[1];
-        const { Transaction } = await import("ethers");
-        const parsedTx = Transaction.from(rlpEncodedTx);
+        const { Transaction: TxClass } = await import("ethers");
+        const parsedTx = TxClass.from(rlpEncodedTx);
         console.log(`[EventProcessor] L2TX: from=${parsedTx.from?.slice(0, 10)}... -> ${parsedTx.to ? parsedTx.to.slice(0, 10) + '...' : 'CREATE'}, value=${parsedTx.value}`);
 
-        const txHash = await this.stateManager.broadcastRawTx(rlpEncodedTx, { timestamp: l1Timestamp });
-        console.log(`[EventProcessor] L2TX executed: ${txHash}`);
+        // L2→L1 call: pre-load execution entry in its own block, then mine
+        // the user's tx in the next block. Separate blocks are needed because
+        // reth orders txs by gas price, not submission order.
+        if (l2ToL1Result && parsedTx.to) {
+          const l2Provider = this.stateManager.getL2Provider()!;
+          const proxyInfo = await new Contract(this.config.rollupsAddress, [
+            "function authorizedProxies(address) view returns (address, uint64)",
+          ], l2Provider).authorizedProxies(parsedTx.to);
+          const originalAddress = proxyInfo[0] as string;
+          const originalRollupId = BigInt(proxyInfo[1]);
+          // Block N: system preload
+          await this.preloadL2ToL1Entry(parsedTx, originalAddress, originalRollupId, l2ToL1Result);
+          await this.stateManager.mineBlock({ timestamp: l1Timestamp });
+          // Block N+1: user tx
+          await this.stateManager.sendRawTransaction(rlpEncodedTx);
+          const userTimestamp = l1Timestamp ? l1Timestamp + 1 : undefined;
+          await this.stateManager.mineBlock({ timestamp: userTimestamp });
+          console.log(`[EventProcessor] L2→L1 L2TX executed with pre-loaded entry (2 blocks)`);
+        } else {
+          const txHash = await this.stateManager.broadcastRawTx(rlpEncodedTx, { timestamp: l1Timestamp });
+          console.log(`[EventProcessor] L2TX executed: ${txHash}`);
+        }
       } else if (consumedAction && consumedAction.actionType === 0) {
         // L1→L2 call: use the ExecutionConsumed event's Action struct
         // actionType 0 = CALL
@@ -691,7 +719,10 @@ export class EventProcessor {
         console.warn(
           `[EventProcessor] State mismatch after replay! Expected: ${newState.slice(0, 10)}..., Got: ${actualState.slice(0, 10)}...`
         );
-        // Still update tracked state to stay in sync with L1
+        // Keep the mismatched block to maintain L2 block height parity across all
+        // fullnodes. Rolling back would cause block height divergence, which breaks
+        // EIP-1559 base fee determinism. The tracked state advances to match L1;
+        // the proofer uses hints to reach the correct starting state when needed.
       }
 
       // Update tracked state
@@ -714,6 +745,12 @@ export class EventProcessor {
    * Replay a batch of L2TX events from the same L1 block as a single L2 block.
    * Each event has its own L1 tx hash (separate executeL2TX calls in same L1 block).
    * Sends all raw txs to the txpool, then mines one block containing all of them.
+   *
+   * For L2→L1 calls (detected by l2ToL1Result in event args), the L2 block contains:
+   *   1. System tx: loadExecutionTable (pre-load entry for proxy to consume)
+   *   2. Builder EOA tx: createCrossChainProxy (deploy proxy if needed)
+   *   3. User tx: calls proxy, proxy consumes the pre-loaded entry
+   * All derived implicitly from L1 data.
    */
   private async replayBatchExecution(events: ProcessedEvent[]): Promise<void> {
     const blockNumber = events[0].blockNumber;
@@ -725,7 +762,11 @@ export class EventProcessor {
       const l1Timestamp = l1Block ? l1Block.timestamp : undefined;
       let sentCount = 0;
 
-      // Each event comes from a separate executeL2TX L1 tx
+      // First pass: decode all L2TXs and detect proxy deploys for L2→L1 flow.
+      // Track proxy deploys so we know originalAddress/originalRollupId for L2→L1 calls.
+      const proxyDeploysByAddress = new Map<string, { originalAddress: string; originalRollupId: bigint }>();
+      const decodedTxs: { event: ProcessedEvent; rlpEncodedTx: string; parsedTx: Transaction }[] = [];
+
       for (const event of events) {
         const l1Tx = await this.l1Provider.getTransaction(event.transactionHash);
         if (!l1Tx) {
@@ -736,18 +777,128 @@ export class EventProcessor {
         const decoded = this.rollupsInterface.parseTransaction({ data: l1Tx.data });
         if (decoded && decoded.name === 'executeL2TX') {
           const rlpEncodedTx = decoded.args[1];
-          await this.stateManager.sendRawTransaction(rlpEncodedTx);
-          sentCount++;
+          const parsedTx = Transaction.from(rlpEncodedTx);
+          decodedTxs.push({ event, rlpEncodedTx, parsedTx });
+
+          // Check if this L2TX is a createCrossChainProxy call
+          if (parsedTx.to?.toLowerCase() === this.config.rollupsAddress.toLowerCase() && parsedTx.data.startsWith("0x2dd72120")) {
+            // 0x2dd72120 = createCrossChainProxy(address,uint256)
+            try {
+              const ccmIface = new Interface([
+                "function createCrossChainProxy(address originalAddress, uint256 originalRollupId) returns (address)",
+              ]);
+              const decodedProxy = ccmIface.decodeFunctionData("createCrossChainProxy", parsedTx.data);
+              const originalAddress = decodedProxy[0] as string;
+              const originalRollupId = BigInt(decodedProxy[1]);
+
+              // Compute the deterministic proxy address on L2
+              const l2Provider = this.stateManager.getL2Provider();
+              const computeIface = new Interface([
+                "function computeCrossChainProxyAddress(address, uint256, uint256) view returns (address)",
+              ]);
+              const l2ChainId = this.stateManager.getL2ChainId();
+              const computeCalldata = computeIface.encodeFunctionData("computeCrossChainProxyAddress", [
+                originalAddress, originalRollupId, l2ChainId,
+              ]);
+              const proxyResult = await l2Provider!.send("eth_call", [
+                { to: this.config.rollupsAddress, data: computeCalldata }, "latest",
+              ]);
+              const proxyAddress = ("0x" + proxyResult.slice(26)).toLowerCase();
+              proxyDeploysByAddress.set(proxyAddress, { originalAddress, originalRollupId });
+              console.log(`[EventProcessor] Proxy deploy in batch: ${proxyAddress} → ${originalAddress} (rollupId=${originalRollupId})`);
+            } catch (e: any) {
+              console.warn(`[EventProcessor] Failed to decode proxy deploy: ${e.message}`);
+            }
+          }
         }
       }
 
-      if (sentCount === 0) {
-        throw new Error("No executeL2TX transactions decoded from batch events");
-      }
+      // Identify L2→L1 calls and split batch into blocks matching builder structure.
+      // Builder produces: Block N = proxy deploy only, Block N+1 = system tx + user tx.
+      // Non-L2→L1 batches: all txs in one block.
+      const hasL2ToL1 = decodedTxs.some(({ event }) => event.args.l2ToL1Result);
 
-      // Mine ONE L2 block containing all the transactions (with L1 block timestamp)
-      await this.stateManager.mineBlock({ timestamp: l1Timestamp });
-      console.log(`[EventProcessor] Batch of ${sentCount} L2TXs mined in single L2 block (timestamp=${l1Timestamp})`);
+      if (hasL2ToL1) {
+        // L2→L1 batch: split into separate blocks.
+        // First, send and mine proxy deploy txs (they need their own block).
+        const proxyDeployTxs = decodedTxs.filter(
+          ({ parsedTx }) => parsedTx.to?.toLowerCase() === this.config.rollupsAddress.toLowerCase()
+            && parsedTx.data.startsWith("0x2dd72120")
+        );
+        const l2ToL1Txs = decodedTxs.filter(({ event }) => event.args.l2ToL1Result && event.args.l2ToL1Result);
+        const otherTxs = decodedTxs.filter(
+          ({ event, parsedTx }) => !event.args.l2ToL1Result
+            && !(parsedTx.to?.toLowerCase() === this.config.rollupsAddress.toLowerCase() && parsedTx.data.startsWith("0x2dd72120"))
+        );
+
+        // Block 1: proxy deploys (if any)
+        if (proxyDeployTxs.length > 0) {
+          for (const { rlpEncodedTx } of proxyDeployTxs) {
+            await this.stateManager.sendRawTransaction(rlpEncodedTx);
+            sentCount++;
+          }
+          // Also include non-L2→L1, non-proxy-deploy txs in block 1
+          for (const { rlpEncodedTx } of otherTxs) {
+            await this.stateManager.sendRawTransaction(rlpEncodedTx);
+            sentCount++;
+          }
+          await this.stateManager.mineBlock({ timestamp: l1Timestamp });
+          console.log(`[EventProcessor] L2→L1 batch block 1: ${proxyDeployTxs.length + otherTxs.length} txs (proxy deploys + other)`);
+        }
+
+        // Block 2: system preloads (loadExecutionTable) — mined separately to
+        // ensure they execute before user txs (reth orders by gas price, not
+        // submission order, so co-mining would let user txs run first).
+        for (const { event, parsedTx } of l2ToL1Txs) {
+          if (!parsedTx.to) continue;
+          const l2ToL1Result = event.args.l2ToL1Result;
+          const txTo = parsedTx.to.toLowerCase();
+
+          let originalAddress: string;
+          let originalRollupId: bigint;
+          const batchProxy = proxyDeploysByAddress.get(txTo);
+          if (batchProxy) {
+            originalAddress = batchProxy.originalAddress;
+            originalRollupId = batchProxy.originalRollupId;
+          } else {
+            const l2Provider = this.stateManager.getL2Provider()!;
+            const l2Contract = new Contract(this.config.rollupsAddress, [
+              "function authorizedProxies(address) view returns (address, uint64)",
+            ], l2Provider);
+            const proxyInfo = await l2Contract.authorizedProxies(parsedTx.to);
+            originalAddress = proxyInfo[0];
+            originalRollupId = BigInt(proxyInfo[1]);
+          }
+
+          await this.preloadL2ToL1Entry(parsedTx, originalAddress, originalRollupId, l2ToL1Result);
+          sentCount++;
+        }
+        const block2Timestamp = l1Timestamp ? l1Timestamp + 1 : undefined;
+        await this.stateManager.mineBlock({ timestamp: block2Timestamp });
+        console.log(`[EventProcessor] L2→L1 batch block 2: ${l2ToL1Txs.length} system preloads (timestamp=${block2Timestamp})`);
+
+        // Block 3: L2→L1 user txs
+        for (const { rlpEncodedTx } of l2ToL1Txs) {
+          await this.stateManager.sendRawTransaction(rlpEncodedTx);
+          sentCount++;
+        }
+        const block3Timestamp = l1Timestamp ? l1Timestamp + 2 : undefined;
+        await this.stateManager.mineBlock({ timestamp: block3Timestamp });
+        console.log(`[EventProcessor] L2→L1 batch block 3: ${l2ToL1Txs.length} L2→L1 user txs (timestamp=${block3Timestamp})`);
+      } else {
+        // Standard batch: all txs in one block
+        for (const { rlpEncodedTx } of decodedTxs) {
+          await this.stateManager.sendRawTransaction(rlpEncodedTx);
+          sentCount++;
+        }
+
+        if (sentCount === 0) {
+          throw new Error("No executeL2TX transactions decoded from batch events");
+        }
+
+        await this.stateManager.mineBlock({ timestamp: l1Timestamp });
+        console.log(`[EventProcessor] Batch of ${sentCount} txs mined in single L2 block (timestamp=${l1Timestamp})`);
+      }
 
       // Verify final state
       const actualState = await this.stateManager.getActualStateRoot();
@@ -771,6 +922,79 @@ export class EventProcessor {
         this.stateManager.updateState(event.args.newState, BigInt(blockNumber));
       }
     }
+  }
+
+  /**
+   * Pre-load an L2 execution entry for an L2→L1 call.
+   * Sends a loadExecutionTable system tx (without mining) so the proxy can consume it.
+   *
+   * The entry maps: CALL action hash → RESULT nextAction (with L1 return data).
+   * The CALL action hash matches what the L2 CrossChainProxy will compute when
+   * the user's tx hits it.
+   */
+  private async preloadL2ToL1Entry(
+    parsedTx: Transaction,
+    originalAddress: string,
+    originalRollupId: bigint,
+    l2ToL1Result: { actionType: number; rollupId: bigint; data: string; failed: boolean; [key: string]: any }
+  ): Promise<void> {
+    const rollupId = this.stateManager.getRollupId();
+
+    // Build the CALL action the L2 proxy will construct
+    const callAction = {
+      actionType: 0, // CALL
+      rollupId: originalRollupId,
+      destination: originalAddress,
+      value: parsedTx.value,
+      data: parsedTx.data,
+      failed: false,
+      sourceAddress: parsedTx.from!,
+      sourceRollup: rollupId,
+      scope: [] as bigint[],
+    };
+
+    // Hash the CALL action (same encoding as Solidity abi.encode(Action))
+    const abiCoder = AbiCoder.defaultAbiCoder();
+    const ACTION_TUPLE_TYPE = "tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope)";
+    const encodedCall = abiCoder.encode([ACTION_TUPLE_TYPE], [callAction]);
+    const { keccak256 } = await import("ethers");
+    const callHash = keccak256(encodedCall);
+
+    // Build the RESULT nextAction from the L1 execution result
+    const resultNextAction = {
+      actionType: 1, // RESULT
+      rollupId: 0n,
+      destination: "0x0000000000000000000000000000000000000000",
+      value: 0n,
+      data: l2ToL1Result.data,
+      failed: l2ToL1Result.failed,
+      sourceAddress: "0x0000000000000000000000000000000000000000",
+      sourceRollup: 0n,
+      scope: [] as bigint[],
+    };
+
+    // Encode loadExecutionTable([{ stateDeltas: [], actionHash: callHash, nextAction: resultNextAction }])
+    const ccmIface = new Interface([
+      "function loadExecutionTable(tuple(tuple(uint256 rollupId, bytes32 currentState, bytes32 newState, int256 etherDelta)[] stateDeltas, bytes32 actionHash, tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope) nextAction)[] entries)",
+    ]);
+
+    const entries = [{
+      stateDeltas: [],
+      actionHash: callHash,
+      nextAction: resultNextAction,
+    }];
+
+    const loadCallData = ccmIface.encodeFunctionData("loadExecutionTable", [entries]);
+
+    console.log(
+      `[EventProcessor] Pre-loading L2→L1 entry: proxy calls ${originalAddress}, ` +
+      `callHash=${callHash.slice(0, 14)}..., result.failed=${l2ToL1Result.failed}`
+    );
+
+    await this.stateManager.sendSystemTx(
+      this.config.rollupsAddress,
+      loadCallData
+    );
   }
 
   /**

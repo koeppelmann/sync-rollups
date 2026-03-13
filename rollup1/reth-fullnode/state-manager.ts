@@ -332,6 +332,7 @@ export class StateManager {
         "--txpool.minimal-protocol-fee", "0",   // Allow 0-gas txs for deterministic state
         "--txpool.minimum-priority-fee", "0",   // No minimum tip required
         "--txpool.max-account-slots", "256",    // Allow up to 256 pending txs per account (for batch replay)
+        "--engine.persistence-threshold", "0",    // Persist blocks immediately (needed for reliable rollbacks via reth stage unwind)
       ],
       {
         stdio: ["ignore", "ignore", "pipe"],
@@ -451,9 +452,12 @@ export class StateManager {
 
     console.log(`[StateManager] Unwinding reth to L2 block ${l2BlockNumber}...`);
 
+    // reth stage unwind has off-by-one: "to-block N" ends at block N-1.
+    // Pass N+1 to end at the desired block N. Guard against block 0 edge case.
+    const unwindTarget = l2BlockNumber + 1;
     try {
       const result = execSync(
-        `"${rethBinary}" stage unwind --datadir "${rethDataDir}" --chain "${genesisPath}" to-block ${l2BlockNumber}`,
+        `"${rethBinary}" stage unwind --datadir "${rethDataDir}" --chain "${genesisPath}" to-block ${unwindTarget}`,
         {
           timeout: 60000, // 60s timeout
           encoding: "utf-8",
@@ -523,9 +527,10 @@ export class StateManager {
   }
 
   /**
-   * Roll back the L2 EVM to a specific block number.
-   * Stops reth, unwinds to the target block, and restarts reth.
-   * Used to undo simulation state changes that shouldn't persist.
+   * Roll back the L2 EVM to a specific block number using the engine API's
+   * forkchoice mechanism. This is lightweight (no reth restart) and works
+   * with unpersisted engine API blocks. Falls back to the heavy path
+   * (stop + unwind + restart) if forkchoice revert fails.
    */
   async rollbackToBlock(targetBlock: number): Promise<void> {
     const currentBlock = await this.getL2BlockNumber();
@@ -533,6 +538,30 @@ export class StateManager {
       return; // Nothing to rollback
     }
     console.log(`[StateManager] Rolling back L2 from block ${currentBlock} to ${targetBlock}...`);
+
+    // Try lightweight forkchoice-based rollback first.
+    // Get the target block's hash and set it as the chain head.
+    try {
+      const provider = this.getL2Provider();
+      const targetBlockHex = "0x" + targetBlock.toString(16);
+      const block = await provider.send("eth_getBlockByNumber", [targetBlockHex, false]);
+      if (block && block.hash) {
+        await this.engineApiCall("engine_forkchoiceUpdatedV3", [
+          { headBlockHash: block.hash, safeBlockHash: block.hash, finalizedBlockHash: block.hash },
+          null,
+        ]);
+        const newBlock = await this.getL2BlockNumber();
+        if (newBlock === targetBlock) {
+          console.log(`[StateManager] Rollback complete via forkchoice, now at block ${newBlock}`);
+          return;
+        }
+        console.warn(`[StateManager] Forkchoice rollback landed at block ${newBlock}, expected ${targetBlock}. Trying heavy path.`);
+      }
+    } catch (e: any) {
+      console.warn(`[StateManager] Forkchoice rollback failed: ${e.message}. Trying heavy path.`);
+    }
+
+    // Heavy path: stop reth, unwind, restart
     await this.stopEngine();
     try {
       await this.unwindToBlock(targetBlock);
@@ -644,6 +673,10 @@ export class StateManager {
    */
   getRollupId(): bigint {
     return this.config.rollupId;
+  }
+
+  getL2ChainId(): number {
+    return this.config.l2ChainId;
   }
 
   /**

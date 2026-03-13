@@ -103,6 +103,7 @@ impl L1Watcher {
                 let new_state = B256::from_slice(&data[32..64]);
                 let block_number = parse_u64_hex(log["blockNumber"].as_str().unwrap_or("0x0"));
                 let tx_hash = parse_b256(log["transactionHash"].as_str().unwrap_or_default());
+                let log_index = parse_u64_hex(log["logIndex"].as_str().unwrap_or("0x0"));
 
                 let event = L2ExecutionPerformed {
                     rollup_id,
@@ -111,6 +112,7 @@ impl L1Watcher {
                     l1_block_number: block_number,
                     l1_tx_hash: tx_hash,
                     l1_block_timestamp: 0, // populated below after block fetch
+                    log_index,
                 };
 
                 exec_performed_by_tx
@@ -209,27 +211,40 @@ impl L1Watcher {
 
         // Build L2Execution events by pairing L2ExecutionPerformed with ExecutionConsumed
         // Sort by block number for deterministic ordering
-        let mut exec_events: Vec<(u64, B256, L2ExecutionPerformed, Option<ExecutionConsumed>)> = Vec::new();
+        let mut exec_events: Vec<(u64, B256, L2ExecutionPerformed, Option<ExecutionConsumed>, Option<ExecutionConsumed>)> = Vec::new();
         for (tx_hash, performed_list) in &exec_performed_by_tx {
             let consumed_list = consumed_by_tx.get(tx_hash);
             for (i, performed) in performed_list.iter().enumerate() {
                 let consumed = consumed_list.and_then(|list| list.get(i)).cloned();
+                // For L2→L1 calls, the executeL2TX tx emits 2 L2ExecutionPerformed
+                // and 2 ExecutionConsumed events. The first consumed is the L2TX action,
+                // and there's a RESULT consumed (action_type == 1) from the L1 execution.
+                // Attach the RESULT consumed to the first performed event (the L2TX state change).
+                let l2_to_l1_result = if i == 0 {
+                    consumed_list.and_then(|list| {
+                        list.iter().find(|c| c.action.action_type == ActionType::Result).cloned()
+                    })
+                } else {
+                    None
+                };
                 exec_events.push((
                     performed.l1_block_number,
                     *tx_hash,
                     performed.clone(),
                     consumed,
+                    l2_to_l1_result,
                 ));
             }
         }
 
-        // Sort by L1 block number, then by tx index
-        exec_events.sort_by_key(|(block, tx_hash, _, _)| (*block, *tx_hash));
+        // Sort by L1 block number, then by log index for deterministic ordering
+        exec_events.sort_by_key(|(block, _tx_hash, performed, _, _)| (*block, performed.log_index));
 
-        for (_, _, performed, consumed) in exec_events {
+        for (_, _, performed, consumed, l2_to_l1_result) in exec_events {
             events.push(L1Event::L2Execution {
                 performed,
                 consumed,
+                l2_to_l1_result,
             });
         }
 
@@ -258,6 +273,9 @@ pub enum L1Event {
     L2Execution {
         performed: L2ExecutionPerformed,
         consumed: Option<ExecutionConsumed>,
+        /// Second consumed event (RESULT from L1 execution in L2→L1 flow).
+        /// When present, this L2TX triggered an L2→L1 cross-chain call.
+        l2_to_l1_result: Option<ExecutionConsumed>,
     },
     /// State was updated by the rollup owner (no L2 replay needed)
     StateUpdated(StateUpdated),

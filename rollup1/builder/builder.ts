@@ -5,7 +5,7 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from "http";
-import { Contract, JsonRpcProvider, Wallet, Transaction, solidityPackedKeccak256 } from "ethers";
+import { Contract, JsonRpcProvider, Wallet, Transaction, solidityPackedKeccak256, keccak256, toUtf8Bytes } from "ethers";
 import { ExecutionPlanner, ExecutionPlannerConfig } from "./execution-planner.js";
 import { BundleSubmitter, IL1BundleSubmitter, SEPOLIA_RELAYS } from "./bundle-submitter.js";
 import { MockBundleSubmitter } from "./mock-bundle-submitter.js";
@@ -48,11 +48,6 @@ const ROLLUPS_ABI = [
   "function setStateByOwner(uint256 rollupId, bytes32 newStateRoot)",
   "event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
   "event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
-];
-
-const CROSS_CHAIN_PROXY_VIEW_ABI = [
-  "function ORIGINAL_ADDRESS() view returns (address)",
-  "function ORIGINAL_ROLLUP_ID() view returns (uint256)",
 ];
 
 interface SubmitRequest {
@@ -99,16 +94,13 @@ interface PrepareL1CallResponse {
   error?: string;
 }
 
-interface PrepareL2CallRequest {
+interface RegisterL2HintRequest {
   l1Target: string;      // Target contract address on L1
-  sourceAddress?: string; // Optional L2 sender for source-proxy preview
 }
 
-interface PrepareL2CallResponse {
+interface RegisterL2HintResponse {
   success: boolean;
-  proxyAddress?: string;      // Alias proxy address user should call from L2
-  sourceProxyAddress?: string; // Deterministic L1 proxy for the L2 sender
-  proxyDeployed?: boolean;    // Whether proxy was newly deployed
+  proxyAddress?: string;      // Deterministic L2 proxy address user should call
   error?: string;
 }
 
@@ -117,6 +109,10 @@ export class Builder {
   private planner: ExecutionPlanner;
   private l1Provider: JsonRpcProvider;
   private adminWallet: Wallet;
+  /** Secondary wallet for proxy calls on non-Anvil chains. Using a different
+   *  sender ensures postBatch (admin) and proxy call (proxyCaller) can land in
+   *  the same block even when validators only include one tx per sender per block. */
+  private proxyCallerWallet: Wallet;
   private rollupsContract: Contract;
   private server: ReturnType<typeof createServer> | null = null;
   private isAnvilL1 = false; // Detected at startup
@@ -126,6 +122,7 @@ export class Builder {
   private postBatchGasLimit = 30_000_000n;
   private execL2TXGasLimit = 1_000_000n;
   private operatorAddress = ""; // Derived at startup, used to reject operator-signed L2TXs
+  private operatorKey = ""; // Derived at startup, used for L2 proxy deploys
   private readonly prepareL1Cache = new Map<string, {
     stateRoot: string;
     proxyAddress: string;
@@ -134,12 +131,32 @@ export class Builder {
   }>();
   private static readonly PREPARE_L1_CACHE_TTL_MS = 10 * 60 * 1000;
 
+  /** Recent L1→L2 calls that the proofer may need as hints to advance its EVM state.
+   *  Stored after successful L1→L2 call submission and cleared once used as hints. */
+  private recentL1ToL2Hints: Array<{
+    action: any;
+    timestamp: number;
+    sourceProxy: string;
+  }> = [];
+
+  /** L2→L1 hint table: maps L2 proxy address (lowercase) → L1 target address.
+   *  Populated via POST /register-l2-hint. Used to detect L2→L1 calls during
+   *  L2 tx processing without needing the proxy to be deployed yet. */
+  private l2HintTable = new Map<string, string>();
+
+  /** Cached L2 chain ID, set during start() */
+  private l2ChainId = 0n;
+
   constructor(config: BuilderConfig) {
     this.config = config;
 
     // Initialize providers (disable batching to avoid rate limits on public RPCs)
     this.l1Provider = new JsonRpcProvider(config.l1RpcUrl, undefined, { batchMaxCount: 1 });
     this.adminWallet = new Wallet(config.adminPrivateKey, this.l1Provider);
+
+    // Derive a secondary wallet for proxy calls (different sender for same-block inclusion)
+    const proxyCallerKey = keccak256(toUtf8Bytes("sync-rollups-proxy-caller:" + config.adminPrivateKey));
+    this.proxyCallerWallet = new Wallet(proxyCallerKey, this.l1Provider);
 
     // Initialize contracts
     this.rollupsContract = new Contract(
@@ -153,6 +170,7 @@ export class Builder {
       rollupId: config.rollupId,
       fullnodeRpcUrl: config.fullnodeRpcUrl,
       l1RpcUrl: config.l1RpcUrl,
+      rollupsAddress: config.rollupsAddress,
     };
     this.planner = new ExecutionPlanner(plannerConfig);
   }
@@ -167,6 +185,7 @@ export class Builder {
     console.log(`L1 RPC: ${this.config.l1RpcUrl}`);
     console.log(`Builder Fullnode RPC: ${this.config.fullnodeRpcUrl}`);
     console.log(`Admin: ${this.adminWallet.address}`);
+    console.log(`Proxy caller: ${this.proxyCallerWallet.address}`);
     console.log(`Proofer: ${this.config.prooferUrl}`);
     console.log("");
 
@@ -174,11 +193,12 @@ export class Builder {
     // Uses L2 chain ID (same as genesis derivation), queried from the fullnode's reth
     const fullnodeProvider = new JsonRpcProvider(this.config.fullnodeRpcUrl);
     const l2ChainId = (await fullnodeProvider.send("eth_chainId", []));
-    const operatorKey = solidityPackedKeccak256(
+    this.operatorKey = solidityPackedKeccak256(
       ["string", "address", "uint256", "uint256"],
       ["sync-rollups-operator", this.config.rollupsAddress, this.config.rollupId, BigInt(l2ChainId)]
     );
-    this.operatorAddress = new Wallet(operatorKey).address.toLowerCase();
+    this.operatorAddress = new Wallet(this.operatorKey).address.toLowerCase();
+    this.l2ChainId = BigInt(l2ChainId);
     console.log(`[Builder] Operator address: ${this.operatorAddress} (L2TXs from this address will be rejected)`);
 
     // Detect whether L1 is Anvil (supports evm_* methods) or a real chain
@@ -206,6 +226,15 @@ export class Builder {
         // Sepolia: Flashbots relay is unreliable, use priority-fee based ordering instead
         this.postBatchGasLimit = 5_000_000n;
         console.log("[Builder] L1 type: Sepolia testnet (priority fee ordering, 12s slots)");
+      } else if (this.l1ChainId === 10200n) {
+        // Gnosis Chiado testnet: no bundle submission (Chiado builder unreliable).
+        // Uses direct mempool submission with priority-fee ordering (5s slots).
+        this.postBatchGasLimit = 2_000_000n;
+        console.log("[Builder] L1 type: Chiado testnet (direct submission, 5s slots)");
+      } else if (this.l1ChainId === 100n) {
+        // Gnosis mainnet
+        this.postBatchGasLimit = 5_000_000n;
+        console.log("[Builder] L1 type: Gnosis mainnet (direct submission, 5s slots)");
       } else {
         console.log("[Builder] L1 type: real chain (anticipated timestamp mode)");
       }
@@ -226,7 +255,7 @@ export class Builder {
         console.log("  POST /submit           - Submit transaction");
         console.log("  POST /submit-batch     - Submit batch of L2 transactions");
         console.log("  POST /prepare-l1-call  - Prepare L1→L2 call");
-        console.log("  POST /prepare-l2-call  - Prepare L2→L1 call");
+        console.log("  POST /register-l2-hint - Register L2→L1 hint (returns proxy address)");
         console.log("  GET  /status           - Get builder status");
 
         // On real chains, state correction is done inline before each postBatch.
@@ -313,15 +342,15 @@ export class Builder {
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(response));
-      } else if (url.pathname === "/prepare-l2-call" && req.method === "POST") {
+      } else if (url.pathname === "/register-l2-hint" && req.method === "POST") {
         // Read body
         let body = "";
         for await (const chunk of req) {
           body += chunk;
         }
 
-        const request: PrepareL2CallRequest = JSON.parse(body);
-        const response = await this.handlePrepareL2Call(request);
+        const request: RegisterL2HintRequest = JSON.parse(body);
+        const response = await this.handleRegisterL2Hint(request);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(response));
@@ -410,6 +439,16 @@ export class Builder {
     let execReceiptHash: string;
     let entryCount = 0;
 
+    // Check hint table for L2→L1 call detection.
+    // If tx.to matches a registered hint, this is an L2→L1 call.
+    let l2ToL1Target: string | null = null;
+    if (tx.to) {
+      l2ToL1Target = this.l2HintTable.get(tx.to.toLowerCase()) || null;
+      if (l2ToL1Target) {
+        console.log(`[Builder] Hint table match: ${tx.to} → L1 target ${l2ToL1Target}`);
+      }
+    }
+
     // On non-Anvil chains: ensure builder EVM state matches tracked state before
     // planning. The EVM may be ahead due to a persisted simulation from a previous
     // tx (success path keeps simulation state for event processor to reuse).
@@ -476,35 +515,85 @@ export class Builder {
       console.log(`[Builder] Simulation timestamp: ${simTimestamp}`);
 
       let plan: ExecutionPlan;
-      if (tx.to) {
-        const l2ToL1 = await this.tryResolveL2ToL1Proxy(tx.to, l1ChainId);
-        if (l2ToL1) {
-          if (!tx.from) {
-            throw new Error("Signed L2 tx has no sender address");
-          }
-          const sourceProxyOnL1 = await this.rollupsContract.computeCrossChainProxyAddress(
-            tx.from,
-            this.config.rollupId,
-            l1ChainId
-          );
-          console.log(
-            `[Builder] Detected L2→L1 call via prepared proxy ${tx.to} -> ${l2ToL1.l1Target}`
-          );
-          console.log(`[Builder] L1 source proxy for sender ${tx.from}: ${sourceProxyOnL1}`);
-
-          plan = await this.planner.planL2ToL1Call(
-            signedTx,
-            l2ToL1.l1Target,
-            tx.data,
-            tx.value,
-            tx.from,
-            sourceProxyOnL1,
-            simTimestamp,
-            needsStateCorrection ? correctionTargetState : undefined
-          );
-        } else {
-          plan = await this.planner.planL2Transaction(signedTx, simTimestamp, needsStateCorrection ? correctionTargetState : undefined);
+      // Signed proxy deploy tx (if L2→L1 and proxy not yet deployed)
+      let proxyDeploySignedTx: string | undefined;
+      if (l2ToL1Target) {
+        if (!tx.from) {
+          throw new Error("Signed L2 tx has no sender address");
         }
+
+        // Check if the L2 proxy already exists (may have been deployed in a previous call)
+        const fullnodeRpc = new JsonRpcProvider(this.config.fullnodeRpcUrl);
+        const proxyCode = await fullnodeRpc.send("eth_getCode", [tx.to!, "latest"]);
+        if (proxyCode === "0x" || proxyCode === "0x0") {
+          // Proxy not deployed — sign a deploy tx from the builder's L2 EOA.
+          // This is a regular L2 tx calling CrossChainManagerL2.createCrossChainProxy().
+          const { Interface } = await import("ethers");
+          const managerIface = new Interface([
+            "function createCrossChainProxy(address originalAddress, uint256 originalRollupId) returns (address)",
+          ]);
+          const deployCalldata = managerIface.encodeFunctionData("createCrossChainProxy", [
+            l2ToL1Target, 0n, // originalRollupId=0 for L1 target
+          ]);
+
+          // Use admin key for L2 proxy deploys. Do NOT use operator key — the
+          // operator nonce is managed by syncrollups_sendSystemTx and will get out
+          // of sync if a regular L2TX from the operator is mined.
+          const l2Wallet = new Wallet(this.config.adminPrivateKey, fullnodeRpc);
+          const l2Nonce = await fullnodeRpc.send("eth_getTransactionCount", [l2Wallet.address, "latest"]);
+
+          // Compute next base fee for the deploy tx
+          const latestBlock = await fullnodeRpc.send("eth_getBlockByNumber", ["latest", false]);
+          const parentBaseFee = BigInt(latestBlock.baseFeePerGas);
+          const parentGasUsed = BigInt(latestBlock.gasUsed);
+          const parentGasLimit = BigInt(latestBlock.gasLimit);
+          // Simple EIP-1559 next base fee estimate
+          const target = parentGasLimit / 2n;
+          let nextBaseFee = parentBaseFee;
+          if (parentGasUsed > target) {
+            nextBaseFee = parentBaseFee + parentBaseFee * (parentGasUsed - target) / target / 8n;
+          } else if (parentGasUsed < target) {
+            nextBaseFee = parentBaseFee - parentBaseFee * (target - parentGasUsed) / target / 8n;
+          }
+          if (nextBaseFee < 1n) nextBaseFee = 1n;
+
+          proxyDeploySignedTx = await l2Wallet.signTransaction({
+            to: this.config.rollupsAddress, // CrossChainManagerL2 is at the same address on L2
+            data: deployCalldata,
+            nonce: parseInt(l2Nonce, 16),
+            chainId: this.l2ChainId,
+            gasLimit: 500_000,
+            maxFeePerGas: nextBaseFee * 2n,
+            maxPriorityFeePerGas: 0n,
+            type: 2,
+            value: 0,
+          });
+          console.log(`[Builder] Signed L2 proxy deploy tx for ${l2ToL1Target} (from builder EOA ${l2Wallet.address})`);
+        } else {
+          console.log(`[Builder] L2 proxy already deployed at ${tx.to}`);
+        }
+
+        const sourceProxyOnL1 = await this.rollupsContract.computeCrossChainProxyAddress(
+          tx.from,
+          this.config.rollupId,
+          l1ChainId
+        );
+        console.log(
+          `[Builder] L2→L1 call: ${tx.to} → L1 target ${l2ToL1Target}`
+        );
+        console.log(`[Builder] L1 source proxy for sender ${tx.from}: ${sourceProxyOnL1}`);
+
+        plan = await this.planner.planL2ToL1Call(
+          signedTx,
+          l2ToL1Target,
+          tx.data,
+          tx.value,
+          tx.from,
+          sourceProxyOnL1,
+          simTimestamp,
+          needsStateCorrection ? correctionTargetState : undefined,
+          proxyDeploySignedTx
+        );
       } else {
         plan = await this.planner.planL2Transaction(signedTx, simTimestamp, needsStateCorrection ? correctionTargetState : undefined);
       }
@@ -512,8 +601,22 @@ export class Builder {
       entryCount = plan.entries.length;
       console.log(`[Builder] Planned ${entryCount} execution(s)`);
 
-      let proof = await this.requestProof(plan, simTimestamp);
+      // Include any pending L1→L2 hints for the proofer. After an L1→L2 call,
+      // the proofer's EVM may be behind due to timestamp mismatch during replay.
+      const hintsForProof = this.recentL1ToL2Hints.length > 0
+        ? [...this.recentL1ToL2Hints]
+        : undefined;
+      if (hintsForProof) {
+        console.log(`[Builder] Including ${hintsForProof.length} L1→L2 hint(s) for proofer`);
+      }
+
+      let proof = await this.requestProof(plan, simTimestamp, undefined, undefined, hintsForProof);
       console.log("[Builder] Proof obtained from proofer");
+
+      // Clear hints after successful proof — proofer is now caught up
+      if (hintsForProof) {
+        this.recentL1ToL2Hints = [];
+      }
 
       await this.planner.notifyExecutions(plan.entries);
       console.log("[Builder] Fullnode notified");
@@ -559,12 +662,37 @@ export class Builder {
           this.lastCorrectedState = correctionTargetState;
         }
 
+        // Deploy L1 alias proxy if needed (for L2→L1 scope resolution)
+        if (l2ToL1Target) {
+          const l1AliasAddress = await this.rollupsContract.computeCrossChainProxyAddress(
+            l2ToL1Target, l1ChainId, l1ChainId
+          );
+          const l1Code = await this.l1Provider.getCode(l1AliasAddress);
+          if (l1Code === "0x") {
+            signedRawTxs.push(await this.signContractTx("createCrossChainProxy",
+              [l2ToL1Target, l1ChainId],
+              { gasLimit: 500_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+            ));
+            nonce++;
+          }
+        }
+
         signedRawTxs.push(await this.signContractTx("postBatch",
           [entriesData, 0, "0x", proof],
           { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
         ));
         nonce++;
 
+        // executeL2TX for proxy deploy tx (if L2→L1 with new proxy)
+        if (proxyDeploySignedTx) {
+          signedRawTxs.push(await this.signContractTx("executeL2TX",
+            [this.config.rollupId, proxyDeploySignedTx],
+            { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+          ));
+          nonce++;
+        }
+
+        // executeL2TX for user tx
         signedRawTxs.push(await this.signContractTx("executeL2TX",
           [this.config.rollupId, signedTx],
           { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
@@ -621,63 +749,122 @@ export class Builder {
         const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
         const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
 
-        // Explicitly manage nonces for simultaneous submission
-        let nonce = await this.adminWallet.getNonce("pending");
-        const pendingTxs: Promise<any>[] = [];
+        // Fund proxy caller wallet BEFORE signing anything (executeL2TX uses it)
+        // May need 2 executeL2TX calls for L2→L1 (proxy deploy + user tx)
+        const execCallerBalance = await this.l1Provider.getBalance(this.proxyCallerWallet.address);
+        const execTxCount = proxyDeploySignedTx ? 2n : 1n;
+        const execMinBalance = baseMaxFee * 2n * BigInt(this.execL2TXGasLimit) * execTxCount;
+        if (execCallerBalance < execMinBalance) {
+          const fundAmount = execMinBalance * 2n - execCallerBalance;
+          console.log(`[Builder] Funding proxy caller for executeL2TX: ${fundAmount} wei`);
+          const fundTx = await this.adminWallet.sendTransaction({
+            to: this.proxyCallerWallet.address,
+            value: fundAmount,
+            gasLimit: 21_000n,
+            maxFeePerGas: baseMaxFee * 2n,
+            maxPriorityFeePerGas: basePriority * 3n,
+          });
+          await fundTx.wait();
+          console.log(`[Builder] Proxy caller funded: ${fundTx.hash}`);
+        }
+
+        // Pre-sign all transactions, then broadcast simultaneously for same-block inclusion.
+        // Fetch nonces AFTER any funding tx is mined.
+        let nonce = await this.adminWallet.getNonce("latest");
+        const signedRawTxs: string[] = [];
 
         // State correction (if needed): highest priority fee → ordered first
         if (needsStateCorrection) {
-          const corrTx = await this.rollupsContract.setStateByOwner(
-            this.config.rollupId, correctionTargetState,
-            {
-              gasLimit: 100_000n,
-              maxFeePerGas: baseMaxFee * 2n,
-              maxPriorityFeePerGas: basePriority * 5n,
-              nonce,
-            }
-          );
-          pendingTxs.push(corrTx.wait());
-          console.log(`[Builder] State correction tx submitted (nonce=${nonce})`);
+          signedRawTxs.push(await this.signContractTx("setStateByOwner",
+            [this.config.rollupId, correctionTargetState],
+            { gasLimit: 100_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 5n, nonce }
+          ));
+          console.log(`[Builder] Signed setStateByOwner (nonce=${nonce})`);
           nonce++;
           this.lastCorrectedState = correctionTargetState;
         }
 
-        // postBatch: high priority fee → ordered after correction
-        const postBatchTx = await this.rollupsContract.postBatch(
-          entriesData, 0, "0x", proof,
-          {
-            gasLimit: this.postBatchGasLimit,
-            maxFeePerGas: baseMaxFee * 2n,
-            maxPriorityFeePerGas: basePriority * 3n,
-            nonce,
+        // Deploy L1 alias proxy if needed (for L2→L1 scope resolution)
+        if (l2ToL1Target) {
+          const l1AliasAddress = await this.rollupsContract.computeCrossChainProxyAddress(
+            l2ToL1Target, l1ChainId, l1ChainId
+          );
+          const l1Code = await this.l1Provider.getCode(l1AliasAddress);
+          if (l1Code === "0x") {
+            signedRawTxs.push(await this.signContractTx("createCrossChainProxy",
+              [l2ToL1Target, l1ChainId],
+              { gasLimit: 500_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 4n, nonce }
+            ));
+            console.log(`[Builder] Signed createCrossChainProxy for L1 alias (nonce=${nonce})`);
+            nonce++;
           }
-        );
-        const postBatchNonce = nonce;
-        pendingTxs.push(postBatchTx.wait());
-        nonce++;
+        }
 
-        // executeL2TX: lower priority fee → ordered last
-        const execTx = await this.rollupsContract.executeL2TX(
-          this.config.rollupId, signedTx,
-          {
+        // postBatch: high priority fee → ordered after correction
+        signedRawTxs.push(await this.signContractTx("postBatch",
+          [entriesData, 0, "0x", proof],
+          { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 3n, nonce }
+        ));
+        const postBatchNonce = nonce;
+
+        // executeL2TX calls: signed by proxy caller wallet (different sender)
+        const rollupsAddr = await this.rollupsContract.getAddress();
+        const rollupsIface = this.rollupsContract.interface;
+        let execNonce = await this.proxyCallerWallet.getNonce("latest");
+
+        // executeL2TX for proxy deploy tx (if L2→L1 with new proxy)
+        if (proxyDeploySignedTx) {
+          const deployExecCalldata = rollupsIface.encodeFunctionData("executeL2TX", [this.config.rollupId, proxyDeploySignedTx]);
+          signedRawTxs.push(await this.proxyCallerWallet.signTransaction({
+            to: rollupsAddr,
+            data: deployExecCalldata,
             gasLimit: this.execL2TXGasLimit,
             maxFeePerGas: baseMaxFee * 2n,
-            maxPriorityFeePerGas: basePriority,
-            nonce,
-          }
+            maxPriorityFeePerGas: basePriority * 2n, // Higher priority than user's executeL2TX
+            nonce: execNonce,
+            chainId: this.l1ChainId,
+            type: 2,
+          }));
+          execNonce++;
+        }
+
+        // executeL2TX for user tx
+        const execCalldata = rollupsIface.encodeFunctionData("executeL2TX", [this.config.rollupId, signedTx]);
+        signedRawTxs.push(await this.proxyCallerWallet.signTransaction({
+          to: rollupsAddr,
+          data: execCalldata,
+          gasLimit: this.execL2TXGasLimit,
+          maxFeePerGas: baseMaxFee * 2n,
+          maxPriorityFeePerGas: basePriority,
+          nonce: execNonce,
+          chainId: this.l1ChainId,
+          type: 2,
+        }));
+
+        // Broadcast all simultaneously
+        console.log(`[Builder] Broadcasting ${signedRawTxs.length} txs simultaneously...`);
+        const broadcastPromises = signedRawTxs.map((raw, i) =>
+          this.l1Provider.broadcastTransaction(raw).then(tx => {
+            console.log(`[Builder] Tx #${i + 1} broadcast: ${tx.hash}`);
+            return tx;
+          })
         );
-        pendingTxs.push(execTx.wait());
+        const txResponses = await Promise.all(broadcastPromises);
 
         console.log(
-          `[Builder] ${pendingTxs.length} txs submitted simultaneously ` +
-          `(${needsStateCorrection ? "correction+" : ""}postBatch nonce=${postBatchNonce}, exec nonce=${nonce})`
+          `[Builder] ${signedRawTxs.length} txs broadcast ` +
+          `(${needsStateCorrection ? "correction+" : ""}postBatch nonce=${postBatchNonce}, exec from proxy caller nonce=${execNonce})`
         );
+
+        // Wait for all to confirm
+        const pendingTxs = txResponses.map(tx => tx.wait());
 
         // Wait for all to confirm
         const receipts = await Promise.all(pendingTxs);
         const postBatchReceipt = receipts[needsStateCorrection ? 1 : 0];
         const execReceipt = receipts[receipts.length - 1];
-        console.log(`[Builder] Executions loaded: ${postBatchTx.hash}`);
+        const postBatchTxResponse = txResponses[needsStateCorrection ? 1 : 0];
+        console.log(`[Builder] Executions loaded: ${postBatchTxResponse.hash}`);
         execReceiptHash = execReceipt!.hash;
 
         // Verify both landed in the same block with the expected timestamp
@@ -930,40 +1117,9 @@ export class Builder {
 
   /**
    * Resolve whether an L2 tx destination is a prepared proxy representing an L1 target.
-   * For now, we treat a proxy as L2→L1-callable only if originalRollupId == current L1 chain ID.
+   * Checks the L2 EVM for the proxy contract's ORIGINAL_ADDRESS and ORIGINAL_ROLLUP_ID.
+   * A proxy is L2→L1 if ORIGINAL_ROLLUP_ID == 0 (MAINNET_ROLLUP_ID, representing L1).
    */
-  private async tryResolveL2ToL1Proxy(
-    proxyAddress: string,
-    l1ChainId: bigint
-  ): Promise<{ l1Target: string } | null> {
-    try {
-      const code = await this.l1Provider.getCode(proxyAddress);
-      if (code === "0x") {
-        return null;
-      }
-
-      const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
-      if (proxyInfo.originalAddress === "0x0000000000000000000000000000000000000000") {
-        return null;
-      }
-
-      const proxy = new Contract(proxyAddress, CROSS_CHAIN_PROXY_VIEW_ABI, this.l1Provider);
-      const originalAddress = await proxy.ORIGINAL_ADDRESS();
-      const originalRollupId = BigInt(await proxy.ORIGINAL_ROLLUP_ID());
-
-      if (originalRollupId !== l1ChainId) {
-        return null;
-      }
-
-      return { l1Target: originalAddress };
-    } catch (error: any) {
-      console.warn(
-        `[Builder] Failed to resolve potential L2→L1 proxy ${proxyAddress}: ${error.message}`
-      );
-      return null;
-    }
-  }
-
   /**
    * Process an L1 transaction (L1 contract calling L2)
    */
@@ -1309,7 +1465,244 @@ export class Builder {
         console.log("[Builder] Proxy already exists");
       }
 
-      // On real L1: ensure EVM matches tracked state, then check if L1 correction needed.
+      // Non-Anvil with bundle submitter: postBatch + proxy call MUST be in the
+      // same block (ExecutionNotInCurrentBlock). Use atomic bundle submission:
+      // plan → prove → bundle [correction? + postBatch + proxyCall] → submit.
+      if (!this.isAnvilL1) {
+        console.log("[Builder] Non-Anvil L1→L2 call flow (mempool broadcast)");
+
+        const MAX_PREP_ATTEMPTS = 5;
+        for (let attempt = 1; attempt <= MAX_PREP_ATTEMPTS; attempt++) {
+          console.log(`[Builder] L1→L2 bundle attempt ${attempt}/${MAX_PREP_ATTEMPTS}`);
+
+          // Snapshot builder's L2 for rollback on failure
+          const fullnodeRpc = new JsonRpcProvider(this.config.fullnodeRpcUrl);
+          const snapshotBlockHex = await fullnodeRpc.send("eth_blockNumber", []);
+          const snapshotBlock = parseInt(snapshotBlockHex, 16);
+
+          // Ensure EVM matches tracked state
+          const evmState = await fullnodeRpc.send("syncrollups_getActualStateRoot", []);
+          const trackedState = await fullnodeRpc.send("syncrollups_getStateRoot", []);
+          if (evmState !== trackedState) {
+            const trackedL2BlockHex = await fullnodeRpc.send("syncrollups_getTrackedL2Block", []);
+            const trackedL2Block = parseInt(trackedL2BlockHex, 16);
+            console.log(`[Builder] EVM ahead of tracked, rolling back to L2 block ${trackedL2Block}`);
+            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${trackedL2Block.toString(16)}`]); } catch {}
+            for (let i = 0; i < 60; i++) {
+              await new Promise(r => setTimeout(r, 2000));
+              try {
+                const newRpc = new JsonRpcProvider(this.config.fullnodeRpcUrl);
+                const newEvm = await newRpc.send("syncrollups_getActualStateRoot", []);
+                if (newEvm === trackedState) break;
+                const newTracked = await newRpc.send("syncrollups_getStateRoot", []);
+                if (newEvm === newTracked) break;
+              } catch {}
+            }
+          }
+
+          // Check if state correction is needed
+          let needsCorrection = false;
+          let correctionTarget = "";
+          const currentRollup = await this.rollupsContract.rollups(this.config.rollupId);
+          const currentL1State = currentRollup.stateRoot;
+          const currentTracked = await fullnodeRpc.send("syncrollups_getStateRoot", []);
+          if (currentTracked !== currentL1State) {
+            needsCorrection = true;
+            correctionTarget = currentTracked;
+            console.log(`[Builder] State correction needed: L1=${(currentL1State as string).slice(0, 12)}... vs tracked=${correctionTarget.slice(0, 12)}...`);
+          }
+
+          // Choose timestamp
+          const simTimestamp = await this.chooseSimTimestamp();
+          console.log(`[Builder] Simulation timestamp: ${simTimestamp}`);
+
+          // Query proxy rollupId
+          const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
+          const proxyRollupId = BigInt(proxyInfo.originalRollupId);
+
+          // Plan execution
+          // On non-Anvil chains, the proxy caller wallet calls the proxy,
+          // so msg.sender (used as sourceAddress in the CALL action) is the
+          // proxy caller wallet, not the original user.
+          const effectiveSourceAddress = this.isAnvilL1 ? sourceAddress : this.proxyCallerWallet.address;
+          let plan;
+          try {
+            plan = await this.planner.planL1ToL2CallWithProxy(
+              l2Target, data, BigInt(value),
+              proxyAddress, sourceProxyAddress, effectiveSourceAddress,
+              simTimestamp,
+              needsCorrection ? correctionTarget : undefined,
+              proxyRollupId
+            );
+          } catch (planErr: any) {
+            console.warn(`[Builder] Planning failed: ${planErr.message}`);
+            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
+            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
+            throw planErr;
+          }
+          console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
+
+          // Check for simulation failure
+          const rootExec = plan.entries[0];
+          if (rootExec?.nextAction.actionType === ActionType.RESULT && rootExec.nextAction.failed) {
+            const revertData = rootExec.nextAction.data || "0x";
+            const hint = (revertData === "0x" && BigInt(value) > 0n) ? " (target function may not be payable)" : "";
+            throw new Error(`L1→L2 simulation failed (revert data: ${revertData})${hint}`);
+          }
+
+          // Request proof
+          let proof;
+          try {
+            proof = await this.requestProof(plan, simTimestamp, undefined, [sourceProxyAddress]);
+          } catch (proofErr: any) {
+            console.warn(`[Builder] Proofer rejected: ${proofErr.message}`);
+            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
+            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
+            throw proofErr;
+          }
+          console.log("[Builder] Proof obtained from proofer");
+
+          // Notify fullnode
+          await this.planner.notifyExecutions(plan.entries);
+
+          // Build entries data for postBatch
+          const entriesData = plan.entries.map((e) => ({
+            stateDeltas: e.stateDeltas.map((d) => ({
+              rollupId: d.rollupId, currentState: d.currentState,
+              newState: d.newState, etherDelta: d.etherDelta,
+            })),
+            actionHash: e.actionHash,
+            nextAction: {
+              actionType: e.nextAction.actionType, rollupId: e.nextAction.rollupId,
+              destination: e.nextAction.destination, value: e.nextAction.value,
+              data: e.nextAction.data, failed: e.nextAction.failed,
+              sourceAddress: e.nextAction.sourceAddress, sourceRollup: e.nextAction.sourceRollup,
+              scope: e.nextAction.scope,
+            },
+          }));
+
+          // Build atomic bundle: [correction?] + postBatch + proxyCall (from separate wallet)
+          const feeData = await this.l1Provider.getFeeData();
+          const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
+          const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
+          // Fund the proxy caller wallet FIRST (before signing the bundle txs).
+          // The proxy call comes from proxyCallerWallet (different sender) so that
+          // postBatch + proxy call can land in the same block.
+          const proxyCallerBalance = await this.l1Provider.getBalance(this.proxyCallerWallet.address);
+          const callValue = BigInt(value);
+          const minBalance = callValue + baseMaxFee * 2n * 500_000n;
+          if (proxyCallerBalance < minBalance) {
+            const fundAmount = minBalance * 2n - proxyCallerBalance;
+            console.log(`[Builder] Funding proxy caller ${this.proxyCallerWallet.address} with ${fundAmount} wei`);
+            const fundTx = await this.adminWallet.sendTransaction({
+              to: this.proxyCallerWallet.address,
+              value: fundAmount,
+              gasLimit: 21_000n,
+              maxFeePerGas: baseMaxFee * 2n,
+              maxPriorityFeePerGas: basePriority * 3n,
+            });
+            await fundTx.wait();
+            console.log(`[Builder] Proxy caller funded: ${fundTx.hash}`);
+          }
+
+          // Fetch admin nonce AFTER any funding tx is mined, to ensure accuracy
+          let nonce = await this.adminWallet.getNonce("latest");
+
+          const signedRawTxs: string[] = [];
+
+          if (needsCorrection) {
+            signedRawTxs.push(await this.signContractTx("setStateByOwner",
+              [this.config.rollupId, correctionTarget],
+              { gasLimit: 100_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 5n, nonce }
+            ));
+            console.log(`[Builder] Bundle tx #${signedRawTxs.length}: setStateByOwner (nonce=${nonce})`);
+            nonce++;
+            this.lastCorrectedState = correctionTarget;
+          }
+
+          signedRawTxs.push(await this.signContractTx("postBatch",
+            [entriesData, 0, "0x", proof],
+            { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+          ));
+          console.log(`[Builder] Bundle tx #${signedRawTxs.length}: postBatch (nonce=${nonce})`);
+          nonce++;
+
+          const proxyCallerNonce = await this.proxyCallerWallet.getNonce("pending");
+          const proxyCallTx = {
+            to: proxyAddress,
+            value: callValue,
+            data: data,
+            gasLimit: 500_000n,
+            maxFeePerGas: baseMaxFee * 2n,
+            maxPriorityFeePerGas: basePriority,
+            nonce: proxyCallerNonce,
+            chainId: this.l1ChainId,
+            type: 2,
+          };
+          signedRawTxs.push(await this.proxyCallerWallet.signTransaction(proxyCallTx));
+          console.log(`[Builder] Bundle tx #${signedRawTxs.length}: proxy call from ${this.proxyCallerWallet.address} (nonce=${proxyCallerNonce})`);
+
+          // Broadcast all txs to mempool simultaneously. With explicit nonces
+          // the miner orders them correctly. On low-traffic chains (Chiado, testnets)
+          // they'll typically land in the same block.
+          console.log(`[Builder] Broadcasting ${signedRawTxs.length} txs to mempool...`);
+          const broadcastPromises = signedRawTxs.map((raw, i) =>
+            this.l1Provider.broadcastTransaction(raw).then(tx => {
+              console.log(`[Builder] Tx #${i + 1} broadcast: ${tx.hash}`);
+              return tx;
+            })
+          );
+          const txResponses = await Promise.all(broadcastPromises);
+
+          // Wait for the last tx (proxy call) to be mined
+          const lastTx = txResponses[txResponses.length - 1];
+          console.log(`[Builder] Waiting for proxy call tx ${lastTx.hash} to be mined...`);
+          const receipt = await lastTx.wait();
+
+          if (!receipt || receipt.status === 0) {
+            console.warn(`[Builder] Proxy call tx reverted in block ${receipt?.blockNumber}`);
+            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
+            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
+            throw new Error(`Proxy call tx reverted after ${MAX_PREP_ATTEMPTS} attempts`);
+          }
+
+          // Verify postBatch was in the same block
+          const postBatchTx = txResponses[signedRawTxs.length - 2]; // tx before proxy call
+          const postBatchReceipt = await postBatchTx.wait();
+          if (postBatchReceipt?.blockNumber !== receipt.blockNumber) {
+            console.warn(`[Builder] WARNING: postBatch in block ${postBatchReceipt?.blockNumber}, proxy call in block ${receipt.blockNumber} — different blocks!`);
+            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
+            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
+            throw new Error(`postBatch and proxy call landed in different blocks`);
+          }
+
+          console.log(`[Builder] All txs included in block ${receipt.blockNumber}`);
+
+          // Store hint for the proofer — after L1→L2 calls, the proofer's EVM may
+          // lag behind (timestamp mismatch causes state divergence). When the builder
+          // later requests proof for a subsequent L2TX, it sends these as hints.
+          if (plan.rootActions.length > 0) {
+            this.recentL1ToL2Hints.push({
+              action: plan.rootActions[0],
+              timestamp: simTimestamp,
+              sourceProxy: sourceProxyAddress,
+            });
+            console.log(`[Builder] Stored L1→L2 hint for proofer (${this.recentL1ToL2Hints.length} pending)`);
+          }
+
+          return {
+            success: true,
+            proxyAddress,
+            sourceProxyAddress,
+            proxyDeployed,
+            executionsLoaded: plan.entries.length,
+            bundleIncluded: true,
+            l1BlockNumber: receipt.blockNumber,
+          };
+        }
+      }
+
+      // On real L1 (no bundle submitter): ensure EVM matches tracked state, then check if L1 correction needed.
       let prepNeedsCorrection = false;
       let prepCorrectionTarget = "";
       if (!this.isAnvilL1) {
@@ -1558,73 +1951,41 @@ export class Builder {
    * Handle L2→L1 call preparation.
    * This deploys (if needed) the deterministic proxy alias that L2 txs can target.
    */
-  private async handlePrepareL2Call(
-    request: PrepareL2CallRequest
-  ): Promise<PrepareL2CallResponse> {
-    const { l1Target, sourceAddress } = request;
-
-    console.log(`[Builder] Preparing L2→L1 call:`);
-    console.log(`  L1 target: ${l1Target}`);
-    if (sourceAddress) {
-      console.log(`  L2 source: ${sourceAddress}`);
-    }
+  /**
+   * Register an L2→L1 hint. Computes the deterministic L2 proxy address for the
+   * given L1 target and stores it in the hint table. No deployment or state changes.
+   */
+  private async handleRegisterL2Hint(
+    request: RegisterL2HintRequest
+  ): Promise<RegisterL2HintResponse> {
+    const { l1Target } = request;
+    console.log(`[Builder] Registering L2→L1 hint for L1 target: ${l1Target}`);
 
     try {
-      const synced = await this.planner.isFullnodeSynced();
-      if (!synced) {
-        return {
-          success: false,
-          error: "Fullnode not synced with L1",
-        };
-      }
+      // Compute deterministic L2 proxy address via CrossChainManagerL2
+      const fullnodeRpc = new JsonRpcProvider(this.config.fullnodeRpcUrl);
+      const managerIface = new (await import("ethers")).Interface([
+        "function computeCrossChainProxyAddress(address, uint256, uint256) view returns (address)",
+      ]);
+      const computeCalldata = managerIface.encodeFunctionData("computeCrossChainProxyAddress", [
+        l1Target, 0n, this.l2ChainId, // originalRollupId=0 (L1), domain=L2 chain ID
+      ]);
+      const result = await fullnodeRpc.send("eth_call", [
+        { to: this.config.rollupsAddress, data: computeCalldata },
+        "latest",
+      ]);
+      const proxyAddress = "0x" + result.slice(26);
 
-      const l1ChainId = (await this.l1Provider.getNetwork()).chainId;
-
-      // Alias proxy for L1 target (domain = L1, origin = L1).
-      const proxyAddress = await this.rollupsContract.computeCrossChainProxyAddress(
-        l1Target,
-        l1ChainId,
-        l1ChainId
-      );
-      console.log(`[Builder] Computed L2→L1 alias proxy: ${proxyAddress}`);
-
-      let proxyDeployed = false;
-      const code = await this.l1Provider.getCode(proxyAddress);
-      if (code === "0x") {
-        console.log("[Builder] Alias proxy not deployed, deploying...");
-        const deployedProxy = await this.deployProxy(l1Target, l1ChainId);
-        if (deployedProxy.toLowerCase() !== proxyAddress.toLowerCase()) {
-          throw new Error(
-            `Deployed proxy ${deployedProxy} does not match computed ${proxyAddress}`
-          );
-        }
-        proxyDeployed = true;
-        console.log("[Builder] Alias proxy deployed");
-      } else {
-        console.log("[Builder] Alias proxy already exists");
-      }
-
-      let sourceProxyAddress: string | undefined;
-      if (sourceAddress) {
-        // Caller identity on L1 is derived from (sourceAddress, rollupId).
-        sourceProxyAddress = await this.rollupsContract.computeCrossChainProxyAddress(
-          sourceAddress,
-          this.config.rollupId,
-          l1ChainId
-        );
-        console.log(
-          `[Builder] L1 source proxy for L2 sender ${sourceAddress}: ${sourceProxyAddress}`
-        );
-      }
+      // Store in hint table
+      this.l2HintTable.set(proxyAddress.toLowerCase(), l1Target);
+      console.log(`[Builder] L2 hint registered: proxy ${proxyAddress} → L1 target ${l1Target}`);
 
       return {
         success: true,
         proxyAddress,
-        sourceProxyAddress,
-        proxyDeployed,
       };
     } catch (error: any) {
-      console.error("[Builder] Prepare L2 call error:", error);
+      console.error("[Builder] Register L2 hint error:", error);
       return {
         success: false,
         error: error.message,
@@ -1699,10 +2060,20 @@ export class Builder {
     plan: ExecutionPlan,
     timestamp?: number,
     batchSignedTxs?: string[],
-    sourceProxies?: (string | null)[]
+    sourceProxies?: (string | null)[],
+    hints?: Array<{ action: any; timestamp: number; sourceProxy?: string }>
   ): Promise<string> {
     // Wait for proofer fullnode to catch up before requesting proof
     await this.waitForProoferSync();
+
+    // Format hints for the proofer protocol
+    const formattedHints = hints?.map(h => ({
+      action: typeof h.action === 'object' && 'actionType' in h.action && typeof h.action.actionType === 'number'
+        ? actionToJson(h.action)
+        : h.action, // already in JSON format
+      timestamp: h.timestamp,
+      sourceProxy: h.sourceProxy,
+    }));
 
     const body = JSON.stringify({
       entries: plan.entries.map(executionEntryToJson),
@@ -1710,6 +2081,8 @@ export class Builder {
       timestamp,
       batchSignedTxs,
       sourceProxies,
+      hints: formattedHints,
+      preloadSystemCalls: plan.preloadSystemCalls,
     });
 
     const response = await fetch(`${this.config.prooferUrl}/prove`, {
@@ -1895,33 +2268,15 @@ export class Builder {
       return;
     }
 
+    // Timestamp mismatch is expected on real chains — the builder simulates with
+    // a predicted timestamp, but the actual L1 block may land in a different slot.
+    // The event processor now accepts pre-executed state regardless of timestamp,
+    // so no correction is needed. The next transaction will include a setStateByOwner
+    // correction if the L1 state diverged.
     console.log(
-      `[Builder] Timestamp mismatch: simulated=${simTimestamp}, actual L1 block=${actualTimestamp}. ` +
-      `Event processor will re-execute with correct timestamp.`
+      `[Builder] Timestamp mismatch: simulated=${simTimestamp}, actual=${actualTimestamp}. ` +
+      `Event processors accept pre-executed state for consistency.`
     );
-
-    // Don't rollback the fullnode directly — the event processor handles
-    // timestamp correction (rollback + re-mine with correct L1 timestamp).
-    // Doing it here races with the event processor and crashes when reth is stopped.
-    // Wait for the event processor to process the L1 event and correct the state.
-    for (let attempt = 0; attempt < 60; attempt++) {
-      await new Promise(r => setTimeout(r, 2000));
-      try {
-        const fullnodeRpc = new JsonRpcProvider(this.config.fullnodeRpcUrl);
-        const isSynced = await fullnodeRpc.send("syncrollups_isSynced", []);
-        if (isSynced) {
-          console.log(`[Builder] Event processor corrected timestamp, fullnode synced.`);
-          break;
-        }
-      } catch {
-        // Fullnode may be restarting during rollback — retry
-      }
-    }
-
-    // The event processor re-executed with the correct timestamp, so the EVM state
-    // is now correct. L1 still has the wrong state (from simulated timestamp), but
-    // the next L2TX submission will bundle the setStateByOwner correction atomically
-    // with the postBatch, avoiding timing gaps.
   }
 
   /**

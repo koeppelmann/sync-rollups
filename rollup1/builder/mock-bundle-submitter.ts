@@ -51,9 +51,20 @@ export class MockBundleSubmitter implements IL1BundleSubmitter {
     await this.provider.send("evm_setAutomine", [false]);
     try {
       // Broadcast all txs to mempool
-      for (const rawTx of signedRawTxs) {
-        await this.provider.send("eth_sendRawTransaction", [rawTx]);
+      for (let i = 0; i < signedRawTxs.length; i++) {
+        try {
+          const result = await this.provider.send("eth_sendRawTransaction", [signedRawTxs[i]]);
+          console.log(`[MockBundle] tx ${i} (${txHashes[i].slice(0, 10)}) sent: ${result}`);
+        } catch (e: any) {
+          console.error(`[MockBundle] tx ${i} (${txHashes[i].slice(0, 10)}) send FAILED: ${e.message?.slice(0, 200)}`);
+        }
       }
+
+      // Check mempool before mining
+      try {
+        const pool = await this.provider.send("txpool_status", []);
+        console.log(`[MockBundle] Mempool before mine: pending=${parseInt(pool.pending, 16)}, queued=${parseInt(pool.queued, 16)}`);
+      } catch {}
 
       // Set block timestamp if requested
       if (timestamp !== undefined) {

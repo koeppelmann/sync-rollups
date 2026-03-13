@@ -6,5 +6,13 @@
     "l1ChainId": 31337,
     "l1ExplorerUrl": "http://localhost:4000",
     "l2ExplorerUrl": "http://localhost:4001"
+  },
+  "chiado": {
+    "label": "Chiado Testnet",
+    "settingsFile": "settings.chiado.json",
+    "walletsFile": "wallets.chiado.json",
+    "l1ChainId": 10200,
+    "l1ExplorerUrl": "https://gnosis-chiado.blockscout.com",
+    "l2ExplorerUrl": ""
   }
 }

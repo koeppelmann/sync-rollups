@@ -1,0 +1,14 @@
+{
+  "l1Rpc": "https://rpc.chiadochain.net",
+  "l2Rpc": "",
+  "l2EvmRpc": "",
+  "builderUrl": "https://builder.chiado.gcd.ovh",
+  "prooferUrl": "",
+  "ethrexRpc": "",
+  "ethrexEvmRpc": "",
+  "blockscoutL1Url": "https://gnosis-chiado.blockscout.com",
+  "blockscoutL2Url": "",
+  "rollupsAddress": "0x1322324B440b49213170e7a229635788AA784290",
+  "rollupId": "2",
+  "deploymentBlock": "20218048"
+}

@@ -787,7 +787,12 @@
         <span></span>
 
         <span>Rollup ID</span>
-        <input type="text" id="rollupId" value="0" />
+        <div style="display: flex; gap: 4px; align-items: center;">
+          <select id="rollupId" style="flex: 1; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+            <option value="0">0</option>
+          </select>
+          <button onclick="discoverRollups()" title="Scan contract for rollups" style="padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; background: #f5f5f5; cursor: pointer; font-size: 12px;">Scan</button>
+        </div>
         <span></span>
       </div>
     </div>
@@ -1080,6 +1085,20 @@
         rollupsAddress: '',
         rollupId: "0",
         deploymentBlock: "0"
+      },
+      chiado: {
+        l1Rpc: 'https://rpc.chiadochain.net',
+        l2Rpc: '',
+        l2EvmRpc: '',
+        builderUrl: 'https://builder.chiado.gcd.ovh',
+        prooferUrl: '',
+        ethrexRpc: '',
+        ethrexEvmRpc: '',
+        blockscoutL1Url: 'https://gnosis-chiado.blockscout.com',
+        blockscoutL2Url: '',
+        rollupsAddress: '0x1322324B440b49213170e7a229635788AA784290',
+        rollupId: "2",
+        deploymentBlock: "20218048"
       }
     };
 
@@ -1327,15 +1346,93 @@
 
     function applyRuntimeSettings(settings) {
       if (!settings || typeof settings !== 'object') return;
-      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'ethrexRpc', 'ethrexEvmRpc', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress', 'rollupId'];
+      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'ethrexRpc', 'ethrexEvmRpc', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress'];
       for (const key of keys) {
         if (typeof settings[key] === 'string') {
           const input = document.getElementById(key);
           if (input) input.value = settings[key];
         }
       }
+      // For rollupId (now a <select>), ensure the option exists before setting value
+      if (typeof settings.rollupId === 'string') {
+        const sel = document.getElementById('rollupId');
+        if (sel) {
+          const val = settings.rollupId;
+          if (!Array.from(sel.options).some(o => o.value === val)) {
+            const opt = document.createElement('option');
+            opt.value = val;
+            opt.textContent = val;
+            sel.appendChild(opt);
+          }
+          sel.value = val;
+        }
+      }
       if (settings.deploymentBlock !== undefined) {
         runtimeDeploymentBlock = parseInt(settings.deploymentBlock, 10) || 0;
+      }
+    }
+
+    /**
+     * Discover all rollups registered on the current Rollups contract.
+     * Populates the rollupId <select> with found rollups.
+     */
+    async function discoverRollups() {
+      const rollupsAddr = document.getElementById('rollupsAddress').value;
+      const l1Rpc = document.getElementById('l1Rpc').value;
+      if (!rollupsAddr || !l1Rpc) {
+        log('Need Rollups address and L1 RPC to scan', 'error');
+        return;
+      }
+
+      log('Scanning for rollups...', 'info');
+      try {
+        const provider = new ethers.JsonRpcProvider(l1Rpc);
+        const contract = new ethers.Contract(rollupsAddr, [
+          ...ROLLUPS_ABI,
+          "function createRollup(bytes32, bytes32, address) returns (uint256)",
+        ], provider);
+
+        // Read nextRollupId from storage slot 0
+        const slot0 = await provider.getStorage(rollupsAddr, 0);
+        const nextRollupId = parseInt(slot0, 16);
+
+        const sel = document.getElementById('rollupId');
+        const currentVal = sel.value;
+        sel.innerHTML = '';
+
+        let foundCount = 0;
+        for (let i = 0; i < nextRollupId; i++) {
+          try {
+            const data = await contract.rollups(i);
+            const owner = data[0];
+            const stateRoot = data[2];
+            const balance = data[3];
+            const isActive = owner !== '0x0000000000000000000000000000000000000000';
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            const balStr = ethers.formatEther(balance);
+            const ownerShort = owner.slice(0, 6) + '...' + owner.slice(-4);
+            opt.textContent = isActive
+              ? `${i} — owner: ${ownerShort}, bal: ${balStr} ETH`
+              : `${i} — (empty)`;
+            sel.appendChild(opt);
+            if (isActive) foundCount++;
+          } catch {
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = `${i} — (error reading)`;
+            sel.appendChild(opt);
+          }
+        }
+
+        // Restore previous selection if valid, otherwise pick first active
+        if (Array.from(sel.options).some(o => o.value === currentVal)) {
+          sel.value = currentVal;
+        }
+
+        log(`Found ${foundCount} active rollup(s) out of ${nextRollupId} slot(s)`, 'info');
+      } catch (err) {
+        log('Scan failed: ' + err.message, 'error');
       }
     }
 
@@ -3004,6 +3101,12 @@
             if (prepareResult.sourceProxyAddress) {
               log(`L2 sender proxy: ${prepareResult.sourceProxyAddress}`, 'info');
             }
+            if (prepareResult.bundleIncluded) {
+              // Bundle chains: builder already submitted everything atomically
+              log('L1→L2 call bundled and included on L1!', 'success');
+              setTimeout(() => { refreshStatus(); fetchTxHistory(); fetchAllWalletBalances(); }, 3000);
+              return;
+            }
           }
         }
 
@@ -3016,25 +3119,27 @@
           log(`Using L1 nonce from RPC: ${browserNonce}`, 'info');
         }
 
-        // Send transaction on L1 (on mainnet, L1 proxy will route to builder for bundling)
-        // On mainnet bundle flow: proxy may not exist yet (deployed in bundle), so
-        // gas estimation would fail. Use a fixed gas limit for the proxy call.
-        const isMainnetBundle = targetIsL2 && parseInt(await callJsonRpc(l1Rpc, 'eth_chainId', []), 16) === 1;
-        const txRequest = {
-          to: finalTo,
-          value: ethers.parseEther(value),
-          data: data,
-          ...(browserNonce !== undefined ? { nonce: browserNonce } : {}),
-          ...(isMainnetBundle ? { gasLimit: 500000 } : {}),
-        };
-        const tx = await signer.sendTransaction(txRequest);
+        {
+          // Direct flow: send transaction on L1
+          // On mainnet bundle flow: proxy may not exist yet (deployed in bundle), so
+          // gas estimation would fail. Use a fixed gas limit for the proxy call.
+          const isMainnetBundle = targetIsL2 && parseInt(await callJsonRpc(l1Rpc, 'eth_chainId', []), 16) === 1;
+          const txRequest = {
+            to: finalTo,
+            value: ethers.parseEther(value),
+            data: data,
+            ...(browserNonce !== undefined ? { nonce: browserNonce } : {}),
+            ...(isMainnetBundle ? { gasLimit: 500000 } : {}),
+          };
+          const tx = await signer.sendTransaction(txRequest);
 
-        log(`L1 TX sent: ${tx.hash}`, 'info');
-        const receipt = await tx.wait();
-        log(`L1 TX mined in block ${receipt.blockNumber}`, 'success');
+          log(`L1 TX sent: ${tx.hash}`, 'info');
+          const receipt = await tx.wait();
+          log(`L1 TX mined in block ${receipt.blockNumber}`, 'success');
 
-        // Show result
-        showTxResult(tx.hash);
+          // Show result
+          showTxResult(tx.hash);
+        }
 
         // Refresh after delay
         setTimeout(() => {
@@ -4112,7 +4217,8 @@
       walletBalances = {};
       deployedContracts = [];
 
-      // Re-fetch everything
+      // Discover rollups on the new contract, then refresh
+      await discoverRollups().catch(() => {});
       await fetchAllWalletBalances();
       await refreshStatus();
       await fetchTxHistory();
@@ -4153,6 +4259,19 @@
       updateAddressDropdown();
       updateFunctionSelector();
       updateConnectedWalletDisplay();
+
+      // Auto-discover rollups and refresh when rollupId changes
+      const rollupSel = document.getElementById('rollupId');
+      if (rollupSel) {
+        rollupSel.addEventListener('change', async () => {
+          log(`Switched to rollup ${rollupSel.value}`, 'info');
+          await refreshStatus();
+          await fetchTxHistory();
+        });
+      }
+      // Auto-scan rollups on load (non-blocking)
+      discoverRollups().catch(() => {});
+
       await fetchAllWalletBalances();
       await refreshStatus();
       await fetchTxHistory();

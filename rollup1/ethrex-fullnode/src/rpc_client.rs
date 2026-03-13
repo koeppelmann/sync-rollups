@@ -193,4 +193,93 @@ impl RpcClient {
             Ok(Some(result))
         }
     }
+
+    /// Call authorizedProxies(address) on a contract (Rollups or CrossChainManagerL2).
+    /// Returns (originalAddress, originalRollupId).
+    pub async fn call_authorized_proxies(
+        &self,
+        contract_addr: &str,
+        proxy_addr: &str,
+    ) -> Result<ProxyInfo> {
+        // authorizedProxies(address) selector = keccak256("authorizedProxies(address)")[..4]
+        use tiny_keccak::{Hasher, Keccak};
+        let mut hasher = Keccak::v256();
+        hasher.update(b"authorizedProxies(address)");
+        let mut hash = [0u8; 32];
+        hasher.finalize(&mut hash);
+        let selector = &hash[0..4];
+
+        // ABI encode: selector + address padded to 32 bytes
+        let proxy_bytes = hex::decode(proxy_addr.strip_prefix("0x").unwrap_or(proxy_addr))?;
+        let mut calldata = Vec::from(selector);
+        calldata.extend_from_slice(&[0u8; 12]);
+        if proxy_bytes.len() == 20 {
+            calldata.extend_from_slice(&proxy_bytes);
+        } else {
+            bail!("Invalid proxy address length: {}", proxy_bytes.len());
+        }
+
+        let data_hex = format!("0x{}", hex::encode(&calldata));
+        let result = self.eth_call(contract_addr, &data_hex).await?;
+        let result_bytes = hex::decode(result.strip_prefix("0x").unwrap_or(&result))?;
+
+        if result_bytes.len() < 64 {
+            bail!("authorizedProxies returned too short: {} bytes", result_bytes.len());
+        }
+
+        // Returns (address originalAddress, uint64 originalRollupId)
+        // Word 0: address (20 bytes, right-aligned in 32 bytes)
+        let original_address = alloy_primitives::Address::from_slice(&result_bytes[12..32]);
+        // Word 1: uint64 (right-aligned in 32 bytes)
+        let original_rollup_id = alloy_primitives::U256::from_be_bytes::<32>(
+            result_bytes[32..64].try_into().unwrap_or([0u8; 32]),
+        );
+
+        Ok(ProxyInfo {
+            original_address,
+            original_rollup_id,
+        })
+    }
+
+    /// Call computeCrossChainProxyAddress(address,uint256,uint256) on a contract.
+    /// Returns the deterministic proxy address.
+    pub async fn compute_cross_chain_proxy_address(
+        &self,
+        contract_addr: &str,
+        original_address: &alloy_primitives::Address,
+        original_rollup_id: alloy_primitives::U256,
+        domain: alloy_primitives::U256,
+    ) -> Result<alloy_primitives::Address> {
+        use tiny_keccak::{Hasher, Keccak};
+        let mut hasher = Keccak::v256();
+        hasher.update(b"computeCrossChainProxyAddress(address,uint256,uint256)");
+        let mut hash = [0u8; 32];
+        hasher.finalize(&mut hash);
+        let selector = &hash[0..4];
+
+        let mut calldata = Vec::from(selector);
+        // address
+        calldata.extend_from_slice(&[0u8; 12]);
+        calldata.extend_from_slice(original_address.as_slice());
+        // originalRollupId
+        calldata.extend_from_slice(&original_rollup_id.to_be_bytes::<32>());
+        // domain
+        calldata.extend_from_slice(&domain.to_be_bytes::<32>());
+
+        let data_hex = format!("0x{}", hex::encode(&calldata));
+        let result = self.eth_call(contract_addr, &data_hex).await?;
+        let result_bytes = hex::decode(result.strip_prefix("0x").unwrap_or(&result))?;
+
+        if result_bytes.len() < 32 {
+            bail!("computeCrossChainProxyAddress returned too short");
+        }
+
+        Ok(alloy_primitives::Address::from_slice(&result_bytes[12..32]))
+    }
+}
+
+/// Proxy identity info returned by authorizedProxies
+pub struct ProxyInfo {
+    pub original_address: alloy_primitives::Address,
+    pub original_rollup_id: alloy_primitives::U256,
 }

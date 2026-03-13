@@ -27,6 +27,11 @@ export const SEPOLIA_RELAYS: BundleRelayConfig[] = [
   { name: "Flashbots Sepolia", url: "https://relay-sepolia.flashbots.net" },
 ];
 
+/** Relays for Gnosis Chiado testnet. */
+export const CHIADO_RELAYS: BundleRelayConfig[] = [
+  { name: "Chiado Builder", url: "https://builder.chiado.gcd.ovh" },
+];
+
 export interface BundleResult {
   included: boolean;
   blockNumber: number;

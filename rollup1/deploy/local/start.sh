@@ -65,7 +65,7 @@ mkdir -p "$ROLLUP_DIR/logs"
 
 # Start L1 Anvil
 echo "Starting L1 Anvil on port $L1_RPC_PORT..."
-anvil --port $L1_RPC_PORT > "$ROLLUP_DIR/logs/anvil.log" 2>&1 &
+anvil --port $L1_RPC_PORT --gas-limit 100000000 > "$ROLLUP_DIR/logs/anvil.log" 2>&1 &
 sleep 2
 
 # Deploy contracts

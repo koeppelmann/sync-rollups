@@ -14,7 +14,7 @@ use crate::engine::EngineClient;
 use crate::l1_watcher::{L1Event, L1Watcher};
 use crate::rpc_client::RpcClient;
 use crate::tx_signer::TxSigner;
-use crate::types::{ActionType, fn_selectors};
+use crate::types::{ActionType, ExecutionConsumed, fn_selectors};
 
 pub struct EventProcessor {
     l1_watcher: L1Watcher,
@@ -61,7 +61,7 @@ impl EventProcessor {
         let mut i = 0;
         while i < events.len() {
             match &events[i] {
-                L1Event::L2Execution { performed, consumed: _ } => {
+                L1Event::L2Execution { performed, consumed: _, l2_to_l1_result: _ } => {
                     // Collect all L2Execution events from the same L1 block
                     let l1_block = performed.l1_block_number;
                     let mut batch: Vec<usize> = vec![i];
@@ -79,15 +79,15 @@ impl EventProcessor {
                         // Filter out L1-only accounting events (currentState == newState)
                         // These don't produce L2 blocks and should not be included in batch replay
                         let all_events: Vec<_> = batch.iter().map(|&idx| {
-                            if let L1Event::L2Execution { performed, consumed } = &events[idx] {
-                                (performed.clone(), consumed.clone())
+                            if let L1Event::L2Execution { performed, consumed, l2_to_l1_result } = &events[idx] {
+                                (performed.clone(), consumed.clone(), l2_to_l1_result.clone())
                             } else {
                                 unreachable!()
                             }
                         }).collect();
 
                         let replay_events: Vec<_> = all_events.iter()
-                            .filter(|(p, _)| p.current_state != p.new_state)
+                            .filter(|(p, _, _)| p.current_state != p.new_state)
                             .cloned()
                             .collect();
 
@@ -115,7 +115,7 @@ impl EventProcessor {
                             );
 
                             // Process L1-only accounting events
-                            for (perf, _consumed) in &all_events {
+                            for (perf, _consumed, _l2_to_l1) in &all_events {
                                 if perf.current_state == perf.new_state {
                                     info!("L1-only accounting event (currentState == newState), no L2 replay needed");
                                     self.tracked_state_root = perf.new_state;
@@ -132,10 +132,10 @@ impl EventProcessor {
 
                     // Single event processing (original logic)
                     let performed = performed.clone();
-                    let consumed = if let L1Event::L2Execution { consumed, .. } = &events[i] {
-                        consumed.clone()
+                    let (consumed, l2_to_l1_result) = if let L1Event::L2Execution { consumed, l2_to_l1_result, .. } = &events[i] {
+                        (consumed.clone(), l2_to_l1_result.clone())
                     } else {
-                        None
+                        (None, None)
                     };
 
                     info!(
@@ -165,7 +165,7 @@ impl EventProcessor {
                     }
 
                     // Replay the execution
-                    if let Err(e) = self.replay_execution(&performed, &consumed).await {
+                    if let Err(e) = self.replay_execution(&performed, &consumed, &l2_to_l1_result).await {
                         error!("Failed to replay execution: {e}");
                     }
 
@@ -204,6 +204,7 @@ impl EventProcessor {
         &mut self,
         performed: &crate::types::L2ExecutionPerformed,
         consumed: &Option<crate::types::ExecutionConsumed>,
+        l2_to_l1_result: &Option<crate::types::ExecutionConsumed>,
     ) -> Result<()> {
         // Check if there's an ExecutionConsumed event with a Call action (cross-chain calls, bridge deposits)
         if let Some(consumed) = consumed {
@@ -309,6 +310,67 @@ impl EventProcessor {
                 let rlp_encoded_tx = decode_bytes_param(&tx_input_bytes, 1)?;
                 let rlp_hex = format!("0x{}", hex::encode(&rlp_encoded_tx));
 
+                // L2→L1 call: pre-load execution entry before broadcasting
+                if let Some(result_consumed) = l2_to_l1_result {
+                    info!("L2→L1 call detected (2 ExecutionConsumed events)");
+
+                    // Look up proxy info from L2 state
+                    let parsed_tx = rlp_decode_tx_minimal(&rlp_encoded_tx)?;
+                    if let Some(proxy_addr) = &parsed_tx.to {
+                        let proxy_info = self.l2_client.call_authorized_proxies(
+                            &format!("{:?}", self.rollups_address),
+                            &format!("0x{}", hex::encode(proxy_addr)),
+                        ).await?;
+
+                        // Build CALL action the proxy will construct
+                        let call_action_encoded = abi_encode_action(
+                            0, // CALL
+                            proxy_info.original_rollup_id,
+                            proxy_info.original_address,
+                            parsed_tx.value,
+                            &parsed_tx.data,
+                            false,
+                            parsed_tx.from,
+                            U256::from(self.rollup_id),
+                            &[],
+                        );
+
+                        // Hash the CALL action
+                        let mut abi_encoded = Vec::new();
+                        abi_encoded.extend_from_slice(&encode_u256(0x20));
+                        abi_encoded.extend_from_slice(&call_action_encoded);
+                        let call_hash = keccak256_bytes(&abi_encoded);
+
+                        // Build RESULT nextAction from the L1 execution result
+                        let result_data = &result_consumed.action.data;
+                        let result_failed = result_consumed.action.failed;
+
+                        let load_calldata = build_l2_to_l1_load_calldata(
+                            &call_hash, result_data, result_failed,
+                        );
+
+                        let next_base_fee = self.get_next_base_fee().await?;
+                        let load_tx = self.tx_signer.sign_tx(
+                            &self.rollups_address, &load_calldata,
+                            U256::ZERO, 10_000_000, next_base_fee,
+                        )?;
+                        self.l2_client.send_raw_transaction(&load_tx).await?;
+                        info!("L2→L1: pre-loaded execution entry (callHash=0x{}...)", &hex::encode(&call_hash.0)[..12]);
+                    }
+
+                    // Block N: mine system preload separately (ethrex orders by
+                    // gas price, so co-mining would let user tx run first)
+                    let (preload_hash, _) = self.engine.mine_block(&self.l2_client, None, Some(performed.l1_block_timestamp)).await?;
+                    info!("L2→L1: preload mined in block {preload_hash}");
+
+                    // Block N+1: mine user's tx
+                    self.l2_client.send_raw_transaction(&rlp_hex).await?;
+                    let user_timestamp = performed.l1_block_timestamp + 1;
+                    let (block_hash, _) = self.engine.mine_block(&self.l2_client, None, Some(user_timestamp)).await?;
+                    info!("L2→L1 user tx mined in block {block_hash}");
+                    return Ok(());
+                }
+
                 info!("L2TX: broadcasting raw transaction");
 
                 let tx_hash = self.l2_client.send_raw_transaction(&rlp_hex).await?;
@@ -325,44 +387,189 @@ impl EventProcessor {
     }
 
     /// Replay a batch of L2TX events from the same L1 block as a single L2 block.
+    /// For L2→L1 batches, splits into 2 blocks matching builder structure:
+    ///   Block 1 (timestamp=T): proxy deploys + other txs
+    ///   Block 2 (timestamp=T+1): system preload txs + L2→L1 user txs
     async fn replay_batch_execution(
         &mut self,
-        batch: &[(crate::types::L2ExecutionPerformed, Option<crate::types::ExecutionConsumed>)],
+        batch: &[(crate::types::L2ExecutionPerformed, Option<crate::types::ExecutionConsumed>, Option<ExecutionConsumed>)],
     ) -> Result<()> {
-        // Each event has its own L1 tx hash (separate executeL2TX calls in same L1 block).
-        // Decode the L2TX from each event's L1 transaction.
-        let mut sent_count = 0u64;
-        for (performed, _consumed) in batch {
+        let batch_timestamp = batch[0].0.l1_block_timestamp;
+
+        // Pass 1: Decode all L2TXs and detect proxy deploys
+        struct DecodedTx {
+            rlp_hex: String,
+            rlp_bytes: Vec<u8>,
+            is_proxy_deploy: bool,
+            has_l2_to_l1: bool,
+            l2_to_l1_result: Option<ExecutionConsumed>,
+            /// For proxy deploys: (originalAddress, originalRollupId) decoded from calldata
+            proxy_deploy_info: Option<(Address, U256)>,
+        }
+
+        let create_proxy_selector = fn_selectors::create_cross_chain_proxy();
+        let mut decoded_txs: Vec<DecodedTx> = Vec::new();
+        let rollups_addr_lower = format!("{:?}", self.rollups_address).to_lowercase();
+
+        for (performed, _consumed, l2_to_l1_result) in batch {
             let l1_tx = self.l1_watcher.get_transaction(performed.l1_tx_hash).await?;
             let tx_input = l1_tx["input"].as_str().unwrap_or("0x");
             let tx_input_bytes = hex::decode(tx_input.strip_prefix("0x").unwrap_or(tx_input))?;
 
-            if tx_input_bytes.len() >= 4 {
-                let selector: [u8; 4] = tx_input_bytes[0..4].try_into()?;
-                if selector == fn_selectors::execute_l2tx() {
-                    let rlp_encoded_tx = decode_bytes_param(&tx_input_bytes, 1)?;
-                    let rlp_hex = format!("0x{}", hex::encode(&rlp_encoded_tx));
-
-                    // Send to txpool without mining
-                    match self.l2_client.send_raw_transaction(&rlp_hex).await {
-                        Ok(_) => sent_count += 1,
-                        Err(e) => warn!("Failed to send batch tx to txpool: {e}"),
-                    }
-                } else {
-                    warn!("Non-executeL2TX call in batch, skipping");
-                }
+            if tx_input_bytes.len() < 4 {
+                continue;
             }
+            let selector: [u8; 4] = tx_input_bytes[0..4].try_into()?;
+            if selector != fn_selectors::execute_l2tx() {
+                warn!("Non-executeL2TX call in batch, skipping");
+                continue;
+            }
+
+            let rlp_encoded_tx = decode_bytes_param(&tx_input_bytes, 1)?;
+            let rlp_hex = format!("0x{}", hex::encode(&rlp_encoded_tx));
+            let parsed = rlp_decode_tx_minimal(&rlp_encoded_tx)?;
+
+            let is_proxy_deploy = if let Some(to) = &parsed.to {
+                let to_hex = format!("0x{}", hex::encode(to)).to_lowercase();
+                to_hex == rollups_addr_lower && parsed.data.len() >= 4 && parsed.data[0..4] == create_proxy_selector
+            } else {
+                false
+            };
+
+            let proxy_deploy_info = if is_proxy_deploy && parsed.data.len() >= 68 {
+                // createCrossChainProxy(address originalAddress, uint256 originalRollupId)
+                let orig_addr = Address::from_slice(&parsed.data[16..36]);
+                let orig_rollup = U256::from_be_bytes::<32>(parsed.data[36..68].try_into()?);
+                Some((orig_addr, orig_rollup))
+            } else {
+                None
+            };
+
+            decoded_txs.push(DecodedTx {
+                rlp_hex,
+                rlp_bytes: rlp_encoded_tx,
+                is_proxy_deploy,
+                has_l2_to_l1: l2_to_l1_result.is_some(),
+                l2_to_l1_result: l2_to_l1_result.clone(),
+                proxy_deploy_info,
+            });
         }
 
-        if sent_count == 0 {
+        if decoded_txs.is_empty() {
             eyre::bail!("No executeL2TX transactions decoded from batch events");
         }
 
-        // Mine ONE L2 block containing all the transactions
-        // Use L1 block timestamp for deterministic state roots
-        let batch_timestamp = batch[0].0.l1_block_timestamp;
-        let (block_hash, _state_root) = self.engine.mine_block(&self.l2_client, None, Some(batch_timestamp)).await?;
-        info!("Batch of {} L2TXs mined in block {} (timestamp={})", sent_count, block_hash, batch_timestamp);
+        let has_l2_to_l1 = decoded_txs.iter().any(|t| t.has_l2_to_l1);
+
+        if has_l2_to_l1 {
+            // Compute proxy addresses for any proxy deploys in this batch
+            let mut proxy_map: std::collections::HashMap<Vec<u8>, (Address, U256)> = std::collections::HashMap::new();
+            for tx in &decoded_txs {
+                if let Some((orig_addr, orig_rollup)) = &tx.proxy_deploy_info {
+                    let proxy_addr = self.l2_client.compute_cross_chain_proxy_address(
+                        &format!("{:?}", self.rollups_address),
+                        orig_addr,
+                        *orig_rollup,
+                        U256::from(self.l2_chain_id),
+                    ).await?;
+                    proxy_map.insert(proxy_addr.as_slice().to_vec(), (*orig_addr, *orig_rollup));
+                    info!("Proxy deploy in batch: {:?} → {:?} (rollupId={})", proxy_addr, orig_addr, orig_rollup);
+                }
+            }
+
+            // Block 1: proxy deploys + other non-L2→L1 txs
+            let mut block1_count = 0u64;
+            for tx in &decoded_txs {
+                if tx.is_proxy_deploy || !tx.has_l2_to_l1 {
+                    match self.l2_client.send_raw_transaction(&tx.rlp_hex).await {
+                        Ok(_) => block1_count += 1,
+                        Err(e) => warn!("Failed to send batch tx: {e}"),
+                    }
+                }
+            }
+            if block1_count > 0 {
+                let (block_hash, _) = self.engine.mine_block(&self.l2_client, None, Some(batch_timestamp)).await?;
+                info!("L2→L1 batch block 1: {} txs (proxy deploys + other) in {block_hash}", block1_count);
+            }
+
+            // Block 2: system preloads + L2→L1 user txs
+            let next_base_fee = self.get_next_base_fee().await?;
+            for tx in &decoded_txs {
+                if !tx.has_l2_to_l1 {
+                    continue;
+                }
+                let result_consumed = tx.l2_to_l1_result.as_ref().unwrap();
+                let parsed = rlp_decode_tx_minimal(&tx.rlp_bytes)?;
+                let to_bytes = match &parsed.to {
+                    Some(b) => b.clone(),
+                    None => continue,
+                };
+
+                // Look up proxy info from batch map or L2 state
+                let (orig_addr, orig_rollup) = if let Some(info) = proxy_map.get(&to_bytes) {
+                    *info
+                } else {
+                    let proxy_hex = format!("0x{}", hex::encode(&to_bytes));
+                    let info = self.l2_client.call_authorized_proxies(
+                        &format!("{:?}", self.rollups_address),
+                        &proxy_hex,
+                    ).await?;
+                    (info.original_address, info.original_rollup_id)
+                };
+
+                // Build CALL action hash
+                let call_action_encoded = abi_encode_action(
+                    0, orig_rollup, orig_addr, parsed.value,
+                    &parsed.data, false, parsed.from,
+                    U256::from(self.rollup_id), &[],
+                );
+                let mut abi_encoded = Vec::new();
+                abi_encoded.extend_from_slice(&encode_u256(0x20));
+                abi_encoded.extend_from_slice(&call_action_encoded);
+                let call_hash = keccak256_bytes(&abi_encoded);
+
+                // Build loadExecutionTable with RESULT nextAction
+                let load_calldata = build_l2_to_l1_load_calldata(
+                    &call_hash, &result_consumed.action.data, result_consumed.action.failed,
+                );
+                let load_tx = self.tx_signer.sign_tx(
+                    &self.rollups_address, &load_calldata,
+                    U256::ZERO, 10_000_000, next_base_fee,
+                )?;
+                self.l2_client.send_raw_transaction(&load_tx).await?;
+                info!("L2→L1 batch: pre-loaded entry (callHash=0x{}...)", &hex::encode(&call_hash.0)[..12]);
+            }
+
+            // Block 2: mine system preloads separately
+            let block2_timestamp = batch_timestamp + 1;
+            let (block_hash, _) = self.engine.mine_block(&self.l2_client, None, Some(block2_timestamp)).await?;
+            info!("L2→L1 batch block 2: system preloads in {block_hash} (timestamp={})", block2_timestamp);
+
+            // Block 3: L2→L1 user txs
+            let mut l2_to_l1_count = 0u64;
+            for tx in &decoded_txs {
+                if tx.has_l2_to_l1 {
+                    match self.l2_client.send_raw_transaction(&tx.rlp_hex).await {
+                        Ok(_) => l2_to_l1_count += 1,
+                        Err(e) => warn!("Failed to send L2→L1 tx: {e}"),
+                    }
+                }
+            }
+            let block3_timestamp = batch_timestamp + 2;
+            let (block_hash, _) = self.engine.mine_block(&self.l2_client, None, Some(block3_timestamp)).await?;
+            info!("L2→L1 batch block 3: {} user txs in {block_hash} (timestamp={})", l2_to_l1_count, block3_timestamp);
+        } else {
+            // Standard batch: all txs in one block
+            let mut sent_count = 0u64;
+            for tx in &decoded_txs {
+                match self.l2_client.send_raw_transaction(&tx.rlp_hex).await {
+                    Ok(_) => sent_count += 1,
+                    Err(e) => warn!("Failed to send batch tx: {e}"),
+                }
+            }
+            let (block_hash, _) = self.engine.mine_block(&self.l2_client, None, Some(batch_timestamp)).await?;
+            info!("Batch of {} L2TXs mined in block {} (timestamp={})", sent_count, block_hash, batch_timestamp);
+        }
 
         Ok(())
     }
@@ -666,4 +873,348 @@ fn build_execute_incoming_calldata(
     calldata.extend_from_slice(&encode_u256(0));
 
     calldata
+}
+
+/// Build loadExecutionTable calldata for L2→L1 call.
+/// Entry maps: actionHash = call_hash → nextAction = RESULT (with L1 return data).
+fn build_l2_to_l1_load_calldata(
+    call_hash: &B256,
+    result_data: &[u8],
+    result_failed: bool,
+) -> Vec<u8> {
+    let selector = fn_selectors::load_execution_table();
+    let mut calldata = Vec::from(selector);
+
+    // offset to entries array = 0x20
+    calldata.extend_from_slice(&encode_u256(0x20));
+    // entries array: length = 1
+    calldata.extend_from_slice(&encode_u256(1));
+    // offset to entries[0] = 0x20
+    calldata.extend_from_slice(&encode_u256(0x20));
+
+    // ExecutionEntry head: stateDeltas offset, actionHash, nextAction offset
+    calldata.extend_from_slice(&encode_u256(0x60)); // stateDeltas offset
+    calldata.extend_from_slice(call_hash.as_slice()); // actionHash = CALL hash
+    calldata.extend_from_slice(&encode_u256(0x80)); // nextAction offset (after empty stateDeltas)
+
+    // stateDeltas: empty array
+    calldata.extend_from_slice(&encode_u256(0));
+
+    // nextAction: RESULT with L1 return data
+    let result_action = abi_encode_action(
+        1, // RESULT
+        U256::ZERO,
+        Address::ZERO,
+        U256::ZERO,
+        result_data,
+        result_failed,
+        Address::ZERO,
+        U256::ZERO,
+        &[],
+    );
+    calldata.extend_from_slice(&result_action);
+
+    calldata
+}
+
+/// Minimal parsed transaction data from RLP-encoded tx
+struct ParsedTxMinimal {
+    to: Option<Vec<u8>>, // 20-byte address, None for contract creation
+    from: Address,
+    data: Vec<u8>,
+    value: U256,
+}
+
+/// Decode an RLP-encoded EIP-1559 (type 2) or legacy transaction to extract basic fields.
+/// This is a minimal decoder — it only extracts to, data, value, and recovers from.
+fn rlp_decode_tx_minimal(rlp_bytes: &[u8]) -> Result<ParsedTxMinimal> {
+    if rlp_bytes.is_empty() {
+        eyre::bail!("Empty RLP bytes");
+    }
+
+    // EIP-1559 (type 2) tx: first byte is 0x02, followed by RLP list
+    // Legacy tx: first byte is RLP list prefix (0xc0..0xf7 or 0xf8..0xff)
+    let (is_eip1559, payload) = if rlp_bytes[0] == 0x02 {
+        (true, &rlp_bytes[1..])
+    } else {
+        (false, rlp_bytes)
+    };
+
+    // Decode the outer RLP list
+    let (list_items, _) = decode_rlp_list(payload)?;
+
+    if is_eip1559 {
+        // EIP-1559: [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, v, r, s]
+        if list_items.len() < 12 {
+            eyre::bail!("EIP-1559 tx too few fields: {}", list_items.len());
+        }
+        let to = if list_items[5].is_empty() { None } else { Some(list_items[5].to_vec()) };
+        let value = rlp_bytes_to_u256(&list_items[6]);
+        let data = list_items[7].to_vec();
+        let chain_id = rlp_bytes_to_u64(&list_items[0]);
+
+        // Recover sender from signature
+        let v = rlp_bytes_to_u64(&list_items[9]);
+        let r = &list_items[10];
+        let s = &list_items[11];
+        let from = recover_eip1559_sender(rlp_bytes, chain_id, v, r, s)?;
+
+        Ok(ParsedTxMinimal { to, from, data, value })
+    } else {
+        // Legacy: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
+        if list_items.len() < 9 {
+            eyre::bail!("Legacy tx too few fields: {}", list_items.len());
+        }
+        let to = if list_items[3].is_empty() { None } else { Some(list_items[3].to_vec()) };
+        let value = rlp_bytes_to_u256(&list_items[4]);
+        let data = list_items[5].to_vec();
+        let v_raw = rlp_bytes_to_u64(&list_items[6]);
+        let r = &list_items[7];
+        let s = &list_items[8];
+
+        // EIP-155: chainId = (v - 35) / 2
+        let chain_id = if v_raw >= 35 { (v_raw - 35) / 2 } else { 0 };
+        let v = if v_raw >= 35 { v_raw - chain_id * 2 - 35 } else { v_raw - 27 };
+
+        let from = recover_legacy_sender(rlp_bytes, chain_id, v, r, s)?;
+
+        Ok(ParsedTxMinimal { to, from, data, value })
+    }
+}
+
+/// Decode an RLP list, returning the items as byte slices
+fn decode_rlp_list(data: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
+    if data.is_empty() {
+        eyre::bail!("Empty RLP data");
+    }
+
+    let (payload, total_len) = decode_rlp_length(data)?;
+    let mut items = Vec::new();
+    let mut pos = 0;
+
+    while pos < payload.len() {
+        let (item, item_total) = decode_rlp_item(&payload[pos..])?;
+        items.push(item);
+        pos += item_total;
+    }
+
+    Ok((items, total_len))
+}
+
+/// Decode RLP length prefix, returning (payload, total_consumed_bytes)
+fn decode_rlp_length(data: &[u8]) -> Result<(&[u8], usize)> {
+    let prefix = data[0];
+    if prefix <= 0x7f {
+        // Single byte
+        Ok((&data[0..1], 1))
+    } else if prefix <= 0xb7 {
+        // Short string: 0-55 bytes
+        let len = (prefix - 0x80) as usize;
+        Ok((&data[1..1 + len], 1 + len))
+    } else if prefix <= 0xbf {
+        // Long string
+        let len_bytes = (prefix - 0xb7) as usize;
+        let mut len = 0usize;
+        for i in 0..len_bytes {
+            len = (len << 8) | data[1 + i] as usize;
+        }
+        let start = 1 + len_bytes;
+        Ok((&data[start..start + len], start + len))
+    } else if prefix <= 0xf7 {
+        // Short list: 0-55 bytes payload
+        let len = (prefix - 0xc0) as usize;
+        Ok((&data[1..1 + len], 1 + len))
+    } else {
+        // Long list
+        let len_bytes = (prefix - 0xf7) as usize;
+        let mut len = 0usize;
+        for i in 0..len_bytes {
+            len = (len << 8) | data[1 + i] as usize;
+        }
+        let start = 1 + len_bytes;
+        Ok((&data[start..start + len], start + len))
+    }
+}
+
+/// Decode a single RLP item, returning (payload_bytes, total_consumed)
+fn decode_rlp_item(data: &[u8]) -> Result<(&[u8], usize)> {
+    decode_rlp_length(data)
+}
+
+/// Convert RLP-decoded bytes to U256
+fn rlp_bytes_to_u256(bytes: &[u8]) -> U256 {
+    if bytes.is_empty() {
+        return U256::ZERO;
+    }
+    let mut padded = [0u8; 32];
+    let start = 32 - bytes.len().min(32);
+    padded[start..start + bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
+    U256::from_be_bytes(padded)
+}
+
+/// Convert RLP-decoded bytes to u64
+fn rlp_bytes_to_u64(bytes: &[u8]) -> u64 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let mut val = 0u64;
+    for &b in bytes {
+        val = (val << 8) | b as u64;
+    }
+    val
+}
+
+/// Recover sender for EIP-1559 transaction
+fn recover_eip1559_sender(
+    raw_tx: &[u8],
+    _chain_id: u64,
+    v: u64,
+    r: &[u8],
+    s: &[u8],
+) -> Result<Address> {
+    // For EIP-1559, the signing payload is: keccak256(0x02 || rlp([chainId, nonce, ..., accessList]))
+    // The raw_tx is: 0x02 || rlp([..., v, r, s])
+    // We need to rebuild the RLP list with only the first 9 fields (without v, r, s).
+    //
+    // IMPORTANT: We must preserve the raw RLP encoding of each field (including
+    // list prefixes like 0xc0 for empty access list). Decoding and re-encoding
+    // is lossy (lists become strings), so instead we extract raw RLP item spans.
+
+    let rlp_data = &raw_tx[1..]; // skip 0x02 type byte
+    // Skip the outer list header to get the payload
+    let (payload, _) = decode_rlp_length(rlp_data)?;
+    let payload_offset = rlp_data.len() - payload.len(); // bytes consumed by the list header
+
+    // Walk the payload to find the byte boundaries of each raw RLP item
+    let mut raw_items: Vec<&[u8]> = Vec::new();
+    let mut pos = 0;
+    while pos < payload.len() {
+        let (_item_payload, item_total) = decode_rlp_item(&payload[pos..])?;
+        raw_items.push(&payload[pos..pos + item_total]); // raw RLP bytes including prefix
+        pos += item_total;
+    }
+
+    if raw_items.len() < 12 {
+        eyre::bail!("EIP-1559 tx too few fields for sender recovery: {}", raw_items.len());
+    }
+
+    // Concatenate raw RLP bytes of first 9 fields, then wrap in a list
+    let mut unsigned_payload = Vec::new();
+    for item in &raw_items[..9] {
+        unsigned_payload.extend_from_slice(item);
+    }
+    let mut unsigned_rlp = Vec::new();
+    encode_rlp_length(unsigned_payload.len(), 0xc0, &mut unsigned_rlp);
+    unsigned_rlp.extend_from_slice(&unsigned_payload);
+
+    // Signing hash = keccak256(0x02 || unsigned_rlp)
+    let mut to_hash = vec![0x02u8];
+    to_hash.extend_from_slice(&unsigned_rlp);
+    let msg_hash = keccak256_bytes(&to_hash);
+
+    recover_from_signature(&msg_hash, v, r, s)
+}
+
+/// Recover sender for legacy transaction
+fn recover_legacy_sender(
+    raw_tx: &[u8],
+    chain_id: u64,
+    v: u64,
+    r: &[u8],
+    s: &[u8],
+) -> Result<Address> {
+    // Extract raw RLP item spans (preserving prefixes)
+    let (payload, _) = decode_rlp_length(raw_tx)?;
+    let mut raw_items: Vec<&[u8]> = Vec::new();
+    let mut pos = 0;
+    while pos < payload.len() {
+        let (_item_payload, item_total) = decode_rlp_item(&payload[pos..])?;
+        raw_items.push(&payload[pos..pos + item_total]);
+        pos += item_total;
+    }
+
+    if raw_items.len() < 9 {
+        eyre::bail!("Legacy tx too few fields for sender recovery: {}", raw_items.len());
+    }
+
+    // EIP-155: sign over [nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0]
+    // Non-EIP-155: sign over [nonce, gasPrice, gasLimit, to, value, data]
+    let mut unsigned_payload = Vec::new();
+    for item in &raw_items[..6] {
+        unsigned_payload.extend_from_slice(item);
+    }
+    if chain_id > 0 {
+        let chain_bytes = u64_to_be_bytes_trimmed(chain_id);
+        rlp_encode_item(&chain_bytes, &mut unsigned_payload);
+        rlp_encode_item(&[], &mut unsigned_payload); // 0
+        rlp_encode_item(&[], &mut unsigned_payload); // 0
+    }
+
+    let mut unsigned_rlp = Vec::new();
+    encode_rlp_length(unsigned_payload.len(), 0xc0, &mut unsigned_rlp);
+    unsigned_rlp.extend_from_slice(&unsigned_payload);
+
+    let msg_hash = keccak256_bytes(&unsigned_rlp);
+    recover_from_signature(&msg_hash, v, r, s)
+}
+
+
+/// RLP-encode a single item
+fn rlp_encode_item(data: &[u8], out: &mut Vec<u8>) {
+    if data.len() == 1 && data[0] <= 0x7f {
+        out.push(data[0]);
+    } else if data.is_empty() {
+        out.push(0x80);
+    } else {
+        encode_rlp_length(data.len(), 0x80, out);
+        out.extend_from_slice(data);
+    }
+}
+
+/// Encode RLP length prefix
+fn encode_rlp_length(len: usize, offset: u8, out: &mut Vec<u8>) {
+    if len <= 55 {
+        out.push(offset + len as u8);
+    } else {
+        let len_bytes = u64_to_be_bytes_trimmed(len as u64);
+        out.push(offset + 55 + len_bytes.len() as u8);
+        out.extend_from_slice(&len_bytes);
+    }
+}
+
+/// Convert u64 to big-endian bytes, trimming leading zeros
+fn u64_to_be_bytes_trimmed(val: u64) -> Vec<u8> {
+    if val == 0 {
+        return vec![];
+    }
+    let bytes = val.to_be_bytes();
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    bytes[start..].to_vec()
+}
+
+/// Recover address from ECDSA signature
+fn recover_from_signature(msg_hash: &B256, v: u64, r: &[u8], s: &[u8]) -> Result<Address> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    let mut r_padded = [0u8; 32];
+    let r_start = 32 - r.len().min(32);
+    r_padded[r_start..].copy_from_slice(&r[..r.len().min(32)]);
+
+    let mut s_padded = [0u8; 32];
+    let s_start = 32 - s.len().min(32);
+    s_padded[s_start..].copy_from_slice(&s[..s.len().min(32)]);
+
+    let signature = Signature::from_scalars(r_padded, s_padded)
+        .map_err(|e| eyre::eyre!("Invalid signature: {e}"))?;
+
+    let recovery_id = RecoveryId::new(v & 1 != 0, false);
+
+    let verifying_key = VerifyingKey::recover_from_prehash(msg_hash.as_slice(), &signature, recovery_id)
+        .map_err(|e| eyre::eyre!("Recovery failed: {e}"))?;
+
+    // Public key → keccak256 → last 20 bytes = address
+    let pubkey_bytes = verifying_key.to_encoded_point(false);
+    let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..]; // skip 0x04 prefix
+    let addr_hash = keccak256_bytes(pubkey_uncompressed);
+    Ok(Address::from_slice(&addr_hash.as_slice()[12..]))
 }

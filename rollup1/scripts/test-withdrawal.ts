@@ -22,9 +22,10 @@ const ETHREX_STATUS = "http://localhost:3201";
 
 const ROLLUPS_ADDR = "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512";
 
-// Anvil account #1 (has bridged ETH on L2)
-const ACCOUNT1 = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-const ACCOUNT1_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+// Anvil account #2 (has bridged ETH on L2) — NOT account #1, since account #1
+// is also the admin used for proxy deployment, causing nonce collisions.
+const ACCOUNT1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+const ACCOUNT1_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 // Anvil account #3 (L1 recipient for the withdrawal)
 const L1_RECIPIENT = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
@@ -83,24 +84,21 @@ async function main() {
   console.log(`  L1 state root:         ${rollupData.stateRoot.slice(0, 18)}...`);
   console.log();
 
-  // 2. Prepare L2→L1 proxy
-  console.log("Step 2: Prepare L2→L1 proxy for recipient");
-  const prepareRes = await fetch(`${BUILDER_URL}/prepare-l2-call`, {
+  // 2. Register L2→L1 hint (tells builder about the L1 target)
+  console.log("Step 2: Register L2→L1 hint for recipient");
+  const hintRes = await fetch(`${BUILDER_URL}/register-l2-hint`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       l1Target: L1_RECIPIENT,
-      sourceAddress: ACCOUNT1,
     }),
   });
-  const prepareData = await prepareRes.json();
+  const prepareData = await hintRes.json();
   if (!prepareData.success) {
-    console.error("  Failed to prepare L2→L1 proxy:", prepareData.error);
+    console.error("  Failed to register L2→L1 hint:", prepareData.error);
     process.exit(1);
   }
   console.log(`  Proxy address:  ${prepareData.proxyAddress}`);
-  console.log(`  Source proxy:   ${prepareData.sourceProxyAddress || "N/A"}`);
-  console.log(`  Newly deployed: ${prepareData.proxyDeployed}`);
   console.log();
 
   // 3. Send L2 TX with value to the proxy address
@@ -110,15 +108,18 @@ async function main() {
   console.log(`  To:   ${prepareData.proxyAddress}`);
 
   try {
-    // Use 'latest' nonce explicitly — the public reth txpool may have stale
-    // pending txs from previous runs, causing ethers to pick a too-high nonce.
-    const nonce = await l2Provider.getTransactionCount(ACCOUNT1, "latest");
+    // Get nonce from the builder's internal L2 reth (9550), since that's where
+    // L2→L1 txs are simulated. The public reth/proxy may have a lower nonce.
+    const builderInternalL2 = new ethers.JsonRpcProvider("http://localhost:9550");
+    const nonce = await builderInternalL2.getTransactionCount(ACCOUNT1, "latest");
     console.log(`  Using nonce: ${nonce} (latest)`);
     const tx = await l2Wallet.sendTransaction({
       to: prepareData.proxyAddress,
       value: withdrawAmount,
       data: "0x",
       nonce,
+      gasLimit: 500_000, // Must be explicit: the proxy isn't deployed on public L2 yet,
+                         // so auto-estimation sees no code and uses 21000 (too low).
     });
     console.log(`  TX hash: ${tx.hash}`);
     console.log("  Waiting for confirmation...");

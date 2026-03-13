@@ -3,14 +3,16 @@
  * Computes all execution paths for a transaction
  */
 
-import { JsonRpcProvider, keccak256, AbiCoder } from "ethers";
+import { JsonRpcProvider, keccak256, AbiCoder, Interface } from "ethers";
 import {
   Action,
+  ActionType,
   ExecutionEntry,
   ExecutionPlan,
   StateDelta,
   SimulationResult,
   ACTION_TUPLE_TYPE,
+  EXECUTION_ENTRY_TUPLE_TYPE,
   createL2TXAction,
   createCallAction,
   createResultAction,
@@ -24,6 +26,7 @@ export interface ExecutionPlannerConfig {
   rollupId: bigint;
   fullnodeRpcUrl: string;
   l1RpcUrl: string;
+  rollupsAddress: string; // CrossChainManagerL2 address on L2 (same as L1 Rollups address)
 }
 
 export class ExecutionPlanner {
@@ -195,7 +198,8 @@ export class ExecutionPlanner {
 
   /**
    * Plan an L2→L1 contract call.
-   * The signed L2 tx is the root action; its continuation is a CALL action on L1.
+   * If proxyDeploySignedTx is provided, a proxy deployment entry is added first.
+   * The user's L2TX is the next entry; its continuation is a CALL action on L1.
    */
   async planL2ToL1Call(
     rlpEncodedTx: string,
@@ -205,28 +209,51 @@ export class ExecutionPlanner {
     l2Sender: string,
     sourceProxyOnL1: string,
     timestamp?: number,
-    overrideCurrentState?: string
+    overrideCurrentState?: string,
+    proxyDeploySignedTx?: string
   ): Promise<ExecutionPlan> {
     const entries: ExecutionEntry[] = [];
+    const rootActions: Action[] = [];
 
-    // Root action: L2TX
     const states = await this.getStates();
-    const currentState = overrideCurrentState || states.l1State.stateRoot;
-    const l2txAction = createL2TXAction(this.config.rollupId, rlpEncodedTx);
-    const rootActionHash = this.computeActionHash(l2txAction);
+    let currentState = overrideCurrentState || states.l1State.stateRoot;
 
-    // Simulate root L2TX on fullnode to obtain the post-tx L2 state root.
-    const l2txSimulation = await this.simulateAction(l2txAction, timestamp);
-    if (!l2txSimulation.success) {
-      throw new Error(
-        `L2 transaction simulation failed for L2→L1 planning: ${l2txSimulation.error || "unknown error"}`
-      );
+    // ── Entry 0 (optional): proxy deployment L2TX ──────────────────────
+    if (proxyDeploySignedTx) {
+      const deployAction = createL2TXAction(this.config.rollupId, proxyDeploySignedTx);
+      const deployActionHash = this.computeActionHash(deployAction);
+
+      // Simulate the proxy deployment tx (mines one L2 block)
+      const deploySim = await this.simulateAction(deployAction, timestamp);
+      if (!deploySim.success) {
+        throw new Error(
+          `Proxy deploy simulation failed: ${deploySim.error || "unknown error"}`
+        );
+      }
+
+      const postDeployState = deploySim.stateDeltas[0].newState;
+      const deployResultAction = createResultAction(this.config.rollupId, "0x", false);
+
+      entries.push({
+        stateDeltas: [{
+          rollupId: this.config.rollupId,
+          currentState,
+          newState: postDeployState,
+          etherDelta: 0n,
+        }],
+        actionHash: deployActionHash,
+        nextAction: deployResultAction,
+      });
+      rootActions.push(deployAction);
+
+      // Advance currentState for the next entry
+      currentState = postDeployState;
+      console.log(`[Planner] Proxy deploy: ${currentState.slice(0, 18)}... → ${postDeployState.slice(0, 18)}...`);
     }
 
-    const postL2State =
-      l2txSimulation.stateDeltas.length > 0
-        ? l2txSimulation.stateDeltas[0].newState
-        : this.computeNewState(currentState, rootActionHash);
+    // ── Entry 1: user's L2TX → CALL(L1) ────────────────────────────────
+    const l2txAction = createL2TXAction(this.config.rollupId, rlpEncodedTx);
+    const l2txActionHash = this.computeActionHash(l2txAction);
 
     // Continuation action: CALL on L1 from the L2 sender's deterministic L1 proxy.
     const callAction = createCallAction(
@@ -239,18 +266,12 @@ export class ExecutionPlanner {
       []
     );
 
-    // Simulate the L1 call return data.
-    // For value-only transfers (empty calldata) to EOAs, the call always succeeds
-    // on L1 because the Rollups contract provides the ETH via executeOnBehalf.
-    // We can't reliably simulate this via eth_call (the source proxy may not have
-    // ETH in simulation), so we short-circuit for plain value transfers.
+    // Simulate the L1 call return data BEFORE simulating the L2TX.
+    // We need it to pre-load the execution entry so the L2 proxy call succeeds.
     let l1CallResult: { returnData: string; failed: boolean };
     const isPlainTransfer = !l2CallData || l2CallData === "0x" || l2CallData === "0x00";
     const targetCode = await this.l1Provider.getCode(l1Target);
     if (isPlainTransfer && targetCode === "0x") {
-      // EOA value transfer — always succeeds with empty return data.
-      // CrossChainProxy.executeOnBehalf uses assembly return, so the outer
-      // .call() in _processCallAtScope gets the raw bytes (not ABI-wrapped).
       l1CallResult = { returnData: "0x", failed: false };
     } else {
       l1CallResult = await this.simulateL1Call(
@@ -261,25 +282,103 @@ export class ExecutionPlanner {
       );
     }
 
-    // Execution #1: L2TX -> CALL(L1)
-    const rootExecutionEntry: ExecutionEntry = {
-      stateDeltas:
-        l2txSimulation.stateDeltas.length > 0
-          ? l2txSimulation.stateDeltas
-          : [
-              {
-                rollupId: this.config.rollupId,
-                currentState,
-                newState: postL2State,
-                etherDelta: 0n,
-              },
-            ],
-      actionHash: rootActionHash,
-      nextAction: callAction,
+    // Pre-load execution entry into CrossChainManagerL2 so the proxy call
+    // can consume it during simulation. The proxy's executeCrossChainCall builds
+    // a CALL action and looks it up in the execution table. We pre-compute the
+    // same CALL action hash and load an entry with RESULT as the nextAction.
+    //
+    // The CALL action built by the proxy uses:
+    //   rollupId = proxy.originalRollupId (= 0, meaning "L1 target")
+    //   destination = proxy.originalAddress (= l1Target)
+    //   value = msg.value
+    //   data = callData (the data sent to the proxy)
+    //   sourceAddress = msg.sender of the proxy (= l2Sender, the EOA)
+    //   sourceRollup = ROLLUP_ID (= this.config.rollupId)
+    const proxyCallAction: Action = {
+      actionType: ActionType.CALL,
+      rollupId: 0n, // proxy.originalRollupId for L1 targets
+      destination: l1Target,
+      value: l2CallValue,
+      data: l2CallData,
+      failed: false,
+      sourceAddress: l2Sender,
+      sourceRollup: this.config.rollupId,
+      scope: [],
     };
-    entries.push(rootExecutionEntry);
+    const proxyCallHash = this.computeActionHash(proxyCallAction);
 
-    // Result action hash is what Rollups._processCallAtScope computes after CALL.
+    // The nextAction is a RESULT with the L1 call's return data
+    const simResultAction: Action = {
+      actionType: ActionType.RESULT,
+      rollupId: 0n,
+      destination: "0x0000000000000000000000000000000000000000",
+      value: 0n,
+      data: l1CallResult.returnData,
+      failed: l1CallResult.failed,
+      sourceAddress: "0x0000000000000000000000000000000000000000",
+      sourceRollup: 0n,
+      scope: [],
+    };
+
+    // Encode loadExecutionTable call
+    const ccmIface = new Interface([
+      `function loadExecutionTable(${EXECUTION_ENTRY_TUPLE_TYPE}[] entries)`,
+    ]);
+    const simEntries = [{
+      stateDeltas: [],
+      actionHash: proxyCallHash,
+      nextAction: [
+        simResultAction.actionType,
+        simResultAction.rollupId,
+        simResultAction.destination,
+        simResultAction.value,
+        simResultAction.data,
+        simResultAction.failed,
+        simResultAction.sourceAddress,
+        simResultAction.sourceRollup,
+        simResultAction.scope,
+      ],
+    }];
+    const loadCallData = ccmIface.encodeFunctionData("loadExecutionTable", [simEntries]);
+
+    // Mine the loadExecutionTable as its own block BEFORE the user's tx.
+    // This ensures the execution entry is available when the proxy call runs.
+    // Using systemCall (not sendSystemTx) so it mines immediately.
+    console.log(`[Planner] Pre-loading execution entry for proxy call (actionHash=${proxyCallHash.slice(0, 18)}...)`);
+    await this.fullnodeProvider.send("syncrollups_systemCall", [
+      this.config.rollupsAddress,
+      loadCallData,
+      "0x0",
+      timestamp,
+    ]);
+
+    // Now simulate user's L2TX (mines its own L2 block — the proxy call will find the entry)
+    const l2txTimestamp = timestamp ? timestamp + 1 : undefined;
+    const l2txSimulation = await this.simulateAction(l2txAction, l2txTimestamp);
+    if (!l2txSimulation.success) {
+      throw new Error(
+        `L2 transaction simulation failed for L2→L1 planning: ${l2txSimulation.error || "unknown error"}`
+      );
+    }
+
+    const postL2State =
+      l2txSimulation.stateDeltas.length > 0
+        ? l2txSimulation.stateDeltas[0].newState
+        : this.computeNewState(currentState, l2txActionHash);
+
+    entries.push({
+      stateDeltas: [{
+        rollupId: this.config.rollupId,
+        currentState,
+        newState: postL2State,
+        etherDelta: 0n,
+      }],
+      actionHash: l2txActionHash,
+      nextAction: callAction,
+    });
+    rootActions.push(l2txAction);
+
+    // ── Entry 2: RESULT(call) → final RESULT ───────────────────────────
     const callResultAction = createResultAction(
       this.config.rollupId,
       l1CallResult.returnData,
@@ -287,20 +386,15 @@ export class ExecutionPlanner {
     );
     const callResultHash = this.computeActionHash(callResultAction);
 
-    // Execution #2: RESULT(call) -> final RESULT.
-    // When the CALL sends ETH on L1 (L2→L1 withdrawal), _etherDelta becomes
-    // negative. The continuation's stateDeltas must carry a matching negative
-    // etherDelta so the Rollups contract's ether accounting check passes.
-    // The rollup's L1 etherBalance decreases by the withdrawn amount.
     const continuationStateDeltas: StateDelta[] = l2CallValue > 0n
       ? [{
           rollupId: this.config.rollupId,
           currentState: postL2State,
-          newState: postL2State,  // No further L2 state change, just L1 ether accounting
+          newState: postL2State,
           etherDelta: -l2CallValue,
         }]
       : [];
-    const continuationExecutionEntry: ExecutionEntry = {
+    entries.push({
       stateDeltas: continuationStateDeltas,
       actionHash: callResultHash,
       nextAction: createResultAction(
@@ -308,14 +402,22 @@ export class ExecutionPlanner {
         l1CallResult.returnData,
         l1CallResult.failed
       ),
-    };
-    entries.push(continuationExecutionEntry);
+    });
+    rootActions.push(callResultAction);
+
+    // The user's L2TX entry index: 1 if proxy deploy present, 0 otherwise
+    const userEntryIndex = proxyDeploySignedTx ? 1 : 0;
 
     return {
       entries,
-      rootActionHash,
-      rootActions: [l2txAction, callResultAction],
+      rootActionHash: this.computeActionHash(rootActions[0]),
+      rootActions,
       proof: "",
+      preloadSystemCalls: [{
+        entryIndex: userEntryIndex,
+        to: this.config.rollupsAddress,
+        data: loadCallData,
+      }],
     };
   }
 

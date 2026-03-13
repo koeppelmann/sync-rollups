@@ -320,6 +320,38 @@ export class RpcServer {
             break;
           }
 
+          case "syncrollups_systemCall": {
+            // Send a system call (from operator) and mine it into a block.
+            // params: [to, data, value?, timestamp?]
+            const sysTo = params?.[0] as string;
+            const sysData = params?.[1] as string;
+            const sysValue = params?.[2] as string | undefined;
+            const sysTimestamp = params?.[3] as number | undefined;
+            if (!sysTo || !sysData) throw new Error("Missing to/data for systemCall");
+            const sysTxHash = await this.stateManager.systemCall(
+              sysTo, sysData, sysValue || "0x0",
+              sysTimestamp ? { timestamp: sysTimestamp } : undefined
+            );
+            result = sysTxHash;
+            break;
+          }
+
+          case "syncrollups_sendSystemTx": {
+            // Send a system tx (from operator) WITHOUT mining. The tx sits in
+            // the mempool until the next mineBlock call. Used to pre-load
+            // execution entries before an L2TX simulation (both land in same block).
+            // params: [to, data, value?]
+            const sstTo = params?.[0] as string;
+            const sstData = params?.[1] as string;
+            const sstValue = params?.[2] as string | undefined;
+            if (!sstTo || !sstData) throw new Error("Missing to/data for sendSystemTx");
+            const sstTxHash = await this.stateManager.sendSystemTx(
+              sstTo, sstData, sstValue || "0x0"
+            );
+            result = sstTxHash;
+            break;
+          }
+
           case "syncrollups_simulateL1Call":
             // Execute an L1→L2 call on the builder's L2 (used by /prepare-l1-call endpoint)
             // Optional second param: timestamp (number) for the L2 block.
@@ -336,6 +368,20 @@ export class RpcServer {
             const l1CallTimestamp = params?.[1] as number | undefined;
             result = await this.simulateL1ToL2Call(callParams, l1CallTimestamp);
             break;
+
+          case "syncrollups_deployProxy": {
+            // Deploy a CrossChainProxy on L2.
+            // params: [originalAddress, rollupId, domain]
+            const proxyOrigAddr = params?.[0] as string;
+            const proxyRollupId = BigInt(params?.[1] || "0");
+            const proxyDomain = BigInt(params?.[2] || "0");
+            if (!proxyOrigAddr) throw new Error("Missing originalAddress");
+            const proxyAddr = await this.stateManager.ensureProxyDeployed(
+              proxyOrigAddr, proxyRollupId, proxyDomain
+            );
+            result = proxyAddr;
+            break;
+          }
 
           default:
             throw new Error(`Unknown method: ${method}`);
