@@ -230,7 +230,8 @@ start_restored_stack() {
     --rollups "${ROLLUPS_ADDR}" \
     --rollup-id "${ROLLUP_ID_VAL}" \
     --l1-rpc "${L1_RPC_URL}" \
-    --admin-key "${ADMIN_KEY_VAL}" \
+    --builder-key "${ADMIN_KEY_VAL}" \
+    --owner-key "${ADMIN_KEY_VAL}" \
     --fullnode "${BUILDER_FULLNODE_RPC_URL}" \
     --port "${BUILDER_PORT}" \
     > logs/builder.log 2>&1 &

@@ -1,6 +1,6 @@
 /**
  * Proof Generator for sync-rollups builder
- * Signs proofs using admin wallet (POC) or generates ZK proofs (production)
+ * Signs proofs using a dedicated proof signer key (POC) or generates ZK proofs (production)
  */
 
 import {
@@ -22,7 +22,7 @@ import {
 } from "../reth-fullnode/types.js";
 
 export interface ProofGeneratorConfig {
-  adminPrivateKey: string;
+  signerPrivateKey: string;
   l1RpcUrl: string;
   rollupsAddress: string;
 }
@@ -34,7 +34,7 @@ const ROLLUPS_ABI = [
 
 export class ProofGenerator {
   private config: ProofGeneratorConfig;
-  private adminWallet: Wallet;
+  private signerWallet: Wallet;
   private l1Provider: JsonRpcProvider;
   private rollupsContract: Contract;
   private abiCoder: AbiCoder;
@@ -42,7 +42,7 @@ export class ProofGenerator {
   constructor(config: ProofGeneratorConfig) {
     this.config = config;
     this.l1Provider = new JsonRpcProvider(config.l1RpcUrl, undefined, { batchMaxCount: 1 });
-    this.adminWallet = new Wallet(config.adminPrivateKey, this.l1Provider);
+    this.signerWallet = new Wallet(config.signerPrivateKey, this.l1Provider);
     this.rollupsContract = new Contract(
       config.rollupsAddress,
       ROLLUPS_ABI,
@@ -52,10 +52,10 @@ export class ProofGenerator {
   }
 
   /**
-   * Get admin address
+   * Get proof signer address
    */
-  getAdminAddress(): string {
-    return this.adminWallet.address;
+  getSignerAddress(): string {
+    return this.signerWallet.address;
   }
 
   /**
@@ -63,8 +63,8 @@ export class ProofGenerator {
    * Matches the verification logic in Rollups.postBatch.
    *
    * The publicInputsHash includes blockhash(block.number-1) and block.number
-   * which we can't predict off-chain. For the AdminZKVerifier (POC), the
-   * verifier just checks the signature against the admin address, ignoring
+   * which we can't predict off-chain. For the MockZKVerifier (POC), the
+   * verifier just checks the signature against the signer address, ignoring
    * the public inputs hash. So we sign a deterministic hash of the entries.
    */
   async signPostBatchProof(entries: ExecutionEntry[]): Promise<string> {
@@ -82,13 +82,13 @@ export class ProofGenerator {
       entryHashes.push(entryHash);
     }
 
-    // For AdminZKVerifier/MockZKVerifier, the proof is just an admin signature.
-    // We sign a hash of the entry hashes so the verifier can validate the admin signed something.
+    // For MockZKVerifier, the proof is just a signer signature.
+    // We sign a hash of the entry hashes so the verifier can validate.
     const dataHash = keccak256(
       this.abiCoder.encode(["bytes32[]"], [entryHashes])
     );
 
-    const signature = await this.adminWallet.signMessage(
+    const signature = await this.signerWallet.signMessage(
       getBytes(dataHash)
     );
 
@@ -143,7 +143,7 @@ export class ProofGenerator {
         getBytes(publicInputsHash),
         signature
       );
-      return recoveredAddress.toLowerCase() === this.adminWallet.address.toLowerCase();
+      return recoveredAddress.toLowerCase() === this.signerWallet.address.toLowerCase();
     } catch {
       return false;
     }

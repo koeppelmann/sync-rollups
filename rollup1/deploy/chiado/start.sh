@@ -120,7 +120,7 @@ echo "Starting proofer on port $PROOFER_PORT..."
 npm --prefix "$ROLLUP_DIR" exec tsx "$ROLLUP_DIR/proofer/proofer.ts" -- \
   --rollups "$ROLLUPS_ADDRESS" \
   --l1-rpc "$L1_RPC" \
-  --proof-key "$ADMIN_KEY" \
+  --proof-key "$PROOF_KEY" \
   --fullnode "http://localhost:$PROOFER_FULLNODE_RPC_PORT" \
   --port $PROOFER_PORT \
   > "$ROLLUP_DIR/logs/proofer-chiado.log" 2>&1 &
@@ -132,7 +132,8 @@ npm --prefix "$ROLLUP_DIR" exec tsx "$ROLLUP_DIR/builder/builder.ts" -- \
   --rollups "$ROLLUPS_ADDRESS" \
   --rollup-id "$ROLLUP_ID" \
   --l1-rpc "$L1_RPC" \
-  --admin-key "$ADMIN_KEY" \
+  --builder-key "$BUILDER_KEY" \
+  --owner-key "$OWNER_KEY" \
   --fullnode "http://localhost:$BUILDER_FULLNODE_RPC_PORT" \
   --proofer "http://localhost:$PROOFER_PORT" \
   --port $BUILDER_PORT \

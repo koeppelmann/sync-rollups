@@ -206,7 +206,8 @@ npm --prefix "$ROLLUP_DIR" exec tsx "$ROLLUP_DIR/builder/builder.ts" -- \
   --rollups "$ROLLUPS_ADDR" \
   --rollup-id 0 \
   --l1-rpc http://localhost:$L1_RPC_PORT \
-  --admin-key "$ADMIN_KEY" \
+  --builder-key "$ADMIN_KEY" \
+  --owner-key "$ADMIN_KEY" \
   --fullnode http://localhost:$BUILDER_FULLNODE_RPC_PORT \
   --proofer http://localhost:$PROOFER_PORT \
   --port $BUILDER_PORT \

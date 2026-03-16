@@ -128,7 +128,8 @@ restart_private_builder_stack() {
     --rollups "${ROLLUPS_ADDR}" \
     --rollup-id 0 \
     --l1-rpc "${L1_RPC_URL}" \
-    --admin-key "${ADMIN_KEY}" \
+    --builder-key "${ADMIN_KEY}" \
+    --owner-key "${ADMIN_KEY}" \
     --fullnode "${BUILDER_FULLNODE_RPC_URL}" \
     --port "${BUILDER_PORT}" \
     > logs/builder.log 2>&1 &
@@ -338,7 +339,8 @@ EOF
     --rollups "${ROLLUPS_ADDR}" \
     --rollup-id 0 \
     --l1-rpc "${L1_RPC_URL}" \
-    --admin-key "${ADMIN_KEY}" \
+    --builder-key "${ADMIN_KEY}" \
+    --owner-key "${ADMIN_KEY}" \
     --fullnode "${BUILDER_FULLNODE_RPC_URL}" \
     --port "${BUILDER_PORT}" \
     > logs/builder.log 2>&1 &

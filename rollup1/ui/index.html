@@ -3101,6 +3101,11 @@
             if (prepareResult.sourceProxyAddress) {
               log(`L2 sender proxy: ${prepareResult.sourceProxyAddress}`, 'info');
             }
+            if (prepareResult.bundleIncluded) {
+              log(`L1→L2 call bundled and included in block ${prepareResult.l1BlockNumber}!`, 'success');
+              setTimeout(() => { refreshStatus(); fetchTxHistory(); fetchAllWalletBalances(); }, 3000);
+              return;
+            }
             if (prepareResult.postBatchTxHash) {
               log(`Builder broadcast postBatch: ${prepareResult.postBatchTxHash}`, 'info');
             }

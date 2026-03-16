@@ -120,7 +120,7 @@ export class Proofer {
     this.fullnodeProvider = new JsonRpcProvider(config.fullnodeRpcUrl);
     this.abiCoder = AbiCoder.defaultAbiCoder();
     this.proofGenerator = new ProofGenerator({
-      adminPrivateKey: config.proofSignerPrivateKey,
+      signerPrivateKey: config.proofSignerPrivateKey,
       l1RpcUrl: config.l1RpcUrl,
       rollupsAddress: config.rollupsAddress,
     });
@@ -132,7 +132,7 @@ export class Proofer {
     console.log("=== sync-rollups Proofer ===");
     console.log(`L1 RPC: ${this.config.l1RpcUrl}`);
     console.log(`Fullnode RPC: ${this.config.fullnodeRpcUrl}`);
-    console.log(`Proof signer: ${this.proofGenerator.getAdminAddress()}`);
+    console.log(`Proof signer: ${this.proofGenerator.getSignerAddress()}`);
     console.log("");
 
     this.server = createServer((req, res) => this.handleRequest(req, res));
@@ -243,7 +243,7 @@ export class Proofer {
       l1StateRoot: l1State.stateRoot,
       // Use tracked state for sync check — EVM may differ due to timestamp mismatches
       isSynced: trackedState === l1State.stateRoot,
-      signerAddress: this.proofGenerator.getAdminAddress(),
+      signerAddress: this.proofGenerator.getSignerAddress(),
     };
   }
 
