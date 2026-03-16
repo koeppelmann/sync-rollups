@@ -78,33 +78,46 @@ export class BundleSubmitter implements IL1BundleSubmitter {
     provider: JsonRpcProvider,
     timestamp?: number   // ignored — real chains control timestamps via slot timing
   ): Promise<BundleResult> {
-    const targetBlockHex = "0x" + targetBlock.toString(16);
-
     // Derive tx hashes from signed raw txs
     const txHashes = signedRawTxs.map((raw) => Transaction.from(raw).hash!);
 
-    console.log(
-      `[Bundle] Submitting ${signedRawTxs.length} txs targeting block ${targetBlock} ` +
-      `(txs: ${txHashes.map(h => h.slice(0, 10)).join(", ")})`
-    );
+    // Submit bundle targeting multiple consecutive blocks for better inclusion.
+    const MAX_BLOCKS_AHEAD = 3;
+    const tRelay = Date.now();
+    for (let offset = 0; offset < MAX_BLOCKS_AHEAD; offset++) {
+      const block = targetBlock + offset;
+      const blockHex = "0x" + block.toString(16);
+      console.log(
+        `[Bundle] Submitting ${signedRawTxs.length} txs targeting block ${block} ` +
+        `(txs: ${txHashes.map(h => h.slice(0, 10)).join(", ")})`
+      );
+      await this.sendToRelays(signedRawTxs, blockHex);
+    }
+    console.log(`[Bundle] Relay submissions took ${Date.now() - tRelay}ms`);
 
-    // Send to all relays in parallel
-    await this.sendToRelays(signedRawTxs, targetBlockHex);
-
-    // Wait for the target block to be mined
+    // Wait for inclusion in any of the target blocks
+    const lastTargetBlock = targetBlock + MAX_BLOCKS_AHEAD - 1;
+    const tWait = Date.now();
     const included = await this.waitForInclusion(
       provider,
-      targetBlock,
+      lastTargetBlock,
       txHashes[0]
     );
+    console.log(`[Bundle] Wait for inclusion took ${Date.now() - tWait}ms`);
 
+    // Find the actual block if included
+    let actualBlock = targetBlock;
     if (included) {
-      console.log(`[Bundle] Bundle included in block ${targetBlock}`);
+      try {
+        const receipt = await provider.getTransactionReceipt(txHashes[0]);
+        if (receipt) actualBlock = receipt.blockNumber;
+      } catch {}
+      console.log(`[Bundle] Bundle included in block ${actualBlock}`);
     } else {
-      console.log(`[Bundle] Bundle NOT included in block ${targetBlock}`);
+      console.log(`[Bundle] Bundle NOT included in blocks ${targetBlock}-${lastTargetBlock}`);
     }
 
-    return { included, blockNumber: targetBlock, txHashes };
+    return { included, blockNumber: actualBlock, txHashes };
   }
 
   /**
@@ -145,7 +158,14 @@ export class BundleSubmitter implements IL1BundleSubmitter {
             body,
             signal: AbortSignal.timeout(5000),
           });
-          const json = await resp.json();
+          const text = await resp.text();
+          let json: any;
+          try {
+            json = JSON.parse(text);
+          } catch {
+            console.warn(`[Bundle] ${relay.name}: non-JSON response (HTTP ${resp.status}): ${text.slice(0, 100)}`);
+            throw new Error(`Non-JSON response from ${relay.name}: HTTP ${resp.status}`);
+          }
           if (json.error) {
             console.warn(
               `[Bundle] ${relay.name}: error: ${JSON.stringify(json.error)}`
@@ -168,28 +188,80 @@ export class BundleSubmitter implements IL1BundleSubmitter {
   }
 
   /**
-   * Wait for a specific block to be mined, then check if our tx was included.
+   * Wait for the bundle to be included, checking after each new block.
+   * Returns as soon as the tx receipt is found, without waiting for all target blocks.
    */
+  private rpcUrl: string = "";
+
+  private async uncachedGetBlockNumber(url: string): Promise<number> {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
+      signal: AbortSignal.timeout(3000),
+    });
+    const json = await resp.json() as { result: string };
+    return parseInt(json.result, 16);
+  }
+
+  private async uncachedGetReceipt(url: string, txHash: string): Promise<{ blockNumber: number } | null> {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [txHash] }),
+      signal: AbortSignal.timeout(3000),
+    });
+    const json = await resp.json() as { result: any };
+    if (!json.result) return null;
+    return { blockNumber: parseInt(json.result.blockNumber, 16) };
+  }
+
   private async waitForInclusion(
     provider: JsonRpcProvider,
     targetBlock: number,
     firstTxHash: string
   ): Promise<boolean> {
-    // Wait up to ~24 seconds (2 Ethereum slots)
     const maxWaitMs = 24_000;
     const start = Date.now();
+    let lastCheckedBlock = 0;
+    const url = provider._getConnection().url;
 
     while (Date.now() - start < maxWaitMs) {
-      const current = await provider.getBlockNumber();
-      if (current >= targetBlock) {
+      let current: number;
+      try {
+        current = await this.uncachedGetBlockNumber(url);
+      } catch {
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+
+      // Check receipt whenever we see a new block
+      if (current > lastCheckedBlock) {
+        lastCheckedBlock = current;
         try {
-          const receipt = await provider.getTransactionReceipt(firstTxHash);
-          return receipt !== null && receipt.blockNumber <= targetBlock;
-        } catch {
+          const receipt = await this.uncachedGetReceipt(url, firstTxHash);
+          if (receipt !== null) {
+            console.log(`[Bundle] Tx found in block ${receipt.blockNumber} (checked at block ${current})`);
+            return true;
+          }
+        } catch {}
+
+        // If we've passed all target blocks, do one more receipt check then give up
+        if (current > targetBlock) {
+          // Small delay — receipt may not be immediately available after block
+          await new Promise((r) => setTimeout(r, 1000));
+          try {
+            const receipt = await this.uncachedGetReceipt(url, firstTxHash);
+            if (receipt !== null) {
+              console.log(`[Bundle] Tx found in block ${receipt.blockNumber} (late check at block ${current})`);
+              return true;
+            }
+          } catch {}
           return false;
         }
       }
-      await new Promise((r) => setTimeout(r, 1000));
+
+      await new Promise((r) => setTimeout(r, 500));
     }
 
     return false;

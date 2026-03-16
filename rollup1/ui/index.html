@@ -1088,14 +1088,14 @@
       },
       chiado: {
         l1Rpc: 'https://rpc.chiadochain.net',
-        l2Rpc: '',
-        l2EvmRpc: '',
-        builderUrl: 'https://builder.chiado.gcd.ovh',
-        prooferUrl: '',
-        ethrexRpc: '',
-        ethrexEvmRpc: '',
+        l2Rpc: 'http://217.182.199.45:9647',
+        l2EvmRpc: 'http://217.182.199.45:9648',
+        builderUrl: 'http://217.182.199.45:3210',
+        prooferUrl: 'http://217.182.199.45:3310',
+        ethrexRpc: 'http://217.182.199.45:3211',
+        ethrexEvmRpc: 'http://217.182.199.45:9656',
         blockscoutL1Url: 'https://gnosis-chiado.blockscout.com',
-        blockscoutL2Url: '',
+        blockscoutL2Url: 'http://217.182.199.45:4002',
         rollupsAddress: '0x1322324B440b49213170e7a229635788AA784290',
         rollupId: "2",
         deploymentBlock: "20218048"
@@ -3101,11 +3101,8 @@
             if (prepareResult.sourceProxyAddress) {
               log(`L2 sender proxy: ${prepareResult.sourceProxyAddress}`, 'info');
             }
-            if (prepareResult.bundleIncluded) {
-              // Bundle chains: builder already submitted everything atomically
-              log('L1→L2 call bundled and included on L1!', 'success');
-              setTimeout(() => { refreshStatus(); fetchTxHistory(); fetchAllWalletBalances(); }, 3000);
-              return;
+            if (prepareResult.postBatchTxHash) {
+              log(`Builder broadcast postBatch: ${prepareResult.postBatchTxHash}`, 'info');
             }
           }
         }

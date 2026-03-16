@@ -1070,7 +1070,19 @@ export class EventProcessor {
    * can be reorged into one with events.
    */
   private async recordBlockHashes(fromBlock: number, toBlock: number): Promise<void> {
-    for (let blockNum = fromBlock; blockNum <= toBlock; blockNum++) {
+    // During initial historical replay, only record hashes for the last
+    // MAX_REORG_HISTORY blocks to avoid O(N) RPC calls for the entire chain.
+    const currentBlock = await this.l1Provider.getBlockNumber();
+    const reorgWindow = this.MAX_REORG_HISTORY * 2; // generous buffer
+    const startRecording = Math.max(fromBlock, currentBlock - reorgWindow);
+
+    if (startRecording > toBlock) {
+      // This entire batch is old enough that we don't need block hashes
+      return;
+    }
+
+    const effectiveFrom = Math.max(fromBlock, startRecording);
+    for (let blockNum = effectiveFrom; blockNum <= toBlock; blockNum++) {
       if (!this.blockHashHistory.has(blockNum)) {
         const block = await this.l1Provider.getBlock(blockNum);
         if (block && block.hash) {

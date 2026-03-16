@@ -144,8 +144,9 @@ export class Proofer {
         );
         console.log("");
         console.log("Endpoints:");
-        console.log("  POST /prove   - Verify and sign execution entries");
-        console.log("  GET  /status  - Get proofer status");
+        console.log("  POST /prove    - Verify and sign execution entries");
+        console.log("  POST /rollback - Roll back EVM to tracked state");
+        console.log("  GET  /status   - Get proofer status");
         resolve();
       });
     });
@@ -197,6 +198,20 @@ export class Proofer {
         const response = await this.handleProve(request);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(response));
+      } else if (url.pathname === "/rollback" && req.method === "POST") {
+        // Roll back proofer's EVM to tracked state (used by builder after L1 revert)
+        const trackedState = await this.fullnodeProvider.send("syncrollups_getStateRoot", []);
+        const currentState = await this.fullnodeProvider.send("syncrollups_getActualStateRoot", []);
+        if (currentState !== trackedState) {
+          const trackedL2Block = await this.fullnodeProvider.send("syncrollups_getTrackedL2Block", []);
+          console.log(`[Proofer] Rollback requested: EVM ${currentState.slice(0, 18)}... → tracked ${trackedState.slice(0, 18)}... (L2 block ${trackedL2Block})`);
+          await this.rollback(parseInt(trackedL2Block, 16));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, rolledBackTo: trackedState }));
+        } else {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, message: "Already at tracked state" }));
+        }
       } else {
         res.writeHead(404);
         res.end("Not found");

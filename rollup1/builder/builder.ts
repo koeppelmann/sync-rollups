@@ -7,7 +7,7 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { Contract, JsonRpcProvider, Wallet, Transaction, solidityPackedKeccak256, keccak256, toUtf8Bytes } from "ethers";
 import { ExecutionPlanner, ExecutionPlannerConfig } from "./execution-planner.js";
-import { BundleSubmitter, IL1BundleSubmitter, SEPOLIA_RELAYS } from "./bundle-submitter.js";
+import { BundleSubmitter, IL1BundleSubmitter, SEPOLIA_RELAYS, CHIADO_RELAYS } from "./bundle-submitter.js";
 import { MockBundleSubmitter } from "./mock-bundle-submitter.js";
 import {
   ActionType,
@@ -120,7 +120,7 @@ export class Builder {
   private bundleSubmitter: IL1BundleSubmitter | null = null;
   // Anvil allows 30M gas per block; real chains like Gnosis have lower limits (17M)
   private postBatchGasLimit = 30_000_000n;
-  private execL2TXGasLimit = 1_000_000n;
+  private execL2TXGasLimit = 300_000n;
   private operatorAddress = ""; // Derived at startup, used to reject operator-signed L2TXs
   private operatorKey = ""; // Derived at startup, used for L2 proxy deploys
   private readonly prepareL1Cache = new Map<string, {
@@ -227,10 +227,10 @@ export class Builder {
         this.postBatchGasLimit = 5_000_000n;
         console.log("[Builder] L1 type: Sepolia testnet (priority fee ordering, 12s slots)");
       } else if (this.l1ChainId === 10200n) {
-        // Gnosis Chiado testnet: no bundle submission (Chiado builder unreliable).
-        // Uses direct mempool submission with priority-fee ordering (5s slots).
-        this.postBatchGasLimit = 2_000_000n;
-        console.log("[Builder] L1 type: Chiado testnet (direct submission, 5s slots)");
+        // Gnosis Chiado testnet: use Chiado builder for atomic bundle submission.
+        this.postBatchGasLimit = 300_000n;
+        this.bundleSubmitter = new BundleSubmitter(this.adminWallet, CHIADO_RELAYS);
+        console.log("[Builder] L1 type: Chiado testnet (bundle submission via Chiado builder, 5s slots)");
       } else if (this.l1ChainId === 100n) {
         // Gnosis mainnet
         this.postBatchGasLimit = 5_000_000n;
@@ -421,6 +421,8 @@ export class Builder {
    * Process an L2 transaction
    */
   private async processL2Transaction(signedTx: string): Promise<SubmitResponse> {
+    const t0 = Date.now();
+    const timing: Record<string, number> = {};
     console.log("[Builder] Processing L2 transaction...");
 
     const tx = Transaction.from(signedTx);
@@ -599,7 +601,8 @@ export class Builder {
       }
 
       entryCount = plan.entries.length;
-      console.log(`[Builder] Planned ${entryCount} execution(s)`);
+      timing.simulate = Date.now() - t0;
+      console.log(`[Builder] Planned ${entryCount} execution(s) [${timing.simulate}ms]`);
 
       // Include any pending L1→L2 hints for the proofer. After an L1→L2 call,
       // the proofer's EVM may be behind due to timestamp mismatch during replay.
@@ -610,16 +613,20 @@ export class Builder {
         console.log(`[Builder] Including ${hintsForProof.length} L1→L2 hint(s) for proofer`);
       }
 
+      const tProof = Date.now();
       let proof = await this.requestProof(plan, simTimestamp, undefined, undefined, hintsForProof);
-      console.log("[Builder] Proof obtained from proofer");
+      timing.prove = Date.now() - tProof;
+      console.log(`[Builder] Proof obtained from proofer [${timing.prove}ms]`);
 
       // Clear hints after successful proof — proofer is now caught up
       if (hintsForProof) {
         this.recentL1ToL2Hints = [];
       }
 
+      const tNotify = Date.now();
       await this.planner.notifyExecutions(plan.entries);
-      console.log("[Builder] Fullnode notified");
+      timing.notify = Date.now() - tNotify;
+      console.log(`[Builder] Fullnode notified [${timing.notify}ms]`);
 
       let entriesData = plan.entries.map((e) => ({
         stateDeltas: e.stateDeltas.map((d) => ({
@@ -647,8 +654,21 @@ export class Builder {
         // MockBundleSubmitter (Anvil): automine control + timestamp setting.
         // BundleSubmitter (Flashbots/Titan): atomic bundle targeting next block.
         const feeData = await this.l1Provider.getFeeData();
-        const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
-        const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
+        const basePriority = (() => {
+          const p = feeData.maxPriorityFeePerGas || 0n;
+          if (this.l1ChainId === 10200n) {
+            const max = 100_000_000n;
+            return p > max ? max : (p > 0n ? p : 1_000_000n);
+          }
+          const min = 100_000_000n;
+          return p > min ? p : min;
+        })();
+        const baseMaxFee = (() => {
+          if (this.l1ChainId === 10200n) return 1_000_000_000n;
+          const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n;
+          const min = basePriority * 8n;
+          return f > min ? f : min;
+        })();
 
         let nonce = await this.adminWallet.getNonce("pending");
         const signedRawTxs: string[] = [];
@@ -698,15 +718,21 @@ export class Builder {
           { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
         ));
 
-        console.log(`[Builder] Bundle: ${signedRawTxs.length} signed txs (nonces ${nonce - signedRawTxs.length + 1}..${nonce})`);
+        timing.sign = Date.now() - t0 - (timing.simulate || 0) - (timing.prove || 0) - (timing.notify || 0);
+        console.log(`[Builder] Bundle: ${signedRawTxs.length} signed txs (nonces ${nonce - signedRawTxs.length + 1}..${nonce}) [sign=${timing.sign}ms]`);
 
-        const currentBlock = await this.l1Provider.getBlockNumber();
+        // Use raw fetch to bypass ethers' block number cache entirely
+        const tSubmit = Date.now();
+        const currentBlock = await this.getUncachedBlockNumber();
         const targetBlock = currentBlock + 1;
+        console.log(`[Builder] Submitting bundle targeting block ${targetBlock} (current=${currentBlock})`);
         const result = await this.bundleSubmitter.submitAndWait(
           signedRawTxs, targetBlock, this.l1Provider, simTimestamp
         );
+        timing.submit = Date.now() - tSubmit;
 
         if (!result.included) {
+          console.log(`[Builder] TIMING: simulate=${timing.simulate}ms prove=${timing.prove}ms notify=${timing.notify}ms sign=${timing.sign}ms submit=${timing.submit}ms TOTAL=${Date.now() - t0}ms`);
           throw new Error(
             `Bundle not included in block ${targetBlock}. ` +
             `Will retry with new simulation on next attempt.`
@@ -746,30 +772,31 @@ export class Builder {
         }
 
         const feeData = await this.l1Provider.getFeeData();
-        const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
-        const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
+        // On Chiado (base fee ~7 wei), use modest gas prices to avoid InsufficientFunds.
+        // Priority fee only needs to beat other mempool txs; maxFeePerGas just needs headroom.
+        const basePriority = (() => {
+          const p = feeData.maxPriorityFeePerGas || 0n;
+          if (this.l1ChainId === 10200n) {
+            // Chiado: keep priority fee low to conserve funds (0.1 gwei max)
+            const max = 100_000_000n;
+            return p > max ? max : (p > 0n ? p : 1_000_000n);
+          }
+          const min = 100_000_000n;
+          return p > min ? p : min;
+        })();
+        const baseMaxFee = (() => {
+          if (this.l1ChainId === 10200n) {
+            // Chiado: 1 gwei maxFeePerGas is plenty (base fee is ~7 wei)
+            return 1_000_000_000n;
+          }
+          const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n;
+          const min = basePriority * 8n;
+          return f > min ? f : min;
+        })();
 
-        // Fund proxy caller wallet BEFORE signing anything (executeL2TX uses it)
-        // May need 2 executeL2TX calls for L2→L1 (proxy deploy + user tx)
-        const execCallerBalance = await this.l1Provider.getBalance(this.proxyCallerWallet.address);
-        const execTxCount = proxyDeploySignedTx ? 2n : 1n;
-        const execMinBalance = baseMaxFee * 2n * BigInt(this.execL2TXGasLimit) * execTxCount;
-        if (execCallerBalance < execMinBalance) {
-          const fundAmount = execMinBalance * 2n - execCallerBalance;
-          console.log(`[Builder] Funding proxy caller for executeL2TX: ${fundAmount} wei`);
-          const fundTx = await this.adminWallet.sendTransaction({
-            to: this.proxyCallerWallet.address,
-            value: fundAmount,
-            gasLimit: 21_000n,
-            maxFeePerGas: baseMaxFee * 2n,
-            maxPriorityFeePerGas: basePriority * 3n,
-          });
-          await fundTx.wait();
-          console.log(`[Builder] Proxy caller funded: ${fundTx.hash}`);
-        }
-
-        // Pre-sign all transactions, then broadcast simultaneously for same-block inclusion.
-        // Fetch nonces AFTER any funding tx is mined.
+        // All txs use admin wallet for nonce-based ordering guarantee.
+        // Sequential nonces from the same sender ensure the node processes them in order
+        // and is much more likely to include them in the same block.
         let nonce = await this.adminWallet.getNonce("latest");
         const signedRawTxs: string[] = [];
 
@@ -807,42 +834,28 @@ export class Builder {
         ));
         const postBatchNonce = nonce;
 
-        // executeL2TX calls: signed by proxy caller wallet (different sender)
-        const rollupsAddr = await this.rollupsContract.getAddress();
-        const rollupsIface = this.rollupsContract.interface;
-        let execNonce = await this.proxyCallerWallet.getNonce("latest");
+        // executeL2TX calls: also signed by admin wallet (same nonce sequence as postBatch).
+        // Sequential nonces from the same sender guarantee ordering and maximize
+        // same-block inclusion since the node can't include nonce N+1 without N.
 
         // executeL2TX for proxy deploy tx (if L2→L1 with new proxy)
         if (proxyDeploySignedTx) {
-          const deployExecCalldata = rollupsIface.encodeFunctionData("executeL2TX", [this.config.rollupId, proxyDeploySignedTx]);
-          signedRawTxs.push(await this.proxyCallerWallet.signTransaction({
-            to: rollupsAddr,
-            data: deployExecCalldata,
-            gasLimit: this.execL2TXGasLimit,
-            maxFeePerGas: baseMaxFee * 2n,
-            maxPriorityFeePerGas: basePriority * 2n, // Higher priority than user's executeL2TX
-            nonce: execNonce,
-            chainId: this.l1ChainId,
-            type: 2,
-          }));
-          execNonce++;
+          nonce++;
+          signedRawTxs.push(await this.signContractTx("executeL2TX",
+            [this.config.rollupId, proxyDeploySignedTx],
+            { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+          ));
         }
 
         // executeL2TX for user tx
-        const execCalldata = rollupsIface.encodeFunctionData("executeL2TX", [this.config.rollupId, signedTx]);
-        signedRawTxs.push(await this.proxyCallerWallet.signTransaction({
-          to: rollupsAddr,
-          data: execCalldata,
-          gasLimit: this.execL2TXGasLimit,
-          maxFeePerGas: baseMaxFee * 2n,
-          maxPriorityFeePerGas: basePriority,
-          nonce: execNonce,
-          chainId: this.l1ChainId,
-          type: 2,
-        }));
+        nonce++;
+        signedRawTxs.push(await this.signContractTx("executeL2TX",
+          [this.config.rollupId, signedTx],
+          { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+        ));
 
         // Broadcast all simultaneously
-        console.log(`[Builder] Broadcasting ${signedRawTxs.length} txs simultaneously...`);
+        console.log(`[Builder] Broadcasting ${signedRawTxs.length} txs simultaneously (admin nonces ${nonce - signedRawTxs.length + 1}..${nonce})...`);
         const broadcastPromises = signedRawTxs.map((raw, i) =>
           this.l1Provider.broadcastTransaction(raw).then(tx => {
             console.log(`[Builder] Tx #${i + 1} broadcast: ${tx.hash}`);
@@ -852,8 +865,7 @@ export class Builder {
         const txResponses = await Promise.all(broadcastPromises);
 
         console.log(
-          `[Builder] ${signedRawTxs.length} txs broadcast ` +
-          `(${needsStateCorrection ? "correction+" : ""}postBatch nonce=${postBatchNonce}, exec from proxy caller nonce=${execNonce})`
+          `[Builder] ${signedRawTxs.length} txs broadcast (all from admin, nonces ${nonce - signedRawTxs.length + 1}..${nonce})`
         );
 
         // Wait for all to confirm
@@ -890,7 +902,9 @@ export class Builder {
           }
         }
       }
+      timing.total = Date.now() - t0;
       console.log(`[Builder] L2TX executed: ${execReceiptHash}`);
+      console.log(`[Builder] TIMING: simulate=${timing.simulate}ms prove=${timing.prove}ms notify=${timing.notify}ms sign=${timing.sign}ms submit=${timing.submit}ms TOTAL=${timing.total}ms`);
       snapshotBlock = null; // Success — no rollback needed
     } catch (e) {
       // On non-Anvil chains, roll back the builder's L2 to undo the simulation.
@@ -912,6 +926,20 @@ export class Builder {
             break;
           }
         }
+      }
+      // Also roll back the proofer — it kept its simulation state after signing the proof,
+      // but the L1 submission failed so the proofer must revert to tracked state.
+      try {
+        console.log(`[Builder] Rolling back proofer after L1 failure...`);
+        const resp = await fetch(`${this.config.prooferUrl}/rollback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const result = await resp.json();
+        console.log(`[Builder] Proofer rollback: ${JSON.stringify(result)}`);
+      } catch (prooferErr: any) {
+        console.warn(`[Builder] Proofer rollback failed: ${prooferErr.message}`);
       }
       throw e;
     }
@@ -1011,7 +1039,7 @@ export class Builder {
 
       console.log(`[Builder] Bundle: postBatch + ${signedTxs.length} L2TXs (nonces ${nonce - signedRawTxs.length}..${nonce - 1})`);
 
-      const currentBlock = await this.l1Provider.getBlockNumber();
+      const currentBlock = await this.getUncachedBlockNumber();
       const targetBlock = currentBlock + 1;
       const result = await this.bundleSubmitter.submitAndWait(
         signedRawTxs, targetBlock, this.l1Provider, simTimestamp
@@ -1520,11 +1548,8 @@ export class Builder {
           const proxyInfo = await this.rollupsContract.authorizedProxies(proxyAddress);
           const proxyRollupId = BigInt(proxyInfo.originalRollupId);
 
-          // Plan execution
-          // On non-Anvil chains, the proxy caller wallet calls the proxy,
-          // so msg.sender (used as sourceAddress in the CALL action) is the
-          // proxy caller wallet, not the original user.
-          const effectiveSourceAddress = this.isAnvilL1 ? sourceAddress : this.proxyCallerWallet.address;
+          // Plan execution — the real user calls the proxy on L1
+          const effectiveSourceAddress = sourceAddress;
           let plan;
           try {
             plan = await this.planner.planL1ToL2CallWithProxy(
@@ -1581,31 +1606,12 @@ export class Builder {
             },
           }));
 
-          // Build atomic bundle: [correction?] + postBatch + proxyCall (from separate wallet)
+          // Build admin txs: [correction?] + postBatch (no value, no proxy call)
+          // The user sends the proxy call separately from their own wallet.
           const feeData = await this.l1Provider.getFeeData();
           const basePriority = (() => { const p = feeData.maxPriorityFeePerGas || 0n; const min = 100_000_000n; return p > min ? p : min; })();
           const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
-          // Fund the proxy caller wallet FIRST (before signing the bundle txs).
-          // The proxy call comes from proxyCallerWallet (different sender) so that
-          // postBatch + proxy call can land in the same block.
-          const proxyCallerBalance = await this.l1Provider.getBalance(this.proxyCallerWallet.address);
-          const callValue = BigInt(value);
-          const minBalance = callValue + baseMaxFee * 2n * 500_000n;
-          if (proxyCallerBalance < minBalance) {
-            const fundAmount = minBalance * 2n - proxyCallerBalance;
-            console.log(`[Builder] Funding proxy caller ${this.proxyCallerWallet.address} with ${fundAmount} wei`);
-            const fundTx = await this.adminWallet.sendTransaction({
-              to: this.proxyCallerWallet.address,
-              value: fundAmount,
-              gasLimit: 21_000n,
-              maxFeePerGas: baseMaxFee * 2n,
-              maxPriorityFeePerGas: basePriority * 3n,
-            });
-            await fundTx.wait();
-            console.log(`[Builder] Proxy caller funded: ${fundTx.hash}`);
-          }
 
-          // Fetch admin nonce AFTER any funding tx is mined, to ensure accuracy
           let nonce = await this.adminWallet.getNonce("latest");
 
           const signedRawTxs: string[] = [];
@@ -1625,27 +1631,11 @@ export class Builder {
             { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
           ));
           console.log(`[Builder] Bundle tx #${signedRawTxs.length}: postBatch (nonce=${nonce})`);
-          nonce++;
 
-          const proxyCallerNonce = await this.proxyCallerWallet.getNonce("pending");
-          const proxyCallTx = {
-            to: proxyAddress,
-            value: callValue,
-            data: data,
-            gasLimit: 500_000n,
-            maxFeePerGas: baseMaxFee * 2n,
-            maxPriorityFeePerGas: basePriority,
-            nonce: proxyCallerNonce,
-            chainId: this.l1ChainId,
-            type: 2,
-          };
-          signedRawTxs.push(await this.proxyCallerWallet.signTransaction(proxyCallTx));
-          console.log(`[Builder] Bundle tx #${signedRawTxs.length}: proxy call from ${this.proxyCallerWallet.address} (nonce=${proxyCallerNonce})`);
-
-          // Broadcast all txs to mempool simultaneously. With explicit nonces
-          // the miner orders them correctly. On low-traffic chains (Chiado, testnets)
-          // they'll typically land in the same block.
-          console.log(`[Builder] Broadcasting ${signedRawTxs.length} txs to mempool...`);
+          // Broadcast admin txs to mempool (don't wait for mining — the user's
+          // proxy call must land in the same block, so return immediately so the
+          // dashboard can broadcast the user's tx while these are still pending).
+          console.log(`[Builder] Broadcasting ${signedRawTxs.length} admin txs to mempool...`);
           const broadcastPromises = signedRawTxs.map((raw, i) =>
             this.l1Provider.broadcastTransaction(raw).then(tx => {
               console.log(`[Builder] Tx #${i + 1} broadcast: ${tx.hash}`);
@@ -1653,30 +1643,8 @@ export class Builder {
             })
           );
           const txResponses = await Promise.all(broadcastPromises);
-
-          // Wait for the last tx (proxy call) to be mined
-          const lastTx = txResponses[txResponses.length - 1];
-          console.log(`[Builder] Waiting for proxy call tx ${lastTx.hash} to be mined...`);
-          const receipt = await lastTx.wait();
-
-          if (!receipt || receipt.status === 0) {
-            console.warn(`[Builder] Proxy call tx reverted in block ${receipt?.blockNumber}`);
-            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
-            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
-            throw new Error(`Proxy call tx reverted after ${MAX_PREP_ATTEMPTS} attempts`);
-          }
-
-          // Verify postBatch was in the same block
-          const postBatchTx = txResponses[signedRawTxs.length - 2]; // tx before proxy call
-          const postBatchReceipt = await postBatchTx.wait();
-          if (postBatchReceipt?.blockNumber !== receipt.blockNumber) {
-            console.warn(`[Builder] WARNING: postBatch in block ${postBatchReceipt?.blockNumber}, proxy call in block ${receipt.blockNumber} — different blocks!`);
-            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
-            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
-            throw new Error(`postBatch and proxy call landed in different blocks`);
-          }
-
-          console.log(`[Builder] All txs included in block ${receipt.blockNumber}`);
+          const postBatchTxHash = txResponses[txResponses.length - 1].hash;
+          console.log(`[Builder] Admin txs broadcast. postBatch hash: ${postBatchTxHash}`);
 
           // Store hint for the proofer — after L1→L2 calls, the proofer's EVM may
           // lag behind (timestamp mismatch causes state divergence). When the builder
@@ -1690,14 +1658,15 @@ export class Builder {
             console.log(`[Builder] Stored L1→L2 hint for proofer (${this.recentL1ToL2Hints.length} pending)`);
           }
 
+          // Return proxy address — the user sends their own tx to the proxy.
+          // postBatch is in the mempool; user's tx should land in the same block.
           return {
             success: true,
             proxyAddress,
             sourceProxyAddress,
             proxyDeployed,
             executionsLoaded: plan.entries.length,
-            bundleIncluded: true,
-            l1BlockNumber: receipt.blockNumber,
+            postBatchTxHash,
           };
         }
       }
@@ -2121,6 +2090,17 @@ export class Builder {
    * block.timestamp is not part of the state root (unless a contract reads it
    * and writes to storage, which we skip checking for now per user direction).
    */
+  /** Get current block number via raw fetch, bypassing ethers' internal cache. */
+  private async getUncachedBlockNumber(): Promise<number> {
+    const resp = await fetch(this.config.l1RpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
+    });
+    const json = await resp.json() as { result: string };
+    return parseInt(json.result, 16);
+  }
+
   /** Beacon chain slot duration (Ethereum = 12s, Gnosis = 5s) */
   private get SLOT_DURATION(): number {
     return (this.l1ChainId === 1n || this.l1ChainId === 11155111n) ? 12 : 5;
