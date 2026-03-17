@@ -8,11 +8,11 @@
     "l2ExplorerUrl": "http://localhost:4001"
   },
   "chiado": {
-    "label": "Chiado Testnet",
+    "label": "Chiado (ECDSA Verifier)",
     "settingsFile": "settings.chiado.json",
     "walletsFile": "wallets.chiado.json",
     "l1ChainId": 10200,
     "l1ExplorerUrl": "https://gnosis-chiado.blockscout.com",
-    "l2ExplorerUrl": "http://217.182.199.45:4002"
+    "l2ExplorerUrl": "http://54.38.26.5:4001"
   }
 }

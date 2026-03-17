@@ -1,14 +1,14 @@
 {
-  "l1Rpc": "https://gnosis-chiado-testnet.gateway.tenderly.co/62Kg501JwdD5LafmgZkNYZ",
-  "l2Rpc": "http://217.182.199.45:9647",
-  "l2EvmRpc": "http://217.182.199.45:9648",
-  "builderUrl": "http://217.182.199.45:3210",
-  "prooferUrl": "http://217.182.199.45:3310",
-  "ethrexRpc": "http://217.182.199.45:3211",
-  "ethrexEvmRpc": "http://217.182.199.45:9656",
+  "l1Rpc": "http://51.210.221.124:8645/",
+  "l2Rpc": "http://54.38.26.5:9661",
+  "l2EvmRpc": "http://54.38.26.5:9660",
+  "builderUrl": "http://54.38.26.5:3201",
+  "prooferUrl": "http://54.38.26.5:3301",
+  "ethrexRpc": "",
+  "ethrexEvmRpc": "",
   "blockscoutL1Url": "https://gnosis-chiado.blockscout.com",
-  "blockscoutL2Url": "http://217.182.199.45:4002",
-  "rollupsAddress": "0x1322324B440b49213170e7a229635788AA784290",
+  "blockscoutL2Url": "http://54.38.26.5:4001",
+  "rollupsAddress": "0xC8a94671cD4b3Ae3A30d49Ab35c06F9DC972871b",
   "rollupId": "2",
-  "deploymentBlock": "20218048"
+  "deploymentBlock": "20298668"
 }

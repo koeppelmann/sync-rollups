@@ -19,7 +19,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { JsonRpcProvider, keccak256, AbiCoder } from "ethers";
-import { ProofGenerator, ProofGeneratorConfig } from "../builder/proof-generator.js";
+import { ProofGenerator, ProofGeneratorConfig, ECDSASigningParams } from "../builder/proof-generator.js";
 import {
   Action,
   ActionType,
@@ -89,6 +89,12 @@ export interface ProveRequest {
    * CrossChainManagerL2 so the proxy call can consume them during simulation.
    */
   preloadSystemCalls?: { entryIndex: number; to: string; data: string }[];
+  /**
+   * For tmpECDSAVerifier: the target L1 block number and parent block hash.
+   * When provided, the proofer signs the real publicInputsHash (matching Rollups.sol)
+   * as raw ECDSA instead of using EIP-191 signMessage.
+   */
+  ecdsaParams?: { targetBlockNumber: number; parentBlockHash: string };
 }
 
 export interface ProveResponse {
@@ -469,8 +475,12 @@ export class Proofer {
       // The proofer's L2 now mirrors the builder's L2 (both ahead of L1).
       // When the builder posts the batch to L1, the event processor will
       // detect "L2 state already matches" and skip replay.
-      const proof = await this.proofGenerator.signPostBatchProof(entries);
-      console.log("[Proofer] Verification passed, proof signed");
+      const ecdsaSigningParams: ECDSASigningParams | undefined = request.ecdsaParams
+        ? { targetBlockNumber: request.ecdsaParams.targetBlockNumber, parentBlockHash: request.ecdsaParams.parentBlockHash }
+        : undefined;
+      const proof = await this.proofGenerator.signPostBatchProof(entries, ecdsaSigningParams);
+      console.log("[Proofer] Verification passed, proof signed" +
+        (ecdsaSigningParams ? ` (ECDSA mode, target block ${ecdsaSigningParams.targetBlockNumber})` : ""));
 
       return {
         success: true,

@@ -23,7 +23,6 @@ export interface BuilderConfig {
   l1RpcUrl: string;
   rollupsAddress: string;
   builderPrivateKey: string;
-  ownerPrivateKey: string;
 
   // Builder-private fullnode connection (not the public/read-only fullnode)
   fullnodeRpcUrl: string;
@@ -36,6 +35,10 @@ export interface BuilderConfig {
 
   // HTTP server
   port: number;
+
+  // When true, uses tmpECDSAVerifier mode: proofs are raw ECDSA signatures
+  // over the real publicInputsHash (block-bound). Requires bundle submission.
+  useECDSAVerifier?: boolean;
 }
 
 // Rollups contract ABI (functions we call)
@@ -46,7 +49,6 @@ const ROLLUPS_ABI = [
   "function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId, uint256 domain) view returns (address)",
   "function createCrossChainProxy(address originalAddress, uint256 originalRollupId) returns (address)",
   "function authorizedProxies(address) view returns (address originalAddress, uint64 originalRollupId)",
-  "function setStateByOwner(uint256 rollupId, bytes32 newStateRoot)",
   "event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 currentState, bytes32 newState)",
   "event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId)",
 ];
@@ -74,7 +76,6 @@ interface StatusResponse {
   fullnodeStateRoot: string;
   isSynced: boolean;
   builderAddress: string;
-  ownerAddress: string;
 }
 
 interface PrepareL1CallRequest {
@@ -111,10 +112,7 @@ export class Builder {
   private planner: ExecutionPlanner;
   private l1Provider: JsonRpcProvider;
   private builderWallet: Wallet;
-  private ownerWallet: Wallet;
   private rollupsContract: Contract;
-  /** Rollups contract connected via owner wallet (for setStateByOwner) */
-  private ownerRollupsContract: Contract;
   private server: ReturnType<typeof createServer> | null = null;
   private isAnvilL1 = false; // Detected at startup
   private l1ChainId = 0n;
@@ -154,19 +152,12 @@ export class Builder {
     // Initialize providers (disable batching to avoid rate limits on public RPCs)
     this.l1Provider = new JsonRpcProvider(config.l1RpcUrl, undefined, { batchMaxCount: 1 });
     this.builderWallet = new Wallet(config.builderPrivateKey, this.l1Provider);
-    this.ownerWallet = new Wallet(config.ownerPrivateKey, this.l1Provider);
 
     // Initialize contracts (builder wallet for unpermissioned calls)
     this.rollupsContract = new Contract(
       config.rollupsAddress,
       ROLLUPS_ABI,
       this.builderWallet
-    );
-    // Owner contract for permissioned calls (setStateByOwner)
-    this.ownerRollupsContract = new Contract(
-      config.rollupsAddress,
-      ROLLUPS_ABI,
-      this.ownerWallet
     );
 
     // Initialize planner
@@ -189,7 +180,6 @@ export class Builder {
     console.log(`L1 RPC: ${this.config.l1RpcUrl}`);
     console.log(`Builder Fullnode RPC: ${this.config.fullnodeRpcUrl}`);
     console.log(`Builder: ${this.builderWallet.address}`);
-    console.log(`Owner: ${this.ownerWallet.address}`);
     console.log(`Proofer: ${this.config.prooferUrl}`);
     console.log("");
 
@@ -398,7 +388,6 @@ export class Builder {
       fullnodeStateRoot: states.fullnodeState,
       isSynced: synced,
       builderAddress: this.builderWallet.address,
-      ownerAddress: this.ownerWallet.address,
     };
   }
 
@@ -474,8 +463,6 @@ export class Builder {
     // planning. The EVM may be ahead due to a persisted simulation from a previous
     // tx (success path keeps simulation state for event processor to reuse).
     // If EVM != tracked, roll back so we simulate from the correct base state.
-    let needsStateCorrection = false;
-    let correctionTargetState = "";
     if (!this.isAnvilL1) {
       const fullnodeRpc0 = new JsonRpcProvider(this.config.fullnodeRpcUrl);
       const evmState = await fullnodeRpc0.send("syncrollups_getActualStateRoot", []);
@@ -512,13 +499,6 @@ export class Builder {
             // reth restarting
           }
         }
-      }
-      // Now check if L1 state differs from tracked state (needs setStateByOwner correction)
-      const preRollup = await this.rollupsContract.rollups(this.config.rollupId);
-      if (trackedState !== preRollup.stateRoot) {
-        console.log(`[Builder] State correction needed: L1=${preRollup.stateRoot.slice(0, 12)}... vs tracked=${trackedState.slice(0, 12)}... (will submit with batch)`);
-        needsStateCorrection = true;
-        correctionTargetState = trackedState;
       }
     }
 
@@ -612,11 +592,11 @@ export class Builder {
           tx.from,
           sourceProxyOnL1,
           simTimestamp,
-          needsStateCorrection ? correctionTargetState : undefined,
+          undefined,
           proxyDeploySignedTx
         );
       } else {
-        plan = await this.planner.planL2Transaction(signedTx, simTimestamp, needsStateCorrection ? correctionTargetState : undefined);
+        plan = await this.planner.planL2Transaction(signedTx, simTimestamp, undefined);
       }
 
       entryCount = plan.entries.length;
@@ -632,14 +612,18 @@ export class Builder {
         console.log(`[Builder] Including ${hintsForProof.length} L1→L2 hint(s) for proofer`);
       }
 
-      const tProof = Date.now();
-      let proof = await this.requestProof(plan, simTimestamp, undefined, undefined, hintsForProof);
-      timing.prove = Date.now() - tProof;
-      console.log(`[Builder] Proof obtained from proofer [${timing.prove}ms]`);
-
-      // Clear hints after successful proof — proofer is now caught up
-      if (hintsForProof) {
-        this.recentL1ToL2Hints = [];
+      // For ECDSA verifier mode, proof request is deferred until we know the target
+      // block (determined inside the bundle/beacon paths below). For MockZKVerifier,
+      // request proof immediately since it doesn't depend on block info.
+      let proof: string | undefined;
+      if (!this.config.useECDSAVerifier) {
+        const tProof = Date.now();
+        proof = await this.requestProof(plan, simTimestamp, undefined, undefined, hintsForProof);
+        timing.prove = Date.now() - tProof;
+        console.log(`[Builder] Proof obtained from proofer [${timing.prove}ms]`);
+        if (hintsForProof) {
+          this.recentL1ToL2Hints = [];
+        }
       }
 
       const tNotify = Date.now();
@@ -689,73 +673,101 @@ export class Builder {
           return f > min ? f : min;
         })();
 
-        let nonce = await this.builderWallet.getNonce("pending");
-        const signedRawTxs: string[] = [];
+        // ECDSA bundle submission loop: each attempt gets a fresh proof for the
+        // current target block, since the proof is block-bound.
+        const MAX_ECDSA_ATTEMPTS = this.config.useECDSAVerifier ? 5 : 1;
+        let bundleResult: { included: boolean; blockNumber: number; txHashes: string[] } | null = null;
 
-        if (needsStateCorrection) {
-          const ownerNonce = await this.ownerWallet.getNonce("pending");
-          signedRawTxs.push(await this.signOwnerContractTx("setStateByOwner",
-            [this.config.rollupId, correctionTargetState],
-            { gasLimit: 100_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce: ownerNonce }
+        for (let ecdsaAttempt = 1; ecdsaAttempt <= MAX_ECDSA_ATTEMPTS; ecdsaAttempt++) {
+          // For ECDSA verifier: get fresh target block and proof each attempt
+          if (this.config.useECDSAVerifier) {
+            const currentBlock = await this.getUncachedBlockNumber();
+            const targetBlock = currentBlock + 1;
+            const parentBlock = await this.l1Provider.getBlock(currentBlock);
+            if (!parentBlock) throw new Error(`Failed to get block ${currentBlock}`);
+            const tProof = Date.now();
+            proof = await this.requestProof(plan, simTimestamp, undefined, undefined, hintsForProof, {
+              targetBlockNumber: targetBlock,
+              parentBlockHash: parentBlock.hash!,
+            });
+            timing.prove = Date.now() - tProof;
+            console.log(`[Builder] ECDSA proof for target block ${targetBlock} [attempt ${ecdsaAttempt}/${MAX_ECDSA_ATTEMPTS}, ${timing.prove}ms]`);
+            if (hintsForProof) {
+              this.recentL1ToL2Hints = [];
+              hintsForProof = undefined;
+            }
+          }
+
+          let nonce = await this.builderWallet.getNonce("pending");
+          const signedRawTxs: string[] = [];
+
+          // Deploy L1 alias proxy if needed (for L2→L1 scope resolution)
+          if (l2ToL1Target) {
+            const l1AliasAddress = await this.rollupsContract.computeCrossChainProxyAddress(
+              l2ToL1Target, l1ChainId, l1ChainId
+            );
+            const l1Code = await this.l1Provider.getCode(l1AliasAddress);
+            if (l1Code === "0x") {
+              signedRawTxs.push(await this.signContractTx("createCrossChainProxy",
+                [l2ToL1Target, l1ChainId],
+                { gasLimit: 500_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+              ));
+              nonce++;
+            }
+          }
+
+          signedRawTxs.push(await this.signContractTx("postBatch",
+            [entriesData, 0, "0x", proof!],
+            { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
           ));
-          this.lastCorrectedState = correctionTargetState;
-        }
+          nonce++;
 
-        // Deploy L1 alias proxy if needed (for L2→L1 scope resolution)
-        if (l2ToL1Target) {
-          const l1AliasAddress = await this.rollupsContract.computeCrossChainProxyAddress(
-            l2ToL1Target, l1ChainId, l1ChainId
-          );
-          const l1Code = await this.l1Provider.getCode(l1AliasAddress);
-          if (l1Code === "0x") {
-            signedRawTxs.push(await this.signContractTx("createCrossChainProxy",
-              [l2ToL1Target, l1ChainId],
-              { gasLimit: 500_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
+          // executeL2TX for proxy deploy tx (if L2→L1 with new proxy)
+          if (proxyDeploySignedTx) {
+            signedRawTxs.push(await this.signContractTx("executeL2TX",
+              [this.config.rollupId, proxyDeploySignedTx],
+              { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
             ));
             nonce++;
           }
-        }
 
-        signedRawTxs.push(await this.signContractTx("postBatch",
-          [entriesData, 0, "0x", proof],
-          { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
-        ));
-        nonce++;
-
-        // executeL2TX for proxy deploy tx (if L2→L1 with new proxy)
-        if (proxyDeploySignedTx) {
+          // executeL2TX for user tx
           signedRawTxs.push(await this.signContractTx("executeL2TX",
-            [this.config.rollupId, proxyDeploySignedTx],
+            [this.config.rollupId, signedTx],
             { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
           ));
-          nonce++;
+
+          timing.sign = Date.now() - t0 - (timing.simulate || 0) - (timing.prove || 0) - (timing.notify || 0);
+          console.log(`[Builder] Bundle: ${signedRawTxs.length} signed txs (nonces ${nonce - signedRawTxs.length + 1}..${nonce}) [sign=${timing.sign}ms]`);
+
+          // Use raw fetch to bypass ethers' block number cache entirely
+          const tSubmit = Date.now();
+          const currentBlock = await this.getUncachedBlockNumber();
+          const targetBlock = currentBlock + 1;
+          console.log(`[Builder] Submitting bundle targeting block ${targetBlock} (current=${currentBlock})`);
+          const result = await this.bundleSubmitter!.submitAndWait(
+            signedRawTxs, targetBlock, this.l1Provider, simTimestamp
+          );
+          timing.submit = Date.now() - tSubmit;
+
+          if (result.included) {
+            bundleResult = result;
+            break;
+          }
+
+          console.log(`[Builder] Bundle not included (attempt ${ecdsaAttempt}/${MAX_ECDSA_ATTEMPTS})`);
+          if (ecdsaAttempt >= MAX_ECDSA_ATTEMPTS) {
+            console.log(`[Builder] TIMING: simulate=${timing.simulate}ms prove=${timing.prove}ms notify=${timing.notify}ms sign=${timing.sign}ms submit=${timing.submit}ms TOTAL=${Date.now() - t0}ms`);
+            throw new Error(
+              `Bundle not included after ${MAX_ECDSA_ATTEMPTS} attempts. ` +
+              `Will retry with new simulation on next attempt.`
+            );
+          }
         }
 
-        // executeL2TX for user tx
-        signedRawTxs.push(await this.signContractTx("executeL2TX",
-          [this.config.rollupId, signedTx],
-          { gasLimit: this.execL2TXGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
-        ));
-
-        timing.sign = Date.now() - t0 - (timing.simulate || 0) - (timing.prove || 0) - (timing.notify || 0);
-        console.log(`[Builder] Bundle: ${signedRawTxs.length} signed txs (nonces ${nonce - signedRawTxs.length + 1}..${nonce}) [sign=${timing.sign}ms]`);
-
-        // Use raw fetch to bypass ethers' block number cache entirely
-        const tSubmit = Date.now();
-        const currentBlock = await this.getUncachedBlockNumber();
-        const targetBlock = currentBlock + 1;
-        console.log(`[Builder] Submitting bundle targeting block ${targetBlock} (current=${currentBlock})`);
-        const result = await this.bundleSubmitter.submitAndWait(
-          signedRawTxs, targetBlock, this.l1Provider, simTimestamp
-        );
-        timing.submit = Date.now() - tSubmit;
-
+        const result = bundleResult!;
         if (!result.included) {
-          console.log(`[Builder] TIMING: simulate=${timing.simulate}ms prove=${timing.prove}ms notify=${timing.notify}ms sign=${timing.sign}ms submit=${timing.submit}ms TOTAL=${Date.now() - t0}ms`);
-          throw new Error(
-            `Bundle not included in block ${targetBlock}. ` +
-            `Will retry with new simulation on next attempt.`
-          );
+          throw new Error("Bundle not included");
         }
 
         execReceiptHash = result.txHashes[result.txHashes.length - 1];
@@ -813,22 +825,29 @@ export class Builder {
           return f > min ? f : min;
         })();
 
+        // For ECDSA verifier: request proof with target block info
+        if (this.config.useECDSAVerifier && !proof) {
+          const currentBlock = await this.getUncachedBlockNumber();
+          const targetBlock = currentBlock + 1;
+          const parentBlock = await this.l1Provider.getBlock(currentBlock);
+          if (!parentBlock) throw new Error(`Failed to get block ${currentBlock}`);
+          const tProof = Date.now();
+          proof = await this.requestProof(plan, simTimestamp, undefined, undefined, hintsForProof, {
+            targetBlockNumber: targetBlock,
+            parentBlockHash: parentBlock.hash!,
+          });
+          timing.prove = Date.now() - tProof;
+          console.log(`[Builder] ECDSA proof obtained for target block ${targetBlock} [${timing.prove}ms]`);
+          if (hintsForProof) {
+            this.recentL1ToL2Hints = [];
+          }
+        }
+
         // All txs use builder wallet for nonce-based ordering guarantee.
         // Sequential nonces from the same sender ensure the node processes them in order
         // and is much more likely to include them in the same block.
         let nonce = await this.builderWallet.getNonce("latest");
         const signedRawTxs: string[] = [];
-
-        // State correction (if needed): owner wallet, highest priority fee → ordered first
-        if (needsStateCorrection) {
-          const ownerNonce = await this.ownerWallet.getNonce("latest");
-          signedRawTxs.push(await this.signOwnerContractTx("setStateByOwner",
-            [this.config.rollupId, correctionTargetState],
-            { gasLimit: 100_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 5n, nonce: ownerNonce }
-          ));
-          console.log(`[Builder] Signed setStateByOwner (owner nonce=${ownerNonce})`);
-          this.lastCorrectedState = correctionTargetState;
-        }
 
         // Deploy L1 alias proxy if needed (for L2→L1 scope resolution)
         if (l2ToL1Target) {
@@ -848,7 +867,7 @@ export class Builder {
 
         // postBatch: high priority fee → ordered after correction
         signedRawTxs.push(await this.signContractTx("postBatch",
-          [entriesData, 0, "0x", proof],
+          [entriesData, 0, "0x", proof!],
           { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 3n, nonce }
         ));
         const postBatchNonce = nonce;
@@ -892,9 +911,9 @@ export class Builder {
 
         // Wait for all to confirm
         const receipts = await Promise.all(pendingTxs);
-        const postBatchReceipt = receipts[needsStateCorrection ? 1 : 0];
+        const postBatchReceipt = receipts[0];
         const execReceipt = receipts[receipts.length - 1];
-        const postBatchTxResponse = txResponses[needsStateCorrection ? 1 : 0];
+        const postBatchTxResponse = txResponses[0];
         console.log(`[Builder] Executions loaded: ${postBatchTxResponse.hash}`);
         execReceiptHash = execReceipt!.hash;
 
@@ -1547,18 +1566,6 @@ export class Builder {
             }
           }
 
-          // Check if state correction is needed
-          let needsCorrection = false;
-          let correctionTarget = "";
-          const currentRollup = await this.rollupsContract.rollups(this.config.rollupId);
-          const currentL1State = currentRollup.stateRoot;
-          const currentTracked = await fullnodeRpc.send("syncrollups_getStateRoot", []);
-          if (currentTracked !== currentL1State) {
-            needsCorrection = true;
-            correctionTarget = currentTracked;
-            console.log(`[Builder] State correction needed: L1=${(currentL1State as string).slice(0, 12)}... vs tracked=${correctionTarget.slice(0, 12)}...`);
-          }
-
           // Choose timestamp
           const simTimestamp = await this.chooseSimTimestamp();
           console.log(`[Builder] Simulation timestamp: ${simTimestamp}`);
@@ -1579,7 +1586,7 @@ export class Builder {
               l2Target, data, BigInt(value),
               proxyAddress, sourceProxyAddress, effectiveSourceAddress,
               simTimestamp,
-              needsCorrection ? correctionTarget : undefined,
+              undefined,
               proxyRollupId
             );
           } catch (planErr: any) {
@@ -1598,17 +1605,19 @@ export class Builder {
             throw new Error(`L1→L2 simulation failed (revert data: ${revertData})${hint}`);
           }
 
-          // Request proof
-          let proof;
-          try {
-            proof = await this.requestProof(plan, simTimestamp, undefined, [sourceProxyAddress]);
-          } catch (proofErr: any) {
-            console.warn(`[Builder] Proofer rejected: ${proofErr.message}`);
-            try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
-            if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
-            throw proofErr;
+          // Request proof — for ECDSA mode, defer until we know the target block
+          let proof: string | undefined;
+          if (!this.config.useECDSAVerifier) {
+            try {
+              proof = await this.requestProof(plan, simTimestamp, undefined, [sourceProxyAddress]);
+            } catch (proofErr: any) {
+              console.warn(`[Builder] Proofer rejected: ${proofErr.message}`);
+              try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
+              if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
+              throw proofErr;
+            }
+            console.log("[Builder] Proof obtained from proofer");
           }
-          console.log("[Builder] Proof obtained from proofer");
 
           // Notify fullnode
           await this.planner.notifyExecutions(plan.entries);
@@ -1649,22 +1658,32 @@ export class Builder {
             return f > min ? f : min;
           })();
 
+          // For ECDSA mode: get target block info and request proof now
+          if (this.config.useECDSAVerifier && !proof) {
+            const currentBlock = await this.getUncachedBlockNumber();
+            const targetBlock = currentBlock + 1;
+            const parentBlock = await this.l1Provider.getBlock(currentBlock);
+            if (!parentBlock) throw new Error(`Failed to get block ${currentBlock}`);
+            try {
+              proof = await this.requestProof(plan, simTimestamp, undefined, [sourceProxyAddress], undefined, {
+                targetBlockNumber: targetBlock,
+                parentBlockHash: parentBlock.hash!,
+              });
+            } catch (proofErr: any) {
+              console.warn(`[Builder] Proofer rejected: ${proofErr.message}`);
+              try { await fullnodeRpc.send("syncrollups_revertToSnapshot", [`0x${snapshotBlock.toString(16)}`]); } catch {}
+              if (attempt < MAX_PREP_ATTEMPTS) { await new Promise(r => setTimeout(r, 5000)); continue; }
+              throw proofErr;
+            }
+            console.log(`[Builder] ECDSA proof obtained for target block ${targetBlock}`);
+          }
+
           let nonce = await this.builderWallet.getNonce("latest");
 
           const signedRawTxs: string[] = [];
 
-          if (needsCorrection) {
-            const ownerNonce = await this.ownerWallet.getNonce("latest");
-            signedRawTxs.push(await this.signOwnerContractTx("setStateByOwner",
-              [this.config.rollupId, correctionTarget],
-              { gasLimit: 100_000n, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 5n, nonce: ownerNonce }
-            ));
-            console.log(`[Builder] Bundle tx #${signedRawTxs.length}: setStateByOwner (owner nonce=${ownerNonce})`);
-            this.lastCorrectedState = correctionTarget;
-          }
-
           signedRawTxs.push(await this.signContractTx("postBatch",
-            [entriesData, 0, "0x", proof],
+            [entriesData, 0, "0x", proof!],
             { gasLimit: this.postBatchGasLimit, maxFeePerGas: baseMaxFee * 2n, maxPriorityFeePerGas: basePriority * 2n, nonce }
           ));
           console.log(`[Builder] Bundle tx #${signedRawTxs.length}: postBatch (nonce=${nonce})`);
@@ -1748,9 +1767,7 @@ export class Builder {
         }
       }
 
-      // On real L1 (no bundle submitter): ensure EVM matches tracked state, then check if L1 correction needed.
-      let prepNeedsCorrection = false;
-      let prepCorrectionTarget = "";
+      // On real L1 (no bundle submitter): ensure EVM matches tracked state.
       if (!this.isAnvilL1) {
         const fullnodeRpc = new JsonRpcProvider(this.config.fullnodeRpcUrl);
         const evmState = await fullnodeRpc.send("syncrollups_getActualStateRoot", []);
@@ -1772,15 +1789,6 @@ export class Builder {
               if (newEvm === newTracked) break;
             } catch { /* reth restarting */ }
           }
-        }
-        const currentRollup2 = await this.rollupsContract.rollups(this.config.rollupId);
-        const currentL1 = currentRollup2.stateRoot;
-        if (trackedState !== currentL1) {
-          console.log(
-            `[Builder] State correction needed: L1=${currentL1.slice(0, 12)}... vs tracked=${trackedState.slice(0, 12)}... (will submit with batch)`
-          );
-          prepNeedsCorrection = true;
-          prepCorrectionTarget = trackedState;
         }
       }
 
@@ -1806,7 +1814,7 @@ export class Builder {
         sourceProxyAddress,
         sourceAddress,  // Original L1 sender for L2 proxy deployment
         simTimestamp,
-        prepNeedsCorrection ? prepCorrectionTarget : undefined,
+        undefined,
         proxyRollupId
       );
       console.log(`[Builder] Planned ${plan.entries.length} execution(s)`);
@@ -1903,20 +1911,6 @@ export class Builder {
         const baseMaxFee = (() => { const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n; const min = basePriority * 8n; return f > min ? f : min; })();
         let nonce = await this.builderWallet.getNonce("pending");
         const pendingBatchTxs: Promise<any>[] = [];
-
-        if (prepNeedsCorrection) {
-          const corrTx = await this.ownerRollupsContract.setStateByOwner(
-            this.config.rollupId, prepCorrectionTarget,
-            {
-              gasLimit: 100_000n,
-              maxFeePerGas: baseMaxFee * 2n,
-              maxPriorityFeePerGas: basePriority * 5n,
-            }
-          );
-          pendingBatchTxs.push(corrTx.wait());
-          console.log(`[Builder] State correction tx submitted (owner)`);
-          this.lastCorrectedState = prepCorrectionTarget;
-        }
 
         const postBatchTx = await this.rollupsContract.postBatch(
           postBatchEntriesData, 0, "0x", proof,
@@ -2105,7 +2099,8 @@ export class Builder {
     timestamp?: number,
     batchSignedTxs?: string[],
     sourceProxies?: (string | null)[],
-    hints?: Array<{ action: any; timestamp: number; sourceProxy?: string }>
+    hints?: Array<{ action: any; timestamp: number; sourceProxy?: string }>,
+    ecdsaParams?: { targetBlockNumber: number; parentBlockHash: string }
   ): Promise<string> {
     // Wait for proofer fullnode to catch up before requesting proof
     await this.waitForProoferSync();
@@ -2127,6 +2122,7 @@ export class Builder {
       sourceProxies,
       hints: formattedHints,
       preloadSystemCalls: plan.preloadSystemCalls,
+      ecdsaParams,
     });
 
     const response = await fetch(`${this.config.prooferUrl}/prove`, {
@@ -2274,39 +2270,10 @@ export class Builder {
   }
 
   /**
-   * Sign a contract method call using the owner wallet (for permissioned calls like setStateByOwner).
-   */
-  private async signOwnerContractTx(
-    method: string,
-    args: any[],
-    overrides: {
-      gasLimit: bigint;
-      maxFeePerGas: bigint;
-      maxPriorityFeePerGas: bigint;
-      nonce: number;
-    }
-  ): Promise<string> {
-    const unsignedTx = await this.ownerRollupsContract[method].populateTransaction(
-      ...args,
-      {
-        gasLimit: overrides.gasLimit,
-        maxFeePerGas: overrides.maxFeePerGas,
-        maxPriorityFeePerGas: overrides.maxPriorityFeePerGas,
-        nonce: overrides.nonce,
-      }
-    );
-    unsignedTx.chainId = this.l1ChainId;
-    return await this.ownerWallet.signTransaction(unsignedTx);
-  }
-
-  /**
    * Maximum number of bundle submission attempts before giving up.
    * Each attempt re-simulates, re-proofs, and targets the next block.
    */
   private readonly MAX_BUNDLE_ATTEMPTS = 5;
-
-  // Used by inline state correction to avoid redundant corrections
-  private lastCorrectedState = "";
 
   // Background state correction loop — REMOVED.
   // The loop created StateUpdated events that confused fullnodes (false reorgs,
@@ -2323,7 +2290,7 @@ export class Builder {
    * 1. Gets the actual L1 block timestamp from the executeL2TX receipt
    * 2. If it matches simTimestamp, no correction needed
    * 3. If it differs, rolls back the builder's reth, re-mines with the correct
-   *    timestamp, and calls setStateByOwner to update the L1 state root
+   *    timestamp, and the event processor handles convergence
    *
    * @param execReceipt The receipt from the executeL2TX L1 transaction
    * @param simTimestamp The timestamp used during simulation
@@ -2352,8 +2319,7 @@ export class Builder {
     // Timestamp mismatch is expected on real chains — the builder simulates with
     // a predicted timestamp, but the actual L1 block may land in a different slot.
     // The event processor now accepts pre-executed state regardless of timestamp,
-    // so no correction is needed. The next transaction will include a setStateByOwner
-    // correction if the L1 state diverged.
+    // so no correction is needed.
     console.log(
       `[Builder] Timestamp mismatch: simulated=${simTimestamp}, actual=${actualTimestamp}. ` +
       `Event processors accept pre-executed state for consistency.`
@@ -2470,11 +2436,11 @@ async function main() {
     l1RpcUrl: getArg("l1-rpc", "http://localhost:8545"),
     rollupsAddress: getArg("rollups"),
     builderPrivateKey: getArg("builder-key"),
-    ownerPrivateKey: getArg("owner-key"),
     fullnodeRpcUrl: getArg("fullnode", "http://localhost:9550"),
     prooferUrl: getArg("proofer", "http://localhost:3300"),
     rollupId: BigInt(getArg("rollup-id", "0")),
     port: parseInt(getArg("port", "3200")),
+    useECDSAVerifier: args.includes("--ecdsa-verifier"),
   };
 
   const builder = new Builder(config);

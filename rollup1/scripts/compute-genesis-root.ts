@@ -166,7 +166,7 @@ async function main() {
   const rethProcess: ChildProcess = spawn(
     rethBinary,
     [
-      "node", "--dev",
+      "node",
       "--http", "--http.port", httpPort.toString(),
       "--http.api", "eth",
       "--chain", genesisPath,

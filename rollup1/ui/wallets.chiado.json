@@ -1,6 +1,14 @@
 [
   {
-    "label": "Admin",
-    "key": "0x1e764316993835de5b7a3e82c76726a0ac36b73623ff0494b55565f52f6fe91b"
+    "label": "Builder",
+    "key": "0x9104dd644a5b3474d2d85d8a40aec9088b3dc92a9ecedbc5542bdbfcb85661b0"
+  },
+  {
+    "label": "Proofer",
+    "key": "0xf81cf64abf8d3f10759ad5a2aeb4265c9b9d40bc65b370a35bfba3fa3f72ad49"
+  },
+  {
+    "label": "L2 User",
+    "key": "0x2f51780ba33ead74302902891a9397a011430a3b3bae55fb16843961ce1539cd"
   }
 ]

@@ -1,10 +1,17 @@
 /**
  * Proof Generator for sync-rollups builder
- * Signs proofs using a dedicated proof signer key (POC) or generates ZK proofs (production)
+ * Signs proofs using a dedicated proof signer key.
+ *
+ * Supports two modes:
+ * - MockZKVerifier (legacy): signs a hash of entry hashes using EIP-191 (signMessage)
+ * - tmpECDSAVerifier: signs the real publicInputsHash as raw ECDSA (no prefix)
+ *   The publicInputsHash includes blockhash(block.number-1) and block.number,
+ *   so the caller must provide targetBlockNumber and parentBlockHash.
  */
 
 import {
   Wallet,
+  SigningKey,
   keccak256,
   solidityPacked,
   AbiCoder,
@@ -12,6 +19,9 @@ import {
   Contract,
   JsonRpcProvider,
   verifyMessage,
+  concat,
+  zeroPadValue,
+  toBeHex,
 } from "ethers";
 import {
   ExecutionEntry,
@@ -27,6 +37,15 @@ export interface ProofGeneratorConfig {
   rollupsAddress: string;
 }
 
+/**
+ * Optional parameters for ECDSA signing mode (tmpECDSAVerifier).
+ * When provided, the proof signs the real publicInputsHash matching the contract.
+ */
+export interface ECDSASigningParams {
+  targetBlockNumber: number;
+  parentBlockHash: string;
+}
+
 // Rollups ABI for reading verification keys
 const ROLLUPS_ABI = [
   "function rollups(uint256) view returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)",
@@ -35,6 +54,7 @@ const ROLLUPS_ABI = [
 export class ProofGenerator {
   private config: ProofGeneratorConfig;
   private signerWallet: Wallet;
+  private signingKey: SigningKey;
   private l1Provider: JsonRpcProvider;
   private rollupsContract: Contract;
   private abiCoder: AbiCoder;
@@ -43,6 +63,7 @@ export class ProofGenerator {
     this.config = config;
     this.l1Provider = new JsonRpcProvider(config.l1RpcUrl, undefined, { batchMaxCount: 1 });
     this.signerWallet = new Wallet(config.signerPrivateKey, this.l1Provider);
+    this.signingKey = new SigningKey(config.signerPrivateKey);
     this.rollupsContract = new Contract(
       config.rollupsAddress,
       ROLLUPS_ABI,
@@ -60,14 +81,17 @@ export class ProofGenerator {
 
   /**
    * Sign proof for postBatch.
-   * Matches the verification logic in Rollups.postBatch.
    *
-   * The publicInputsHash includes blockhash(block.number-1) and block.number
-   * which we can't predict off-chain. For the MockZKVerifier (POC), the
-   * verifier just checks the signature against the signer address, ignoring
-   * the public inputs hash. So we sign a deterministic hash of the entries.
+   * If ecdsaParams is provided, computes the real publicInputsHash (matching
+   * Rollups.sol) and signs it as raw ECDSA (for tmpECDSAVerifier).
+   *
+   * If ecdsaParams is omitted, falls back to MockZKVerifier mode: signs a
+   * hash of entry hashes using EIP-191 signMessage.
    */
-  async signPostBatchProof(entries: ExecutionEntry[]): Promise<string> {
+  async signPostBatchProof(
+    entries: ExecutionEntry[],
+    ecdsaParams?: ECDSASigningParams
+  ): Promise<string> {
     // Build entry hashes as per Rollups.postBatch
     const entryHashes: string[] = [];
 
@@ -82,8 +106,27 @@ export class ProofGenerator {
       entryHashes.push(entryHash);
     }
 
-    // For MockZKVerifier, the proof is just a signer signature.
-    // We sign a hash of the entry hashes so the verifier can validate.
+    if (ecdsaParams) {
+      // tmpECDSAVerifier mode: compute the real publicInputsHash and sign raw
+      const publicInputsHash = this.computePublicInputsHash(
+        entryHashes,
+        ecdsaParams.parentBlockHash,
+        ecdsaParams.targetBlockNumber,
+        [],   // no blob hashes
+        "0x"  // empty callData
+      );
+
+      console.log(`[ProofGenerator] ECDSA mode: target block ${ecdsaParams.targetBlockNumber}, parentHash ${ecdsaParams.parentBlockHash.slice(0, 18)}...`);
+      console.log(`[ProofGenerator] publicInputsHash: ${publicInputsHash}`);
+
+      // Raw ECDSA sign — no EIP-191 prefix
+      const sig = this.signingKey.sign(publicInputsHash);
+      // Pack as r(32) + s(32) + v(1) — 65 bytes total
+      const proof = concat([sig.r, sig.s, toBeHex(sig.v, 1)]);
+      return proof;
+    }
+
+    // MockZKVerifier fallback: sign a hash of entry hashes with EIP-191
     const dataHash = keccak256(
       this.abiCoder.encode(["bytes32[]"], [entryHashes])
     );
@@ -93,6 +136,35 @@ export class ProofGenerator {
     );
 
     return signature;
+  }
+
+  /**
+   * Compute publicInputsHash exactly as Rollups.sol does:
+   * keccak256(abi.encodePacked(
+   *   blockhash(block.number - 1),
+   *   block.number,
+   *   abi.encode(entryHashes),
+   *   abi.encode(blobHashes),
+   *   keccak256(callData)
+   * ))
+   */
+  computePublicInputsHash(
+    entryHashes: string[],
+    parentBlockHash: string,
+    blockNumber: number,
+    blobHashes: string[],
+    callData: string
+  ): string {
+    const encodedEntryHashes = this.abiCoder.encode(["bytes32[]"], [entryHashes]);
+    const encodedBlobHashes = this.abiCoder.encode(["bytes32[]"], [blobHashes]);
+    const callDataHash = keccak256(callData === "0x" ? "0x" : callData);
+
+    return keccak256(
+      solidityPacked(
+        ["bytes32", "uint256", "bytes", "bytes", "bytes32"],
+        [parentBlockHash, blockNumber, encodedEntryHashes, encodedBlobHashes, callDataHash]
+      )
+    );
   }
 
   /**
