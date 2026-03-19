@@ -4259,62 +4259,19 @@
 
         let finalTo = to;
 
-        // If target is on L2, we need to use the proxy
+        // If target is on L2, send the tx to the L1 proxy address instead.
+        // The UI already computed the proxy address and shows it to the user.
+        // The L1 RPC proxy intercepts eth_sendRawTransaction, detects the
+        // proxy call, and routes it through the builder for bundled execution
+        // (postBatch + proxy call in the same L1 block).
         if (targetIsL2) {
-          log('Target is on L2, preparing proxy...');
-
-          // Check if this is Ethereum mainnet (bundle flow) or other chain (prepare flow)
-          const l1ChainIdHex = await callJsonRpc(l1Rpc, 'eth_chainId', []);
-          const isMainnet = parseInt(l1ChainIdHex, 16) === 1;
-
-          if (isMainnet) {
-            // Ethereum mainnet: use bundle flow.
-            const rollupId = document.getElementById('rollupId').value;
-
-            // 1. Register hint on L1 Builder RPC (proxy with /register-hint endpoint)
-            const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
-            const hintResp = await fetch(l1BuilderRpc.replace(/\/$/, '') + '/register-hint', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                l2TargetAddress: to,
-                rollupId: parseInt(rollupId),
-              })
-            });
-            const hintResult = await hintResp.json();
-            finalTo = hintResult.proxyAddress;
-            log(`Hint registered, proxy: ${finalTo}`, 'info');
-          } else {
-            // Other chains: use prepare flow (deploy proxy + load executions first)
-            const prepareResult = await fetchWithProgress(builderUrl + '/prepare-l1-call?stream=1', {
-              l2Target: to,
-              value: '0x' + ethers.parseEther(value).toString(16),
-              data: data,
-              sourceAddress: wallet.address,
-            });
-
-            if (!prepareResult.success) {
-              throw new Error(prepareResult.error || 'Unknown error from builder');
-            }
-
-            if (!prepareResult.proxyAddress) {
-              throw new Error('Builder returned no proxy address');
-            }
-
-            finalTo = prepareResult.proxyAddress;
-            log(`Using proxy: ${finalTo}`, 'info');
-            if (prepareResult.sourceProxyAddress) {
-              log(`L2 sender proxy: ${prepareResult.sourceProxyAddress}`, 'info');
-            }
-            if (prepareResult.bundleIncluded) {
-              log(`L1→L2 call bundled and included in block ${prepareResult.l1BlockNumber}!`, 'success');
-              setTimeout(() => { refreshStatus(); fetchTxHistory(); fetchAllWalletBalances(); }, 3000);
-              return;
-            }
-            if (prepareResult.postBatchTxHash) {
-              log(`Builder broadcast postBatch: ${prepareResult.postBatchTxHash}`, 'info');
-            }
+          // Get the proxy address from the UI (already computed by detectTargetChain)
+          const proxyEl = document.getElementById('proxyAddressDisplay');
+          finalTo = proxyEl?.dataset?.proxyAddress || '';
+          if (!finalTo) {
+            throw new Error('No proxy address available for L2 target. Select a target address first.');
           }
+          log(`Target is on L2, sending to proxy: ${finalTo}`, 'info');
         }
 
         // Browser wallets can keep stale nonce state across local chain restarts.
