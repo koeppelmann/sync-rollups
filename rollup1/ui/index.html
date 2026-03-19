@@ -767,9 +767,8 @@
         <input type="text" id="l2Rpc" value="http://localhost:7500">
         <span class="status-indicator offline" id="l2Status">Offline</span>
 
-        <span>Builder API</span>
-        <input type="text" id="builderUrl" value="http://localhost:7300">
-        <span class="status-indicator offline" id="builderUrlStatus">Offline</span>
+        <input type="hidden" id="builderUrl" value="http://localhost:7300">
+        <span id="builderUrlStatus" style="display:none" class="status-indicator">N/A</span>
 
         <!-- Hidden fields for backward compat (ethrex/blockscout removed from UI) -->
         <input type="hidden" id="ethrexRpc" value="">
