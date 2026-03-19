@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
+
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>sync-rollups Dashboard</title>
-  <script src="https://cdn.jsdelivr.net/npm/ethers@6.9.0/dist/ethers.umd.min.js"></script>
+  <script src="./sync-rollups Dashboard_files/ethers.umd.min.js"></script>
   <style>
     * {
       box-sizing: border-box;
@@ -729,14 +729,15 @@
 <body>
   <div class="header-bar">
     <h1>sync-rollups Dashboard</h1>
-    <select id="envSelector" class="env-selector" title="Switch deployment environment">
-      <option value="anvil">Anvil Local</option>
-    </select>
+    <select id="chainSelector" class="env-selector" title="Select L1 chain" style="max-width:160px"><option value="ethereum">Ethereum Mainnet</option><option value="chiado">Chiado Testnet</option><option value="gnosis">Gnosis Chain</option><option value="sepolia">Sepolia Testnet</option><option value="holesky">Holesky Testnet</option><option value="anvil">Anvil (Local)</option></select>
+    <select id="contractSelector" class="env-selector" title="Select Rollups contract" style="max-width:180px;font-size:11px"><option value="0x83C6686fB5ECbf7905EA8dD2fdf59ABBC81CcA99">ECDSA Verifier (Mar 2026) (0x83C668...)</option><option value="__custom__">Custom address...</option></select>
+    <select id="rollupId" style="max-width:60px;padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:13px" title="Rollup ID"><option value="0">0 — (empty)</option><option value="1">1 — owner: 0x8510...De05, bal: 0.05 ETH</option></select>
+    <input id="serverIp" type="text" placeholder="Server IP" style="max-width:130px;padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px" title="Server IP (sets all service URLs)">
     <div class="header-icons">
       <button class="icon-btn" id="settingsIconBtn" title="Settings">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
-          <circle cx="12" cy="12" r="3"/>
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+          <circle cx="12" cy="12" r="3"></circle>
         </svg>
       </button>
     </div>
@@ -750,50 +751,40 @@
     </div>
     <div class="popup-content">
       <div class="settings-grid">
-        <span>L1 RPC Proxy</span>
-        <input type="text" id="l1Rpc" value="http://localhost:8546" />
-        <span class="status-indicator" id="l1Status">-</span>
+        <span>L1 Builder RPC</span>
+        <input type="text" id="l1BuilderRpc" value="http://localhost:7100">
+        <span class="status-indicator offline" id="l1BuilderStatus">Offline</span>
 
-        <span>L2 Fullnode RPC</span>
-        <input type="text" id="l2Rpc" value="http://localhost:9547" />
-        <span class="status-indicator" id="l2Status">-</span>
+        <span>L2 Builder RPC</span>
+        <input type="text" id="l2BuilderRpc" value="http://localhost:7200">
+        <span class="status-indicator offline" id="l2BuilderStatus">Offline</span>
 
-        <span>L2 RPC Proxy</span>
-        <input type="text" id="l2EvmRpc" value="http://localhost:9548" />
-        <span class="status-indicator" id="l2EvmStatus">-</span>
+        <span>L1 RPC (read-only)</span>
+        <input type="text" id="l1Rpc" value="http://localhost:8545">
+        <span class="status-indicator online" id="l1Status">Online</span>
 
-        <span>Builder URL</span>
-        <input type="text" id="builderUrl" value="http://localhost:3200" />
-        <span class="status-indicator" id="builderUrlStatus">-</span>
+        <span>L2 Fullnode RPC (read-only)</span>
+        <input type="text" id="l2Rpc" value="http://localhost:7500">
+        <span class="status-indicator offline" id="l2Status">Offline</span>
 
-        <span>Ethrex Fullnode RPC</span>
-        <input type="text" id="ethrexRpc" value="http://localhost:3201" />
-        <span class="status-indicator" id="ethrexStatus">-</span>
+        <span>Builder API</span>
+        <input type="text" id="builderUrl" value="http://localhost:7300">
+        <span class="status-indicator offline" id="builderUrlStatus">Offline</span>
 
-        <span>Ethrex L2 EVM</span>
-        <input type="text" id="ethrexEvmRpc" value="http://localhost:9556" />
-        <span class="status-indicator" id="ethrexEvmStatus">-</span>
+        <!-- Hidden fields for backward compat (ethrex/blockscout removed from UI) -->
+        <input type="hidden" id="ethrexRpc" value="">
+        <input type="hidden" id="ethrexEvmRpc" value="">
+        <input type="hidden" id="blockscoutL1Url" value="https://gnosis-chiado.blockscout.com">
+        <input type="hidden" id="blockscoutL2Url" value="http://54.38.26.5:7801">
+        <span id="ethrexStatus" style="display:none" class="status-indicator">N/A</span>
+        <span id="ethrexEvmStatus" style="display:none" class="status-indicator">N/A</span>
+        <span id="blockscoutL1Status" style="display:none"></span>
+        <span id="blockscoutL2Status" style="display:none"></span>
+        <a id="blockscoutL1Link" style="display:none"></a>
+        <a id="blockscoutL2Link" style="display:none"></a>
 
-        <span>Blockscout L1 API</span>
-        <input type="text" id="blockscoutL1Url" value="http://localhost:4010" />
-        <span><span class="status-indicator" id="blockscoutL1Status">-</span> <a id="blockscoutL1Link" href="#" target="_blank" style="font-size:12px; display:none;">Open</a></span>
-
-        <span>Blockscout L2 API</span>
-        <input type="text" id="blockscoutL2Url" value="http://localhost:4011" />
-        <span><span class="status-indicator" id="blockscoutL2Status">-</span> <a id="blockscoutL2Link" href="#" target="_blank" style="font-size:12px; display:none;">Open</a></span>
-
-        <span>Rollups Contract</span>
-        <input type="text" id="rollupsAddress" value="0xe7f1725e7734ce288f8367e1bb143e90bb3f0512" />
-        <span></span>
-
-        <span>Rollup ID</span>
-        <div style="display: flex; gap: 4px; align-items: center;">
-          <select id="rollupId" style="flex: 1; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
-            <option value="0">0</option>
-          </select>
-          <button onclick="discoverRollups()" title="Scan contract for rollups" style="padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; background: #f5f5f5; cursor: pointer; font-size: 12px;">Scan</button>
-        </div>
-        <span></span>
+        <!-- rollupsAddress is set from contract selector; rollupId is in header bar -->
+        <input type="hidden" id="rollupsAddress" value="0x83C6686fB5ECbf7905EA8dD2fdf59ABBC81CcA99">
       </div>
     </div>
   </div>
@@ -806,12 +797,62 @@
     </div>
     <div class="popup-content">
       <div class="wallet-list" id="walletList">
-        <!-- Wallet options will be rendered here -->
+          <div class="wallet-option selected" onclick="selectWallet(0)" data-wallet-index="0">
+            <input type="radio" name="wallet" checked="">
+            <div class="wallet-address">
+              <strong>User #1</strong><br>
+              <span style="color: #666;">0x423d1450...020385</span><span class="copy-btn" onclick="copyText(this,&#39;0x423d1450439326725a18E1765D8897533e020385&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+            </div>
+            <div class="wallet-balance"><span class="chain-label">L1</span>0.8997 ETH</div>
+            <div class="wallet-balance"><span class="chain-label">L2</span>0 ETH</div>
+          </div>
+        
+          <div class="wallet-option " onclick="selectWallet(1)" data-wallet-index="1">
+            <input type="radio" name="wallet">
+            <div class="wallet-address">
+              <strong>User #2</strong><br>
+              <span style="color: #666;">0xC7e616E0...26920C</span><span class="copy-btn" onclick="copyText(this,&#39;0xC7e616E0dc8786C34Fac9EEd1975Bb23bC26920C&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+            </div>
+            <div class="wallet-balance"><span class="chain-label">L1</span>0.1000 ETH</div>
+            <div class="wallet-balance"><span class="chain-label">L2</span>0 ETH</div>
+          </div>
+        
+        <div class="wallet-option " onclick="selectWallet(2)" data-wallet-index="2">
+          <input type="radio" name="wallet">
+          <div class="wallet-address">
+            <strong>Custom Key</strong><br>
+            <span style="color: #666;">Enter private key below</span>
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L1</span>
+            -
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L2</span>
+            -
+          </div>
+        </div>
+      
+        <div class="wallet-option " onclick="selectWallet(3)" data-wallet-index="3" style="">
+          <input type="radio" name="wallet">
+          <div class="wallet-address">
+            <strong>🦊 Browser Wallet</strong><br>
+            <span style="color: #666;">Click to connect</span>
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L1</span>
+            -
+          </div>
+          <div class="wallet-balance">
+            <span class="chain-label">L2</span>
+            -
+          </div>
+        </div>
       </div>
       <div id="customWalletSection" style="margin-top: 15px; display: none;">
         <div class="form-group">
           <label>Custom Private Key</label>
-          <input type="password" id="customPrivateKey" placeholder="0x..." />
+          <input type="password" id="customPrivateKey" placeholder="0x...">
         </div>
       </div>
     </div>
@@ -830,43 +871,47 @@
     <div class="dashboard-grid">
       <!-- L1 Status -->
       <div class="chain-status">
-        <h3><a id="l1BlockscoutLink" href="#" target="_blank" style="color: inherit; text-decoration: none;" onmouseover="if(this.href!=='#')this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"><span id="l1ChainTitle">L1</span></a></h3>
+        <h3><a id="l1BlockscoutLink" href="https://gnosis-chiado.blockscout.com/address/0x83C6686fB5ECbf7905EA8dD2fdf59ABBC81CcA99" target="_blank" style="color: inherit; text-decoration: none;" onmouseover="if(this.href!==&#39;#&#39;)this.style.textDecoration=&#39;underline&#39;" onmouseout="this.style.textDecoration=&#39;none&#39;"><span id="l1ChainTitle">L1 (Chain 10200)</span></a></h3>
         <div class="status-row">
           <span class="status-label">Block Number</span>
-          <span class="status-value" id="l1BlockNumber">-</span>
+          <span class="status-value" id="l1BlockNumber">20332610</span>
         </div>
         <div class="status-row">
           <span class="status-label">Genesis Block Age</span>
-          <span class="status-value" id="l1GenesisAge">-</span>
+          <span class="status-value" id="l1GenesisAge" title="1970-01-01T00:00:00.000Z">20531d 11h ago</span>
         </div>
         <div class="status-row">
           <span class="status-label">Latest Block Age</span>
-          <span class="status-value" id="l1LatestAge">-</span>
+          <span class="status-value" id="l1LatestAge" title="2026-03-19T11:03:25.000Z">2s ago</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Rollup Contract</span>
+          <span class="status-value" id="l1ContractInfo" style="font-size:12px" title="Block 20290483 — 2026-03-16T22:57:25.000Z"><a href="https://gnosis-chiado.blockscout.com/address/0x83C6686fB5ECbf7905EA8dD2fdf59ABBC81CcA99" target="_blank" style="color:inherit;border-bottom:1px dashed #aaa;text-decoration:none">0x83C668...cA99</a> (deployed 2d 12h ago)</span>
         </div>
         <div class="status-row">
           <span class="status-label">State Root (Contract)</span>
-          <span class="status-value hash" id="l1StateRoot" title="" onclick="copyToClipboard(this)">-</span>
+          <span class="status-value hash" id="l1StateRoot" title="0xdbe7a99be22ee2243dc1faf23a0925eaf43c0b35d452a19ed6cf4ba6b18e7684" onclick="copyToClipboard(this)">0xdbe7a99b...8e7684</span>
         </div>
         <div class="status-row">
           <span class="status-label">Rollup ETH Balance</span>
-          <span class="status-value" id="l1EtherBalance">-</span>
+          <span class="status-value" id="l1EtherBalance">0.05 ETH</span>
         </div>
       </div>
 
       <!-- L2/Fullnode Status -->
       <div class="chain-status l2">
-        <h3><a id="l2BlockscoutLink" href="#" target="_blank" style="color: inherit; text-decoration: none;" onmouseover="if(this.href!=='#')this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">L2 Fullnode (Chain 10200200)</a></h3>
+        <h3><a id="l2BlockscoutLink" href="http://54.38.26.5:7800/" target="_blank" style="color: inherit; text-decoration: none;" onmouseover="if(this.href!==&#39;#&#39;)this.style.textDecoration=&#39;underline&#39;" onmouseout="this.style.textDecoration=&#39;none&#39;">L2 Fullnode (Chain 10200200)</a></h3>
         <div class="status-row">
           <span class="status-label">Block Number</span>
           <span class="status-value" id="l2BlockNumber">-</span>
         </div>
         <div class="status-row">
           <span class="status-label">Genesis Block Age</span>
-          <span class="status-value" id="l2GenesisAge">-</span>
+          <span class="status-value" id="l2GenesisAge" title="1970-01-01T00:00:00.000Z">-</span>
         </div>
         <div class="status-row">
           <span class="status-label">Latest Block Age</span>
-          <span class="status-value" id="l2LatestAge">-</span>
+          <span class="status-value" id="l2LatestAge" title="2026-03-19T09:02:10.000Z">-</span>
         </div>
         <div class="status-row">
           <span class="status-label">State Root (EVM)</span>
@@ -914,17 +959,17 @@
     <div class="connected-wallet" id="connectedWalletDisplay" title="Click to change wallet">
       <div class="connected-wallet-info">
         <span class="connected-label">From:</span>
-        <span class="connected-address" id="connectedAddress">-</span>
+        <span class="connected-address" id="connectedAddress" title="0x423d1450439326725a18E1765D8897533e020385">User #1 (0x423d1450...020385)</span>
         <span class="wallet-change-icon">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/>
-            <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>
+            <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"></path>
+            <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"></path>
           </svg>
         </span>
       </div>
       <div class="connected-balances">
-        <span class="balance-item"><span class="chain-tag l1">L1</span> <span id="connectedL1Balance">-</span></span>
-        <span class="balance-item"><span class="chain-tag l2">L2</span> <span id="connectedL2Balance">-</span></span>
+        <span class="balance-item"><span class="chain-tag l1">L1</span> <span id="connectedL1Balance">0.8997 ETH</span></span>
+        <span class="balance-item"><span class="chain-tag l2">L2</span> <span id="connectedL2Balance">0.0000 ETH</span></span>
       </div>
     </div>
 
@@ -940,35 +985,31 @@
       <div class="form-group" style="flex: 2;">
         <label>To Address</label>
         <div class="address-input-wrapper">
-          <input type="text" id="txToAddress" placeholder="0x..." value="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC" />
-          <select id="addressSelect" title="Select from known addresses">
-            <option value="">Select...</option>
-          </select>
+          <input type="text" id="txToAddress" placeholder="0x..." value="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC">
+          <select id="addressSelect" title="Select from known addresses"><option value="">▼</option><option value="0x423d1450439326725a18E1765D8897533e020385">User #1 (0x423d1450...020385)</option><option value="0xC7e616E0dc8786C34Fac9EEd1975Bb23bC26920C">User #2 (0xC7e616E0...26920C)</option><option value="0xe6a11764eEfa361eFa890a2956314dfB023ff445">Contract 0xe6a11764...3ff445 (0xe6a11764...3ff445)</option><option value="0x9247BD4b39e90e5885094546b0062c1C6E2c8513">Contract 0x9247BD4b...2c8513 (0x9247BD4b...2c8513)</option></select>
         </div>
-        <div id="addressStatus" style="font-size: 11px; color: #888; margin-top: 2px; display: none;"></div>
+        <div id="addressStatus" style="font-size: 11px; color: rgb(136, 136, 136); margin-top: 2px; display: block;">L1: contract (unverified) | L2: EOA</div>
       </div>
       <div class="form-group" style="flex: 1;">
         <label>Value (ETH)</label>
-        <input type="text" id="txValue" placeholder="0.1" value="0.1" />
+        <input type="text" id="txValue" placeholder="0.1" value="0.1">
       </div>
     </div>
 
-    <div class="form-group" id="functionSelectorGroup" style="display: none;">
+    <div class="form-group" id="functionSelectorGroup" style="display: block;">
       <label>Function</label>
-      <select id="functionSelector" style="width: 100%;">
-        <option value="">-- Select function or enter data manually --</option>
-      </select>
+      <select id="functionSelector" style="width: 100%;"><option value="">Contract detected — not verified, enter data manually</option></select>
     </div>
 
     <div id="functionParamsGroup" style="display: none;"></div>
 
     <div class="form-group">
       <label>Data (hex, optional)</label>
-      <input type="text" id="txData" placeholder="0x" value="0x" />
+      <input type="text" id="txData" placeholder="0x" value="0x">
     </div>
 
     <div class="form-group" id="crossChainOption" style="display: flex; align-items: center; gap: 10px;">
-      <input type="checkbox" id="targetIsOtherChain" />
+      <input type="checkbox" id="targetIsOtherChain">
       <label for="targetIsOtherChain" style="margin: 0; cursor: pointer;">Target is on <span id="otherChainLabel">L2</span> (use proxy)</label>
       <span class="hash" id="proxyAddressDisplay" style="display: none; margin-left: 10px;" onclick="copyToClipboard(this)"></span>
       <span class="hash" id="sourceProxyAddressDisplay" style="display: none; margin-left: 10px;" onclick="copyToClipboard(this)"></span>
@@ -1011,8 +1052,984 @@
       <button id="maximizeHistoryBtn" style="font-size: 12px; padding: 4px 10px;" title="Fullscreen">⛶</button>
     </h2>
     <div class="tx-history" id="txHistory">
-      <div style="text-align: center; color: #888; padding: 20px;">Loading...</div>
-    </div>
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x00172ff9a374ebd76b3838372b1dab7c429bc286f5cc94dda30d75d8dd3def42" target="_blank" class="hash" title="0x00172ff9a374ebd76b3838372b1dab7c429bc286f5cc94dda30d75d8dd3def42" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x00172ff9...3def42</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x00172ff9a374ebd76b3838372b1dab7c429bc286f5cc94dda30d75d8dd3def42&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:43:20 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #29</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332370)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x805cbf0d...2daa87</span> → <span style="font-family: monospace;">0xdbe7a99b...8e7684</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x0663d790f6585072eae213a907cd369c593ca0538f3352bebbd3fbef61207ed4" target="_blank" class="hash" title="0x0663d790f6585072eae213a907cd369c593ca0538f3352bebbd3fbef61207ed4" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x0663d790...207ed4</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x0663d790f6585072eae213a907cd369c593ca0538f3352bebbd3fbef61207ed4&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:43:15 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #28</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332369)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xa01463ce...2a6877</span> → <span style="font-family: monospace;">0x805cbf0d...2daa87</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x823c6e00598151cb146b3f23a10f8749b87d2088f96e520ca30212f8f585b0c4" target="_blank" class="hash" title="0x823c6e00598151cb146b3f23a10f8749b87d2088f96e520ca30212f8f585b0c4" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x823c6e00...85b0c4</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x823c6e00598151cb146b3f23a10f8749b87d2088f96e520ca30212f8f585b0c4&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:43:10 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #27</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332368)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x9eeb9276...cbaffb</span> → <span style="font-family: monospace;">0xa01463ce...2a6877</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x95c879ddcbaac13e93564ce3ae4928701c1e7285cef66c139a13beb3dcfa11f9" target="_blank" class="hash" title="0x95c879ddcbaac13e93564ce3ae4928701c1e7285cef66c139a13beb3dcfa11f9" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x95c879dd...fa11f9</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x95c879ddcbaac13e93564ce3ae4928701c1e7285cef66c139a13beb3dcfa11f9&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:43:05 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #26</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332367)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x9b38603a...29c886</span> → <span style="font-family: monospace;">0x9eeb9276...cbaffb</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x5b6c64a3fbe4a226f62b0a1d33a45d31776f95bd7c66664dc36e53e61b8ffac7" target="_blank" class="hash" title="0x5b6c64a3fbe4a226f62b0a1d33a45d31776f95bd7c66664dc36e53e61b8ffac7" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x5b6c64a3...8ffac7</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x5b6c64a3fbe4a226f62b0a1d33a45d31776f95bd7c66664dc36e53e61b8ffac7&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:42:55 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #25</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332365)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x098571c9...0568a6</span> → <span style="font-family: monospace;">0x9b38603a...29c886</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0xd58afe0189916a6f30f09195e6862adcc928a74f0404ccdd1373bfe2bc47215d" target="_blank" class="hash" title="0xd58afe0189916a6f30f09195e6862adcc928a74f0404ccdd1373bfe2bc47215d" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xd58afe01...47215d</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0xd58afe0189916a6f30f09195e6862adcc928a74f0404ccdd1373bfe2bc47215d&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:42:45 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #24</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332363)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xd844d2d0...eb3048</span> → <span style="font-family: monospace;">0x098571c9...0568a6</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x5c17ba5a85693ffcc10dbeb0af9f4b5fcda51bbd1030bf0fe34022dd9edc7c56" target="_blank" class="hash" title="0x5c17ba5a85693ffcc10dbeb0af9f4b5fcda51bbd1030bf0fe34022dd9edc7c56" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x5c17ba5a...dc7c56</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x5c17ba5a85693ffcc10dbeb0af9f4b5fcda51bbd1030bf0fe34022dd9edc7c56&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:42:30 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #23</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332360)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x289bb7d8...4d4d66</span> → <span style="font-family: monospace;">0xd844d2d0...eb3048</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0xff1aa0216cc594f57caf3d65b90a9e0ec04d47e4bf7e19e127b3cb07f467504c" target="_blank" class="hash" title="0xff1aa0216cc594f57caf3d65b90a9e0ec04d47e4bf7e19e127b3cb07f467504c" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xff1aa021...67504c</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0xff1aa0216cc594f57caf3d65b90a9e0ec04d47e4bf7e19e127b3cb07f467504c&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:42:25 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #22</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332359)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xe35278c3...c5e8c8</span> → <span style="font-family: monospace;">0x289bb7d8...4d4d66</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x0fe6f798c6b6adf260c021c769e91a5ca7acf4f7249c647fbfe1478b5e608af7" target="_blank" class="hash" title="0x0fe6f798c6b6adf260c021c769e91a5ca7acf4f7249c647fbfe1478b5e608af7" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x0fe6f798...608af7</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x0fe6f798c6b6adf260c021c769e91a5ca7acf4f7249c647fbfe1478b5e608af7&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:42:20 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #21</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332358)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xbe9d51b3...8a9566</span> → <span style="font-family: monospace;">0xe35278c3...c5e8c8</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x186a64ab5f20c5a4a15c6f7c26edfe5114c72cd20b3cf39ef655eeecf07fb94d" target="_blank" class="hash" title="0x186a64ab5f20c5a4a15c6f7c26edfe5114c72cd20b3cf39ef655eeecf07fb94d" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x186a64ab...7fb94d</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x186a64ab5f20c5a4a15c6f7c26edfe5114c72cd20b3cf39ef655eeecf07fb94d&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">11:42:15 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #20</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20332357)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x47a0d83a...5e6d3f</span> → <span style="font-family: monospace;">0xbe9d51b3...8a9566</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0xc2b1b1900fc931a6cd6bce8e62f195b118d77b2424b3e7ecbf22123466b84672" target="_blank" class="hash" title="0xc2b1b1900fc931a6cd6bce8e62f195b118d77b2424b3e7ecbf22123466b84672" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xc2b1b190...b84672</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0xc2b1b1900fc931a6cd6bce8e62f195b118d77b2424b3e7ecbf22123466b84672&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">10:02:10 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #19</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20331181)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xfd1c9d54...c370cd</span> → <span style="font-family: monospace;">0x47a0d83a...5e6d3f</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x9f877d2467a30ffc29d8a23070a2b09b5a99ad0e22b3ba71b747f83154b59c85" target="_blank" class="hash" title="0x9f877d2467a30ffc29d8a23070a2b09b5a99ad0e22b3ba71b747f83154b59c85" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9f877d24...b59c85</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x9f877d2467a30ffc29d8a23070a2b09b5a99ad0e22b3ba71b747f83154b59c85&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">10:00:20 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #18</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20331159)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x5036a014...4f4222</span> → <span style="font-family: monospace;">0xfd1c9d54...c370cd</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x6970bad1b8c6c0170a07aca8fbfdaa110f7fb39863379ab00c6df2fccdef3a7e" target="_blank" class="hash" title="0x6970bad1b8c6c0170a07aca8fbfdaa110f7fb39863379ab00c6df2fccdef3a7e" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x6970bad1...ef3a7e</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x6970bad1b8c6c0170a07aca8fbfdaa110f7fb39863379ab00c6df2fccdef3a7e&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:52:40 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #17</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20331068)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x181355cd...03724b</span> → <span style="font-family: monospace;">0x5036a014...4f4222</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x82ae5ff7048e5490c2deb138f43e8b1d49493128721e3252b92c42078855ec0e" target="_blank" class="hash" title="0x82ae5ff7048e5490c2deb138f43e8b1d49493128721e3252b92c42078855ec0e" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x82ae5ff7...55ec0e</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x82ae5ff7048e5490c2deb138f43e8b1d49493128721e3252b92c42078855ec0e&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:30:10 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #16</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330803)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xc74ce887...f1b027</span> → <span style="font-family: monospace;">0x181355cd...03724b</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x6221f71cb420387d4f78e52d7267ec3c0228d1da0c53db74ac4497d826883049" target="_blank" class="hash" title="0x6221f71cb420387d4f78e52d7267ec3c0228d1da0c53db74ac4497d826883049" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x6221f71c...883049</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x6221f71cb420387d4f78e52d7267ec3c0228d1da0c53db74ac4497d826883049&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:30:05 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #7e22ce;">PREP (no L2 block)</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330802)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item admin">
+	                <span class="tx-type-badge admin">PREP: PROXY DEPLOY</span>
+                <div class="tx-row">
+                  <span>From (L1):</span>
+                  <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                  <span class="copy-btn" onclick="copyText(this,&#39;0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row">
+                  <span>Proxy:</span>
+                  <a href="https://gnosis-chiado.blockscout.com/address/0x0D77A077a8bC121D0bfeAC3A3b6f98596e95383e" target="_blank" class="hash" title="0x0D77A077a8bC121D0bfeAC3A3b6f98596e95383e" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x0D77A077...95383e</a>
+                  <span class="copy-btn" onclick="copyText(this,&#39;0x0D77A077a8bC121D0bfeAC3A3b6f98596e95383e&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+	                <div class="tx-row">
+	                  <span>For L2 addr:</span>
+	                  <a href="http://54.38.26.5:7800/address/0xe6a11764eEfa361eFa890a2956314dfB023ff445" target="_blank" class="hash" title="0xe6a11764eEfa361eFa890a2956314dfB023ff445" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xe6a11764...3ff445</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0xe6a11764eEfa361eFa890a2956314dfB023ff445&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+	                <div class="prep-note">
+	                  Builder preparation transaction (deploys deterministic proxy used by subsequent L1→L2 calls).
+	                </div>
+		              </div>
+		            
+            </div>
+            
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x5e4d5b26afe1e0b0d68f9780ca77a20738476b9537ed1801c554d5ba41472a86" target="_blank" class="hash" title="0x5e4d5b26afe1e0b0d68f9780ca77a20738476b9537ed1801c554d5ba41472a86" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x5e4d5b26...472a86</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x5e4d5b26afe1e0b0d68f9780ca77a20738476b9537ed1801c554d5ba41472a86&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:28:25 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #15</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330782)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x3462184b...acae44</span> → <span style="font-family: monospace;">0xc74ce887...f1b027</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x3169c135d44684c30f6de7fd8f8e0f7c2b08ddc68394da3cecc5c7b72a0ab538" target="_blank" class="hash" title="0x3169c135d44684c30f6de7fd8f8e0f7c2b08ddc68394da3cecc5c7b72a0ab538" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x3169c135...0ab538</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x3169c135d44684c30f6de7fd8f8e0f7c2b08ddc68394da3cecc5c7b72a0ab538&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:40 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #14</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330774)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xa85e2ab9...aa260e</span> → <span style="font-family: monospace;">0x3462184b...acae44</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x2b16b4f9b0591248f68b20fae676d4741aeaf959384c8469ca240bfe93a095ef" target="_blank" class="hash" title="0x2b16b4f9b0591248f68b20fae676d4741aeaf959384c8469ca240bfe93a095ef" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x2b16b4f9...a095ef</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x2b16b4f9b0591248f68b20fae676d4741aeaf959384c8469ca240bfe93a095ef&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:35 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #13</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330773)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x2f8c1aff...38eca3</span> → <span style="font-family: monospace;">0xa85e2ab9...aa260e</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x048476598d716829700a48b39e1873385efe33317fea83f3b54504e44ac0de35" target="_blank" class="hash" title="0x048476598d716829700a48b39e1873385efe33317fea83f3b54504e44ac0de35" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x04847659...c0de35</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x048476598d716829700a48b39e1873385efe33317fea83f3b54504e44ac0de35&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:25 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #12</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330771)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x1b72c93a...5c030e</span> → <span style="font-family: monospace;">0x2f8c1aff...38eca3</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x0b925acb0432efe393a60a6238743eadc1edcc3024cac663967a84d5c5b1263d" target="_blank" class="hash" title="0x0b925acb0432efe393a60a6238743eadc1edcc3024cac663967a84d5c5b1263d" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x0b925acb...b1263d</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x0b925acb0432efe393a60a6238743eadc1edcc3024cac663967a84d5c5b1263d&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:20 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #11</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330770)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xe02a9156...62142d</span> → <span style="font-family: monospace;">0x1b72c93a...5c030e</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x7a2049055a771a0d218a3d2212ee201d583bc9d5d452d3ce7335a6edcb36ff24" target="_blank" class="hash" title="0x7a2049055a771a0d218a3d2212ee201d583bc9d5d452d3ce7335a6edcb36ff24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x7a204905...36ff24</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x7a2049055a771a0d218a3d2212ee201d583bc9d5d452d3ce7335a6edcb36ff24&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:15 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #10</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330769)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xeadf067b...934a7c</span> → <span style="font-family: monospace;">0xe02a9156...62142d</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x095a98e15f608cd178801f2cbd296589cfdba34d9782fa4f9c662e3a5c58b5d6" target="_blank" class="hash" title="0x095a98e15f608cd178801f2cbd296589cfdba34d9782fa4f9c662e3a5c58b5d6" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x095a98e1...58b5d6</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x095a98e15f608cd178801f2cbd296589cfdba34d9782fa4f9c662e3a5c58b5d6&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:10 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #9</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330768)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x08038b91...fe96f8</span> → <span style="font-family: monospace;">0xeadf067b...934a7c</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x629e82d4cad5ea63da8865e19ef095a7a6ba11d2ae2a7d4b568041b3a2d7ec44" target="_blank" class="hash" title="0x629e82d4cad5ea63da8865e19ef095a7a6ba11d2ae2a7d4b568041b3a2d7ec44" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x629e82d4...d7ec44</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x629e82d4cad5ea63da8865e19ef095a7a6ba11d2ae2a7d4b568041b3a2d7ec44&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:05 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #8</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330767)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x06288f0b...84e0e3</span> → <span style="font-family: monospace;">0x08038b91...fe96f8</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x293c0fdffee8d3d3f0070f8a48de2855b35bfa7702a652f9e020302263e2e620" target="_blank" class="hash" title="0x293c0fdffee8d3d3f0070f8a48de2855b35bfa7702a652f9e020302263e2e620" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x293c0fdf...e2e620</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x293c0fdffee8d3d3f0070f8a48de2855b35bfa7702a652f9e020302263e2e620&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:27:00 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #7</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330766)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xe94d6f3a...a493bd</span> → <span style="font-family: monospace;">0x06288f0b...84e0e3</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0xa4e35bc4ccbdac447047de3955e6d2e2c2fc8ed5495de64ab191b78a43b85f19" target="_blank" class="hash" title="0xa4e35bc4ccbdac447047de3955e6d2e2c2fc8ed5495de64ab191b78a43b85f19" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xa4e35bc4...b85f19</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0xa4e35bc4ccbdac447047de3955e6d2e2c2fc8ed5495de64ab191b78a43b85f19&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">9:26:15 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #6</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20330757)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x2ab121b3...b5cf13</span> → <span style="font-family: monospace;">0xe94d6f3a...a493bd</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x00c81c2a94d0fedf2bb8db59cee54185f8e85e522cfb7db49b5ee9fe582b62a5" target="_blank" class="hash" title="0x00c81c2a94d0fedf2bb8db59cee54185f8e85e522cfb7db49b5ee9fe582b62a5" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x00c81c2a...2b62a5</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x00c81c2a94d0fedf2bb8db59cee54185f8e85e522cfb7db49b5ee9fe582b62a5&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">12:58:35 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #5</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20324792)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x1fe8843f...ef2d8e</span> → <span style="font-family: monospace;">0x2ab121b3...b5cf13</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x748667c50e731aefb26c883396a04e425df5b0ddb05b8423954253771c5d4372" target="_blank" class="hash" title="0x748667c50e731aefb26c883396a04e425df5b0ddb05b8423954253771c5d4372" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x748667c5...5d4372</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x748667c50e731aefb26c883396a04e425df5b0ddb05b8423954253771c5d4372&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">12:58:20 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #4</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20324790)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x3c4e1020...1e7871</span> → <span style="font-family: monospace;">0x1fe8843f...ef2d8e</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0xbb126239ee097022c74a05326735e3872158c6fdb981723967307e0f0fe9747d" target="_blank" class="hash" title="0xbb126239ee097022c74a05326735e3872158c6fdb981723967307e0f0fe9747d" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xbb126239...e9747d</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0xbb126239ee097022c74a05326735e3872158c6fdb981723967307e0f0fe9747d&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">12:58:15 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #3</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20324789)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0x22dacddd...fea1d3</span> → <span style="font-family: monospace;">0x3c4e1020...1e7871</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0x7a73101d88019e04fd7432443cad9654d72d73303b0a46f632cc985a6e5dd1ce" target="_blank" class="hash" title="0x7a73101d88019e04fd7432443cad9654d72d73303b0a46f632cc985a6e5dd1ce" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x7a73101d...5dd1ce</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0x7a73101d88019e04fd7432443cad9654d72d73303b0a46f632cc985a6e5dd1ce&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">12:58:10 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #2</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20324788)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              
+	              <div class="l2-tx-item">
+	                <span class="tx-type-badge l2tx">L2→L2</span>
+	                <div class="tx-row">
+	                  <span>From (L2):</span>
+	                  <a href="http://54.38.26.5:7800/address/0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" target="_blank" class="hash" title="0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9CeF031F...f4f349</a>
+	                  <span class="copy-btn" onclick="copyText(this,&#39;0x9CeF031F6246Fe9906DAe8Dd820602FA96f4f349&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+	                </div>
+                <div class="tx-row">
+                  <span>To:</span>
+                  <a href="http://54.38.26.5:7800/address/0x9247BD4b39e90e5885094546b0062c1C6E2c8513" target="_blank" class="hash" title="0x9247BD4b39e90e5885094546b0062c1C6E2c8513" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0x9247BD4b...2c8513</a><span class="copy-btn" onclick="copyText(this,&#39;0x9247BD4b39e90e5885094546b0062c1C6E2c8513&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                </div>
+                <div class="tx-row"><span>Call:</span><span class="decoded-call">increment()</span></div>
+                
+              </div>
+            
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xe958b9d4...eb70b0</span> → <span style="font-family: monospace;">0x22dacddd...fea1d3</span>
+          </div>
+        
+          </div>
+        
+          <div class="l1-tx-group">
+            <div class="l1-tx-header">
+              <span>
+                L1 TX: <a href="https://gnosis-chiado.blockscout.com/tx/0xb543f17d707c38f422dcd779f644f2f3ab4cce9ddf000d4d0ff6852ddd9664d0" target="_blank" class="hash" title="0xb543f17d707c38f422dcd779f644f2f3ab4cce9ddf000d4d0ff6852ddd9664d0" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xb543f17d...9664d0</a>
+                <span class="copy-btn" onclick="copyText(this,&#39;0xb543f17d707c38f422dcd779f644f2f3ab4cce9ddf000d4d0ff6852ddd9664d0&#39;)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></span>
+                <span style="margin-left: 8px; color: #888;">12:57:40 AM</span>
+                
+                <span style="margin-left: 8px; color: #666;">
+                  from <a href="https://gnosis-chiado.blockscout.com/address/0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" target="_blank" class="hash" title="0xE9cBc5a37f2dA01c3Ea8E38AD2983894C6B0eb24" style="color: inherit; text-decoration: none; border-bottom: 1px dashed #aaa;">0xE9cBc5a3...B0eb24</a>
+                </span>
+              </span>
+              <span style="font-weight: 600;">
+                <span style="color: #10b981;">L2 #1</span>
+                <span style="color: #888; font-weight: normal; margin-left: 4px;">(L1 #20324783)</span>
+              </span>
+            </div>
+            <div class="l2-tx-list">
+              <div style="color: #888; padding: 8px;">No L2 transactions</div>
+            </div>
+            
+          <div class="state-transition-mini">
+            State: <span style="font-family: monospace;">0xecd706ef...33ee93</span> → <span style="font-family: monospace;">0xe958b9d4...eb70b0</span>
+          </div>
+        
+          </div>
+        </div>
   </div>
 
   <!-- Logs Card -->
@@ -1021,12 +2038,12 @@
       Logs
       <button class="small secondary" id="clearLogs">Clear</button>
     </h2>
-    <div class="log-container" id="logs"></div>
+    <div class="log-container" id="logs"><div class="log-entry info">[11:01:16 AM] Scanning for rollups...</div><div class="log-entry info">[11:01:16 AM] Found 1 active rollup(s) out of 2 slot(s)</div><div class="log-entry info">[11:01:16 AM] Refreshing status...</div><div class="log-entry success">[11:01:17 AM] Status refreshed</div></div>
   </div>
 
   <script>
     // ============ Configuration ============
-    const L2_CHAIN_ID = 10200200;
+    let L2_CHAIN_ID = 10200200;
     const _h = window.location.hostname;
     // Per-environment default settings (used when settings.<env>.json is unavailable)
     const ENV_DEFAULT_SETTINGS = {
@@ -1102,13 +2119,86 @@
       }
     };
 
-    // Current environment (persisted in localStorage)
-    let currentEnv = localStorage.getItem('sync-rollups-env') || 'anvil';
+    // Current selections (persisted in localStorage)
+    let currentChain = localStorage.getItem('sync-rollups-chain') || 'chiado';
+    let currentContract = localStorage.getItem('sync-rollups-contract') || '';
+    let currentRollupId = localStorage.getItem('sync-rollups-rollup') || '1';
+    let currentServer = localStorage.getItem('sync-rollups-server') || '';
+    // Legacy compat
+    let currentEnv = currentChain;
 
     // Environment registry (loaded from environments.json)
     let envRegistry = null;
 
-    const DEFAULT_RUNTIME_SETTINGS = ENV_DEFAULT_SETTINGS[currentEnv] || ENV_DEFAULT_SETTINGS.anvil;
+    /** Get the current chain config from the registry */
+    function getChainConfig() {
+      return envRegistry?.chains?.[currentChain] || null;
+    }
+
+    /** Get the current contract config */
+    function getContractConfig() {
+      const chain = getChainConfig();
+      return chain?.contracts?.[currentContract] || null;
+    }
+
+    /** Get the current instance config (server etc.) for the selected rollup */
+    function getInstanceConfig() {
+      const contract = getContractConfig();
+      return contract?.instances?.[currentRollupId] || null;
+    }
+
+    /** Derive all service URLs from a server IP */
+    function serverToUrls(ip) {
+      if (!ip) return {};
+      return {
+        l1BuilderRpc: `http://${ip}:7100`,
+        l2BuilderRpc: `http://${ip}:7200`,
+        builderUrl: `http://${ip}:7300`,
+        prooferUrl: `http://${ip}:7400`,
+        l2Rpc: `http://${ip}:7500`,
+        blockscoutL2Url: `http://${ip}:7801`,
+      };
+    }
+
+    /** Apply current selections to all UI fields */
+    function applySelections() {
+      const chain = getChainConfig();
+      if (!chain) return;
+
+      // L1 RPC
+      const l1Rpc = chain.rpcs?.[0] || '';
+      const l1RpcEl = document.getElementById('l1Rpc');
+      if (l1RpcEl) l1RpcEl.value = l1Rpc;
+
+      // Rollups address
+      const rollupsEl = document.getElementById('rollupsAddress');
+      if (rollupsEl) rollupsEl.value = currentContract;
+
+      // Server-derived URLs
+      const server = currentServer || getInstanceConfig()?.server || '';
+      const serverEl = document.getElementById('serverIp');
+      if (serverEl && server) serverEl.value = server;
+
+      if (server) {
+        const urls = serverToUrls(server);
+        for (const [key, val] of Object.entries(urls)) {
+          const el = document.getElementById(key);
+          if (el) el.value = val;
+        }
+      }
+
+      // Explorer URL (hidden field for internal use)
+      const bsL1El = document.getElementById('blockscoutL1Url');
+      if (bsL1El) bsL1El.value = chain.explorer || '';
+
+      // Deployment block from contract config
+      const contractCfg = getContractConfig();
+      if (contractCfg?.deploymentBlock) {
+        runtimeDeploymentBlock = contractCfg.deploymentBlock;
+      }
+    }
+
+    const DEFAULT_RUNTIME_SETTINGS = ENV_DEFAULT_SETTINGS[currentChain] || ENV_DEFAULT_SETTINGS.anvil;
 
     // Proxy detection magic addresses and values
     // When getBalance is called on these addresses, proxies return magic values
@@ -1298,8 +2388,9 @@
       DEFAULT_USER_WALLETS = isAnvil ? ANVIL_USER_WALLETS : GNOSIS_USER_WALLETS;
       USER_WALLETS = normalizeUserWallets(DEFAULT_USER_WALLETS);
 
-      // Try environment-specific wallets file, then fall back to wallets.dev.json
-      const envFile = envRegistry?.[currentEnv]?.walletsFile || `wallets.${currentEnv}.json`;
+      // Try chain-specific wallets file
+      const chain = getChainConfig();
+      const envFile = chain?.walletsFile || `wallets.${currentChain}.json`;
       const filesToTry = [envFile];
       if (envFile !== 'wallets.dev.json') filesToTry.push('wallets.dev.json');
 
@@ -1346,7 +2437,9 @@
 
     function applyRuntimeSettings(settings) {
       if (!settings || typeof settings !== 'object') return;
-      const keys = ['l1Rpc', 'l2Rpc', 'l2EvmRpc', 'builderUrl', 'ethrexRpc', 'ethrexEvmRpc', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress'];
+      const keys = ['l1BuilderRpc', 'l2BuilderRpc', 'l1Rpc', 'l2Rpc', 'builderUrl', 'ethrexRpc', 'ethrexEvmRpc', 'blockscoutL1Url', 'blockscoutL2Url', 'rollupsAddress'];
+      // Backward compat: map old field names to new ones
+      if (settings.l2EvmRpc && !settings.l2BuilderRpc) settings.l2BuilderRpc = settings.l2EvmRpc;
       for (const key of keys) {
         if (typeof settings[key] === 'string') {
           const input = document.getElementById(key);
@@ -1436,27 +2529,51 @@
       }
     }
 
-    async function loadRuntimeSettingsConfig() {
-      // Apply defaults for the current environment
-      const envDefaults = ENV_DEFAULT_SETTINGS[currentEnv] || ENV_DEFAULT_SETTINGS.anvil;
-      applyRuntimeSettings(envDefaults);
+    /**
+     * Derive all standard endpoints from a server IP.
+     */
+    // settingsFromServerIp replaced by serverToUrls() in the new hierarchy
 
-      // Try environment-specific settings file first, then fall back to settings.dev.json
-      const envFile = envRegistry?.[currentEnv]?.settingsFile || `settings.${currentEnv}.json`;
-      const filesToTry = [envFile];
-      if (envFile !== 'settings.dev.json') filesToTry.push('settings.dev.json');
-
-      for (const file of filesToTry) {
-        try {
-          const resp = await fetch(file, { cache: 'no-store' });
-          if (!resp.ok) continue;
-          const cfg = await resp.json();
-          applyRuntimeSettings(cfg);
-          break; // Use first successful file
-        } catch {
-          continue;
-        }
+    /**
+     * Look up L1 chain config (RPC + explorer) from chain ID.
+     */
+    function getL1ChainInfo(chainId) {
+      // Search all chains for matching chainId
+      const chains = envRegistry?.chains || {};
+      for (const cfg of Object.values(chains)) {
+        if (cfg.chainId === chainId) return cfg;
       }
+      return null;
+    }
+
+    /**
+     * Auto-detect L1 chain from the L1 Builder RPC and set l1Rpc + explorer.
+     */
+    async function autoDetectL1Chain(l1BuilderRpc) {
+      try {
+        const chainIdHex = await callJsonRpc(l1BuilderRpc, 'eth_chainId', []);
+        const chainId = parseInt(chainIdHex, 16);
+        const info = getL1ChainInfo(chainId);
+        if (info) {
+          // Set L1 RPC to the first available RPC for this chain
+          applyRuntimeSettings({ l1Rpc: info.rpcs[0] });
+          // Set explorer URL
+          const blockscoutL1El = document.getElementById('blockscoutL1Url');
+          if (blockscoutL1El) blockscoutL1El.value = info.explorer;
+          log(`Auto-detected L1: ${info.name} (chain ${chainId})`, 'info');
+        } else {
+          log(`Unknown L1 chain ID: ${chainId}`, 'error');
+        }
+        return chainId;
+      } catch (e) {
+        log(`Could not detect L1 chain: ${e.message}`, 'error');
+        return null;
+      }
+    }
+
+    async function loadRuntimeSettingsConfig() {
+      // Apply selections from chain → contract → rollup → server hierarchy
+      applySelections();
     }
 
     // Load/save deployed contracts from localStorage
@@ -1565,18 +2682,15 @@
     // Block explorer URL based on L1 chain ID (detected at runtime)
     // Blockscout explorer URL helpers — derive frontend URLs from settings
     function getBlockscoutBaseUrl(chain) {
-      // Use explorer URL from environment registry if available (handles external explorers like gnosis.blockscout.com)
-      if (envRegistry && envRegistry[currentEnv]) {
-        const explorerKey = chain === 'L1' ? 'l1ExplorerUrl' : 'l2ExplorerUrl';
-        const explorerUrl = envRegistry[currentEnv][explorerKey];
-        if (explorerUrl) {
-          // Replace localhost with dashboard hostname for remote access
-          return explorerUrl.replace('localhost', window.location.hostname).replace(/\/+$/, '');
-        }
+      if (chain === 'L1') {
+        // Use chain config explorer
+        const chainCfg = getChainConfig();
+        return chainCfg?.explorer?.replace(/\/+$/, '') || '';
       }
-      // Fallback: derive from the API URL input
+      // L2: derive frontend URL from blockscoutL2Url (API port 7801 → frontend 7800)
       try {
-        const url = new URL(document.getElementById(`blockscout${chain}Url`).value);
+        const url = new URL(document.getElementById('blockscoutL2Url').value);
+        if (url.port === '7801') url.port = '7800';
         return url.origin;
       } catch {
         return '';
@@ -2213,7 +3327,7 @@
         // Determine RPC URL based on selected chain
         const rpcUrl = selectedChain === 'L1'
           ? document.getElementById('l1Rpc').value
-          : document.getElementById('l2EvmRpc').value;
+          : document.getElementById('l2Rpc').value;
 
         log(`Simulating call on ${selectedChain} (${rpcUrl})...`);
 
@@ -2403,8 +3517,8 @@
     }
 
     async function getL1ChainConfig() {
-      const l1Rpc = document.getElementById('l1Rpc').value;
-      const provider = new ethers.JsonRpcProvider(l1Rpc);
+      const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
+      const provider = new ethers.JsonRpcProvider(l1BuilderRpc);
       const network = await provider.getNetwork();
       const chainId = Number(network.chainId);
       const chainIdHex = '0x' + chainId.toString(16);
@@ -2418,7 +3532,7 @@
         chainName = 'Anvil L1 (Proxy)';
       }
 
-      return { chainId, chainIdHex, chainName, nativeCurrency, rpcUrl: l1Rpc };
+      return { chainId, chainIdHex, chainName, nativeCurrency, rpcUrl: l1BuilderRpc };
     }
 
     function updateL1ChainTitle(chainId) {
@@ -2435,8 +3549,8 @@
 
     // Switch browser wallet to the appropriate network
     async function switchBrowserWalletNetwork(chain) {
-      const l1Rpc = document.getElementById('l1Rpc').value;
-      const l2EvmRpc = document.getElementById('l2EvmRpc').value;
+      const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
+      const l2BuilderRpc = document.getElementById('l2BuilderRpc').value;
 
       try {
         if (chain === 'L1') {
@@ -2460,7 +3574,7 @@
                     chainId: l1Config.chainIdHex,
                     chainName: l1Config.chainName,
                     nativeCurrency: l1Config.nativeCurrency,
-                    rpcUrls: [l1Rpc],
+                    rpcUrls: [l1BuilderRpc],
                   }],
                 });
                 await window.ethereum.request({
@@ -2499,7 +3613,7 @@
                     chainId: l2ChainIdHex,
                     chainName: 'Sync Rollup L2 (Proxy)',
                     nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-                    rpcUrls: [l2EvmRpc],
+                    rpcUrls: [l2BuilderRpc],
                   }],
                 });
                 await window.ethereum.request({
@@ -2639,6 +3753,44 @@
       }
     }
 
+    /**
+     * POST JSON to a builder SSE endpoint, log progress events, return the final result.
+     */
+    async function fetchWithProgress(url, body) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        throw new Error(`Builder API error: ${resp.status} ${resp.statusText}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalResult = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'progress') {
+              log(`[builder] ${evt.message}`, 'info');
+            } else if (evt.type === 'result') {
+              finalResult = evt;
+            }
+          } catch {}
+        }
+      }
+      if (!finalResult) throw new Error('No result from builder');
+      return finalResult;
+    }
+
     async function callJsonRpc(rpcUrl, method, params = []) {
       const resp = await fetch(rpcUrl, {
         method: 'POST',
@@ -2662,34 +3814,39 @@
     }
 
     async function updateServiceStatuses() {
+      const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
+      const l2BuilderRpc = document.getElementById('l2BuilderRpc').value;
       const l1Rpc = document.getElementById('l1Rpc').value;
       const l2Rpc = document.getElementById('l2Rpc').value;
-      const l2EvmRpc = document.getElementById('l2EvmRpc').value;
       const builderUrl = document.getElementById('builderUrl').value;
 
-      // Check L1 RPC (should be proxy)
-      const l1Online = await checkService(l1Rpc, true);
-      const l1IsProxy = l1Online ? await isRpcProxy(l1Rpc, false) : false;
-      const l1El = document.getElementById('l1Status');
-      l1El.textContent = l1Online ? (l1IsProxy ? 'Proxy ✓' : 'Direct (!)') : 'Offline';
-      l1El.className = `status-indicator ${l1Online ? (l1IsProxy ? 'online' : 'online') : 'offline'}`;
-      l1El.title = l1IsProxy ? 'Connected to L1 RPC Proxy' : (l1Online ? 'Warning: Not connected to proxy - browser wallet txs may fail' : 'Offline');
+      // Check L1 Builder RPC (proxy)
+      const l1BuilderOnline = await checkService(l1BuilderRpc, true);
+      const l1BuilderIsProxy = l1BuilderOnline ? await isRpcProxy(l1BuilderRpc, false) : false;
+      const l1BuilderEl = document.getElementById('l1BuilderStatus');
+      l1BuilderEl.textContent = l1BuilderOnline ? (l1BuilderIsProxy ? 'Proxy ✓' : 'Online') : 'Offline';
+      l1BuilderEl.className = `status-indicator ${l1BuilderOnline ? 'online' : 'offline'}`;
 
-      // Check L2 Fullnode
+      // Check L2 Builder RPC (proxy)
+      const l2BuilderOnline = await checkService(l2BuilderRpc, true);
+      const l2BuilderIsProxy = l2BuilderOnline ? await isRpcProxy(l2BuilderRpc, true) : false;
+      const l2BuilderEl = document.getElementById('l2BuilderStatus');
+      l2BuilderEl.textContent = l2BuilderOnline ? (l2BuilderIsProxy ? 'Proxy ✓' : 'Online') : 'Offline';
+      l2BuilderEl.className = `status-indicator ${l2BuilderOnline ? 'online' : 'offline'}`;
+
+      // Check L1 RPC (direct, read-only)
+      const l1Online = await checkService(l1Rpc, true);
+      const l1El = document.getElementById('l1Status');
+      l1El.textContent = l1Online ? 'Online' : 'Offline';
+      l1El.className = `status-indicator ${l1Online ? 'online' : 'offline'}`;
+
+      // Check L2 Fullnode RPC (direct, read-only)
       const l2Online = await checkService(l2Rpc, true);
       const l2El = document.getElementById('l2Status');
       l2El.textContent = l2Online ? 'Online' : 'Offline';
       l2El.className = `status-indicator ${l2Online ? 'online' : 'offline'}`;
 
-      // Check L2 EVM/Proxy (should be proxy)
-      const l2EvmOnline = await checkService(l2EvmRpc, true);
-      const l2IsProxy = l2EvmOnline ? await isRpcProxy(l2EvmRpc, true) : false;
-      const l2EvmEl = document.getElementById('l2EvmStatus');
-      l2EvmEl.textContent = l2EvmOnline ? (l2IsProxy ? 'Proxy ✓' : 'Direct (!)') : 'Offline';
-      l2EvmEl.className = `status-indicator ${l2EvmOnline ? (l2IsProxy ? 'online' : 'online') : 'offline'}`;
-      l2EvmEl.title = l2IsProxy ? 'Connected to L2 RPC Proxy' : (l2EvmOnline ? 'Warning: Not connected to proxy - browser wallet txs may fail' : 'Offline');
-
-      // Check Builder
+      // Check Builder API
       const builderOnline = await checkService(builderUrl, false);
       const builderEl = document.getElementById('builderUrlStatus');
       builderEl.textContent = builderOnline ? 'Online' : 'Offline';
@@ -2719,21 +3876,18 @@
         ethrexEvmEl.className = 'status-indicator';
       }
 
-      // Check Blockscout L1 & L2
-      // Get explorer URLs from environment registry (for "Open" links)
-      const envExplorerUrls = {};
-      if (envRegistry && envRegistry[currentEnv]) {
-        envExplorerUrls.L1 = envRegistry[currentEnv].l1ExplorerUrl || '';
-        envExplorerUrls.L2 = envRegistry[currentEnv].l2ExplorerUrl || '';
-      }
-      // Set title links from environment registry
-      if (envExplorerUrls.L1) {
-        const titleLink = document.getElementById('l1BlockscoutLink');
-        if (titleLink) titleLink.href = envExplorerUrls.L1.replace('localhost', window.location.hostname);
-      }
-      if (envExplorerUrls.L2) {
-        const titleLink = document.getElementById('l2BlockscoutLink');
-        if (titleLink) titleLink.href = envExplorerUrls.L2.replace('localhost', window.location.hostname);
+      // Set explorer title links from chain config
+      {
+        const chainCfg = getChainConfig();
+        if (chainCfg?.explorer) {
+          const l1Link = document.getElementById('l1BlockscoutLink');
+          if (l1Link) l1Link.href = `${chainCfg.explorer}/address/${rollupsAddr}`;
+        }
+        const l2BsUrl = getBlockscoutBaseUrl('L2');
+        if (l2BsUrl) {
+          const l2Link = document.getElementById('l2BlockscoutLink');
+          if (l2Link) l2Link.href = l2BsUrl;
+        }
       }
       for (const layer of ['L1', 'L2']) {
         const bsUrl = document.getElementById(`blockscout${layer}Url`).value.replace(/\/+$/, '');
@@ -2788,29 +3942,26 @@
 
       try {
         const builderUrl = document.getElementById('builderUrl').value;
-        const ethrexRpc = document.getElementById('ethrexRpc').value;
-        const ethrexEvmRpc = document.getElementById('ethrexEvmRpc').value;
         const l1Rpc = document.getElementById('l1Rpc').value;
         const l2Rpc = document.getElementById('l2Rpc').value;
-        const l2EvmRpc = document.getElementById('l2EvmRpc').value;
         const rollupsAddr = document.getElementById('rollupsAddress').value;
         const rollupId = document.getElementById('rollupId').value;
-        const l1Provider = new ethers.JsonRpcProvider(l1Rpc);
-        const l2EvmProvider = new ethers.JsonRpcProvider(l2EvmRpc);
+
+        // rollups(uint256) selector = 0xb794e5a3
+        const rollupCallData = '0xb794e5a3' + BigInt(rollupId).toString(16).padStart(64, '0');
 
         const [
           builderStatusResult,
-          l1NetworkResult,
+          l1ChainIdResult,
           l1BlockResult,
           rollupResult,
+          l1DeployBlockResult,
           l2EvmStateResult,
           l2TrackedStateResult,
           l2SyncResult,
           l2BlockResult,
           l1GenesisBlockResult,
           l1LatestBlockResult,
-          ethrexSyncResult,
-          ethrexBlockDataResult,
           l2GenesisBlockResult,
           l2LatestBlockResult,
         ] = await Promise.allSettled([
@@ -2818,19 +3969,18 @@
             if (!resp.ok) throw new Error(`Builder status failed: ${resp.status}`);
             return resp.json();
           }),
-          l1Provider.getNetwork(),
-          l1Provider.getBlockNumber(),
-          new ethers.Contract(rollupsAddr, ROLLUPS_ABI, l1Provider).rollups(rollupId),
+          callJsonRpc(l1Rpc, 'eth_chainId', []),
+          callJsonRpc(l1Rpc, 'eth_blockNumber', []),
+          callJsonRpc(l1Rpc, 'eth_call', [{ to: rollupsAddr, data: rollupCallData }, 'latest']),
+          runtimeDeploymentBlock ? callJsonRpc(l1Rpc, 'eth_getBlockByNumber', ['0x' + runtimeDeploymentBlock.toString(16), false]) : Promise.reject('no deployment block'),
           callJsonRpc(l2Rpc, 'syncrollups_getActualStateRoot', []),
           callJsonRpc(l2Rpc, 'syncrollups_getStateRoot', []),
           callJsonRpc(l2Rpc, 'syncrollups_isSynced', []),
-          l2EvmProvider.getBlockNumber(),
-          l1Provider.getBlock(0),
-          l1Provider.getBlock('latest'),
-          ethrexRpc ? callJsonRpc(ethrexRpc, 'syncrollups_isSynced', []) : Promise.reject('not configured'),
-          ethrexEvmRpc ? callJsonRpc(ethrexEvmRpc, 'eth_getBlockByNumber', ['latest', false]) : Promise.reject('not configured'),
-          l2EvmProvider.getBlock(0),
-          l2EvmProvider.getBlock('latest'),
+          callJsonRpc(l2Rpc, 'eth_blockNumber', []),
+          callJsonRpc(l1Rpc, 'eth_getBlockByNumber', ['0x0', false]),
+          callJsonRpc(l1Rpc, 'eth_getBlockByNumber', ['latest', false]),
+          callJsonRpc(l2Rpc, 'eth_getBlockByNumber', ['0x0', false]),
+          callJsonRpc(l2Rpc, 'eth_getBlockByNumber', ['latest', false]),
         ]);
 
         // Update builder status (builder-private fullnode)
@@ -2843,13 +3993,57 @@
           document.getElementById('builderStatus').className = 'status-value';
         }
 
-        if (l1NetworkResult.status === 'fulfilled') {
-          updateL1ChainTitle(Number(l1NetworkResult.value.chainId));
+        // Update L1 chain title and explorer link (link to rollup contract)
+        if (l1ChainIdResult.status === 'fulfilled') {
+          const l1ChainId = parseInt(l1ChainIdResult.value, 16);
+          updateL1ChainTitle(l1ChainId);
+          const l1Info = getL1ChainInfo(l1ChainId);
+          if (l1Info) {
+            const l1TitleLink = document.getElementById('l1BlockscoutLink');
+            if (l1TitleLink) l1TitleLink.href = `${l1Info.explorer}/address/${rollupsAddr}`;
+          }
         }
 
-        // Update L1 status from Rollups contract directly
+        // Detect L2 chain ID from the L2 fullnode
+        try {
+          const l2ChainHex = await callJsonRpc(l2Rpc, 'eth_chainId', []);
+          const detectedL2ChainId = parseInt(l2ChainHex, 16);
+          if (detectedL2ChainId && detectedL2ChainId !== L2_CHAIN_ID) {
+            L2_CHAIN_ID = detectedL2ChainId;
+          }
+          const l2Title = document.getElementById('l2BlockscoutLink');
+          if (l2Title) {
+            l2Title.textContent = `L2 Fullnode (Chain ${L2_CHAIN_ID})`;
+            // Link to Blockscout frontend (port 7800), derived from API URL (port 7801)
+            const l2BsApiUrl = document.getElementById('blockscoutL2Url')?.value;
+            if (l2BsApiUrl) {
+              try {
+                const u = new URL(l2BsApiUrl);
+                u.port = String(parseInt(u.port) - 1); // 7801 -> 7800
+                l2Title.href = u.origin;
+              } catch {}
+            }
+          }
+        } catch {}
+
+        // Chain consistency check (non-blocking — don't delay status display)
+        (async () => {
+          try {
+            const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
+            if (l1BuilderRpc && l1ChainIdResult.status === 'fulfilled') {
+              const l1BuilderChainHex = await callJsonRpc(l1BuilderRpc, 'eth_chainId', []);
+              const l1BuilderChainId = parseInt(l1BuilderChainHex, 16);
+              const l1DirectChainId = parseInt(l1ChainIdResult.value, 16);
+              if (l1BuilderChainId !== l1DirectChainId) {
+                log(`WARNING: L1 Builder chain (${l1BuilderChainId}) differs from L1 RPC chain (${l1DirectChainId})`, 'error');
+              }
+            }
+          } catch {}
+        })();
+
+        // Update L1 block number
         if (l1BlockResult.status === 'fulfilled') {
-          document.getElementById('l1BlockNumber').textContent = l1BlockResult.value;
+          document.getElementById('l1BlockNumber').textContent = parseInt(l1BlockResult.value, 16);
         } else {
           document.getElementById('l1BlockNumber').textContent = '-';
         }
@@ -2857,30 +4051,54 @@
         // Update L1 block ages
         const now = Math.floor(Date.now() / 1000);
         if (l1GenesisBlockResult.status === 'fulfilled' && l1GenesisBlockResult.value) {
-          const age = now - l1GenesisBlockResult.value.timestamp;
+          const age = now - parseInt(l1GenesisBlockResult.value.timestamp, 16);
           document.getElementById('l1GenesisAge').textContent = formatAge(age);
-          document.getElementById('l1GenesisAge').title = new Date(l1GenesisBlockResult.value.timestamp * 1000).toISOString();
+          document.getElementById('l1GenesisAge').title = new Date(parseInt(l1GenesisBlockResult.value.timestamp, 16) * 1000).toISOString();
         } else {
           document.getElementById('l1GenesisAge').textContent = '-';
         }
         if (l1LatestBlockResult.status === 'fulfilled' && l1LatestBlockResult.value) {
-          const age = now - l1LatestBlockResult.value.timestamp;
+          const age = now - parseInt(l1LatestBlockResult.value.timestamp, 16);
           document.getElementById('l1LatestAge').textContent = formatAge(age);
-          document.getElementById('l1LatestAge').title = new Date(l1LatestBlockResult.value.timestamp * 1000).toISOString();
+          document.getElementById('l1LatestAge').title = new Date(parseInt(l1LatestBlockResult.value.timestamp, 16) * 1000).toISOString();
         } else {
           document.getElementById('l1LatestAge').textContent = '-';
         }
 
-        if (rollupResult.status === 'fulfilled') {
-          const rollupData = rollupResult.value;
-          const l1StateRoot = rollupData.stateRoot || '0x';
-          document.getElementById('l1StateRoot').textContent = shortHash(l1StateRoot);
-          document.getElementById('l1StateRoot').title = l1StateRoot;
-          document.getElementById('l1EtherBalance').textContent = ethers.formatEther(rollupData.etherBalance) + ' ETH';
-        } else {
-          document.getElementById('l1StateRoot').textContent = '-';
-          document.getElementById('l1StateRoot').title = '';
-          document.getElementById('l1EtherBalance').textContent = '-';
+        // L1 state root and ether balance — directly from L1 contract (independent verification)
+        // Rollup contract info with deployment age
+        {
+          const infoEl = document.getElementById('l1ContractInfo');
+          if (infoEl && rollupsAddr) {
+            const chainCfg = getChainConfig();
+            const explorerBase = chainCfg?.explorer || '';
+            const shortAddr = rollupsAddr.slice(0, 8) + '...' + rollupsAddr.slice(-4);
+            let deployAge = '';
+            if (l1DeployBlockResult.status === 'fulfilled' && l1DeployBlockResult.value) {
+              const deployTs = parseInt(l1DeployBlockResult.value.timestamp, 16);
+              const age = Math.floor(Date.now() / 1000) - deployTs;
+              deployAge = ` (deployed ${formatAge(age)})`;
+              infoEl.title = `Block ${runtimeDeploymentBlock} — ${new Date(deployTs * 1000).toISOString()}`;
+            }
+            if (explorerBase) {
+              infoEl.innerHTML = `<a href="${explorerBase}/address/${rollupsAddr}" target="_blank" style="color:inherit;border-bottom:1px dashed #aaa;text-decoration:none">${shortAddr}</a>${deployAge}`;
+            } else {
+              infoEl.textContent = `${shortAddr}${deployAge}`;
+            }
+          }
+        }
+
+        // Only update if we get a valid (non-zero) result; keep previous values while loading
+        if (rollupResult.status === 'fulfilled' && rollupResult.value && rollupResult.value.length >= 258) {
+          const raw = rollupResult.value;
+          const l1StateRoot = '0x' + raw.slice(130, 194);
+          const etherBalance = BigInt('0x' + raw.slice(194, 258));
+          // Skip zero state root (means rollupId doesn't exist yet)
+          if (l1StateRoot !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+            document.getElementById('l1StateRoot').textContent = shortHash(l1StateRoot);
+            document.getElementById('l1StateRoot').title = l1StateRoot;
+            document.getElementById('l1EtherBalance').textContent = ethers.formatEther(etherBalance) + ' ETH';
+          }
         }
 
         // Update public L2 fullnode state and sync
@@ -2906,7 +4124,7 @@
 
         // Sync status: compare L1 contract state root vs L2 tracked + EVM
         const syncEl = document.getElementById('syncStatus');
-        const l1Root = (rollupResult.status === 'fulfilled') ? rollupResult.value.stateRoot : null;
+        const l1Root = (rollupResult.status === 'fulfilled' && rollupResult.value && rollupResult.value !== '0x') ? ('0x' + rollupResult.value.slice(130, 194)) : null;
         if (l1Root && l2TrackedRoot && l2EvmRoot) {
           const trackedMatch = l1Root.toLowerCase() === l2TrackedRoot.toLowerCase();
           const evmMatch = l1Root.toLowerCase() === l2EvmRoot.toLowerCase();
@@ -2933,59 +4151,34 @@
         }
 
         if (l2BlockResult.status === 'fulfilled') {
-          document.getElementById('l2BlockNumber').textContent = l2BlockResult.value;
+          document.getElementById('l2BlockNumber').textContent = parseInt(l2BlockResult.value, 16);
         } else {
           document.getElementById('l2BlockNumber').textContent = '-';
         }
 
         // L2 genesis block age
         if (l2GenesisBlockResult.status === 'fulfilled' && l2GenesisBlockResult.value) {
-          const age = Math.floor(Date.now() / 1000) - l2GenesisBlockResult.value.timestamp;
+          const age = Math.floor(Date.now() / 1000) - parseInt(l2GenesisBlockResult.value.timestamp, 16);
           document.getElementById('l2GenesisAge').textContent = formatAge(age);
-          document.getElementById('l2GenesisAge').title = new Date(l2GenesisBlockResult.value.timestamp * 1000).toISOString();
+          document.getElementById('l2GenesisAge').title = new Date(parseInt(l2GenesisBlockResult.value.timestamp, 16) * 1000).toISOString();
         } else {
           document.getElementById('l2GenesisAge').textContent = '-';
         }
 
         // L2 latest block age
         if (l2LatestBlockResult.status === 'fulfilled' && l2LatestBlockResult.value) {
-          const age = Math.floor(Date.now() / 1000) - l2LatestBlockResult.value.timestamp;
+          const age = Math.floor(Date.now() / 1000) - parseInt(l2LatestBlockResult.value.timestamp, 16);
           document.getElementById('l2LatestAge').textContent = formatAge(age);
-          document.getElementById('l2LatestAge').title = new Date(l2LatestBlockResult.value.timestamp * 1000).toISOString();
+          document.getElementById('l2LatestAge').title = new Date(parseInt(l2LatestBlockResult.value.timestamp, 16) * 1000).toISOString();
         } else {
           document.getElementById('l2LatestAge').textContent = '-';
         }
 
-        // Update Ethrex fullnode status
+        // Ethrex status (hidden, backward compat)
         const ethrexSyncEl = document.getElementById('ethrexSyncStatus');
-        if (ethrexSyncResult.status === 'fulfilled') {
-          const isSynced = !!ethrexSyncResult.value;
-          ethrexSyncEl.textContent = isSynced ? '✓ Synced' : '✗ Not Synced';
-          ethrexSyncEl.className = `status-value ${isSynced ? 'synced' : 'not-synced'}`;
-        } else {
-          ethrexSyncEl.textContent = 'Offline';
-          ethrexSyncEl.className = 'status-value not-synced';
-        }
-
-        if (ethrexBlockDataResult.status === 'fulfilled' && ethrexBlockDataResult.value) {
-          const block = ethrexBlockDataResult.value;
-          document.getElementById('ethrexBlockNumber').textContent = parseInt(block.number, 16);
-          const ethrexState = block.stateRoot || '0x';
-          document.getElementById('ethrexStateRoot').textContent = shortHash(ethrexState);
-          document.getElementById('ethrexStateRoot').title = ethrexState;
-
-          // Compare ethrex state with reth state — warn if they disagree
-          if (l2EvmRoot && ethrexState && ethrexState !== '0x') {
-            if (l2EvmRoot.toLowerCase() !== ethrexState.toLowerCase()) {
-              ethrexSyncEl.textContent = '⚠ State mismatch with reth';
-              ethrexSyncEl.className = 'status-value not-synced';
-              ethrexSyncEl.title = `reth: ${shortHash(l2EvmRoot)}, ethrex: ${shortHash(ethrexState)}`;
-            }
-          }
-        } else {
-          document.getElementById('ethrexBlockNumber').textContent = '-';
-          document.getElementById('ethrexStateRoot').textContent = '-';
-          document.getElementById('ethrexStateRoot').title = '';
+        if (ethrexSyncEl) {
+          ethrexSyncEl.textContent = '-';
+          ethrexSyncEl.className = 'status-value';
         }
 
         if (!silent) log('Status refreshed', 'success');
@@ -3009,16 +4202,16 @@
       const data = document.getElementById('txData').value || '0x';
       const targetIsOtherChain = document.getElementById('targetIsOtherChain').checked;
       const builderUrl = document.getElementById('builderUrl').value;
-      const l1Rpc = document.getElementById('l1Rpc').value;
-      const l2EvmRpc = document.getElementById('l2EvmRpc').value;
+      const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
+      const l2BuilderRpc = document.getElementById('l2BuilderRpc').value;
 
       const btn = document.getElementById('sendTxBtn');
       btn.disabled = true;
 
       if (selectedChain === 'L1') {
-        await sendL1Transaction(wallet, to, value, data, targetIsOtherChain, builderUrl, l1Rpc);
+        await sendL1Transaction(wallet, to, value, data, targetIsOtherChain, builderUrl, l1BuilderRpc);
       } else {
-        await sendL2Transaction(wallet, to, value, data, targetIsOtherChain, builderUrl, l2EvmRpc);
+        await sendL2Transaction(wallet, to, value, data, targetIsOtherChain, builderUrl, l2BuilderRpc);
       }
 
       btn.disabled = false;
@@ -3057,8 +4250,9 @@
             // Ethereum mainnet: use bundle flow.
             const rollupId = document.getElementById('rollupId').value;
 
-            // 1. Register hint on L1 proxy — proxy derives the proxy address deterministically
-            const hintResp = await fetch(l1Rpc.replace(/\/$/, '') + '/register-hint', {
+            // 1. Register hint on L1 Builder RPC (proxy with /register-hint endpoint)
+            const l1BuilderRpc = document.getElementById('l1BuilderRpc').value;
+            const hintResp = await fetch(l1BuilderRpc.replace(/\/$/, '') + '/register-hint', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -3071,22 +4265,12 @@
             log(`Hint registered, proxy: ${finalTo}`, 'info');
           } else {
             // Other chains: use prepare flow (deploy proxy + load executions first)
-            const prepareResp = await fetch(builderUrl + '/prepare-l1-call', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                l2Target: to,
-                value: '0x' + ethers.parseEther(value).toString(16),
-                data: data,
-                sourceAddress: wallet.address,
-              })
+            const prepareResult = await fetchWithProgress(builderUrl + '/prepare-l1-call?stream=1', {
+              l2Target: to,
+              value: '0x' + ethers.parseEther(value).toString(16),
+              data: data,
+              sourceAddress: wallet.address,
             });
-
-            if (!prepareResp.ok) {
-              throw new Error(`Builder API error: ${prepareResp.status} ${prepareResp.statusText}`);
-            }
-
-            const prepareResult = await prepareResp.json();
 
             if (!prepareResult.success) {
               throw new Error(prepareResult.error || 'Unknown error from builder');
@@ -3309,16 +4493,11 @@
         const signedTx = await signer.signTransaction(tx);
         log('Transaction signed');
 
-        // Submit to builder
-        const submitResp = await fetch(builderUrl + '/submit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sourceChain: 'L2',
-            signedTx: signedTx,
-          })
+        // Submit to builder (with streaming progress)
+        const result = await fetchWithProgress(builderUrl + '/submit?stream=1', {
+          sourceChain: 'L2',
+          signedTx: signedTx,
         });
-        const result = await submitResp.json();
 
         if (result.success) {
           log(`L2 TX successful! L1 TX: ${result.l1TxHash}`, 'success');
@@ -4201,30 +5380,99 @@
     }
 
     // ============ Initialize ============
-    async function switchEnvironment(envKey) {
-      if (envKey === currentEnv) return;
-      currentEnv = envKey;
-      localStorage.setItem('sync-rollups-env', envKey);
-      log(`Switching to ${envRegistry?.[envKey]?.label || envKey}...`, 'info');
-
-      // Reload settings and wallets for the new environment
-      await loadRuntimeSettingsConfig();
+    /** Full refresh after any selection changes */
+    async function onSelectionChanged() {
+      applySelections();
       await loadUserWalletConfig();
       renderWalletList();
       updateAddressDropdown();
       updateFunctionSelector();
       updateConnectedWalletDisplay();
-
-      // Clear stale state
       walletBalances = {};
       deployedContracts = [];
-
-      // Discover rollups on the new contract, then refresh
       await discoverRollups().catch(() => {});
       await fetchAllWalletBalances();
       await refreshStatus();
       await fetchTxHistory();
-      log(`Switched to ${envRegistry?.[envKey]?.label || envKey}`, 'info');
+
+      // Check server consistency: does the builder's rollup match our selection?
+      checkServerConsistency();
+    }
+
+    /** Check if the builder on the selected server is running the same contract + rollup */
+    async function checkServerConsistency() {
+      const builderUrl = document.getElementById('builderUrl')?.value;
+      if (!builderUrl) return;
+      try {
+        const resp = await fetch(builderUrl + '/status', { signal: AbortSignal.timeout(10000) });
+        if (!resp.ok) return;
+        const status = await resp.json();
+        const chain = getChainConfig();
+        if (chain && status.l1ChainId && parseInt(status.l1ChainId) !== chain.chainId) {
+          log(`WARNING: Builder is on chain ${status.l1ChainId}, but UI selected ${chain.label} (${chain.chainId})`, 'error');
+        }
+        if (status.rollupsAddress && currentContract && status.rollupsAddress.toLowerCase() !== currentContract.toLowerCase()) {
+          log(`WARNING: Builder uses contract ${status.rollupsAddress.slice(0,14)}..., but UI selected ${currentContract.slice(0,14)}...`, 'error');
+        }
+        if (status.rollupId && status.rollupId !== currentRollupId) {
+          log(`WARNING: Builder uses rollup ${status.rollupId}, but UI selected rollup ${currentRollupId}`, 'error');
+        }
+      } catch {}
+    }
+
+    /** Populate the contract dropdown for the current chain */
+    function populateContractSelector() {
+      const sel = document.getElementById('contractSelector');
+      if (!sel) return;
+      sel.innerHTML = '';
+      const chain = getChainConfig();
+      if (!chain?.contracts) return;
+      for (const [addr, cfg] of Object.entries(chain.contracts)) {
+        const opt = document.createElement('option');
+        opt.value = addr;
+        opt.textContent = `${cfg.label || addr.slice(0,10)} (${addr.slice(0,8)}...)`;
+        sel.appendChild(opt);
+      }
+      // Add "Custom..." option
+      const customOpt = document.createElement('option');
+      customOpt.value = '__custom__';
+      customOpt.textContent = 'Custom address...';
+      sel.appendChild(customOpt);
+
+      // Select the saved contract or default to first
+      if (currentContract && chain.contracts[currentContract]) {
+        sel.value = currentContract;
+      } else if (Object.keys(chain.contracts).length > 0) {
+        currentContract = Object.keys(chain.contracts)[0];
+        sel.value = currentContract;
+      }
+    }
+
+    /** Populate rollup ID selector and server for current contract */
+    function populateRollupAndServer() {
+      const contract = getContractConfig();
+      const rollupSel = document.getElementById('rollupId');
+      const serverEl = document.getElementById('serverIp');
+
+      // Set default rollup ID
+      if (contract?.defaultRollupId !== undefined) {
+        currentRollupId = String(contract.defaultRollupId);
+      }
+      if (rollupSel) {
+        rollupSel.innerHTML = '';
+        const opt = document.createElement('option');
+        opt.value = currentRollupId;
+        opt.textContent = currentRollupId;
+        rollupSel.appendChild(opt);
+        rollupSel.value = currentRollupId;
+      }
+
+      // Set default server
+      const instance = getInstanceConfig();
+      if (instance?.server && serverEl) {
+        currentServer = instance.server;
+        serverEl.value = currentServer;
+      }
     }
 
     async function initializeDashboard() {
@@ -4234,26 +5482,95 @@
         if (resp.ok) envRegistry = await resp.json();
       } catch {}
 
-      // Set up environment selector
-      const envSelector = document.getElementById('envSelector');
-      if (envSelector) {
-        // Populate from registry if available
-        if (envRegistry) {
-          envSelector.innerHTML = '';
-          for (const [key, env] of Object.entries(envRegistry)) {
-            const opt = document.createElement('option');
-            opt.value = key;
-            opt.textContent = env.label;
-            // all environments are now enabled
-            envSelector.appendChild(opt);
-          }
+      const chains = envRegistry?.chains || {};
+
+      // ── Chain selector ──
+      const chainSel = document.getElementById('chainSelector');
+      if (chainSel) {
+        chainSel.innerHTML = '';
+        for (const [key, cfg] of Object.entries(chains)) {
+          const opt = document.createElement('option');
+          opt.value = key;
+          opt.textContent = cfg.label || key;
+          chainSel.appendChild(opt);
         }
-        envSelector.value = currentEnv;
-        envSelector.addEventListener('change', (e) => {
-          switchEnvironment(e.target.value);
+        // Validate saved selection
+        if (!chains[currentChain]) currentChain = Object.keys(chains)[0] || '';
+        chainSel.value = currentChain;
+
+        chainSel.addEventListener('change', async (e) => {
+          currentChain = e.target.value;
+          currentEnv = currentChain;
+          localStorage.setItem('sync-rollups-chain', currentChain);
+          currentContract = ''; // reset
+          populateContractSelector();
+          populateRollupAndServer();
+          log(`Switched to ${chains[currentChain]?.label || currentChain}`, 'info');
+          await onSelectionChanged();
         });
       }
 
+      // ── Contract selector ──
+      const contractSel = document.getElementById('contractSelector');
+      populateContractSelector();
+      if (contractSel) {
+        contractSel.addEventListener('change', async (e) => {
+          if (e.target.value === '__custom__') {
+            const addr = prompt('Enter Rollups contract address:');
+            if (addr && addr.startsWith('0x')) {
+              currentContract = addr;
+              // Add it as an option
+              const opt = document.createElement('option');
+              opt.value = addr;
+              opt.textContent = addr.slice(0,10) + '...';
+              contractSel.insertBefore(opt, contractSel.lastChild);
+              contractSel.value = addr;
+            } else {
+              contractSel.value = currentContract;
+              return;
+            }
+          } else {
+            currentContract = e.target.value;
+          }
+          localStorage.setItem('sync-rollups-contract', currentContract);
+          populateRollupAndServer();
+          log(`Contract: ${currentContract.slice(0,14)}...`, 'info');
+          await onSelectionChanged();
+        });
+      }
+
+      // ── Rollup ID selector ──
+      populateRollupAndServer();
+      const rollupSel = document.getElementById('rollupId');
+      if (rollupSel) {
+        rollupSel.addEventListener('change', async () => {
+          currentRollupId = rollupSel.value;
+          localStorage.setItem('sync-rollups-rollup', currentRollupId);
+          // Update server from instance config
+          const instance = getInstanceConfig();
+          const serverEl = document.getElementById('serverIp');
+          if (instance?.server && serverEl) {
+            currentServer = instance.server;
+            serverEl.value = currentServer;
+          }
+          applySelections();
+          await refreshStatus();
+          await fetchTxHistory();
+        });
+      }
+
+      // ── Server IP input ──
+      const serverEl = document.getElementById('serverIp');
+      if (serverEl) {
+        serverEl.addEventListener('change', async () => {
+          currentServer = serverEl.value.trim();
+          localStorage.setItem('sync-rollups-server', currentServer);
+          applySelections();
+          await onSelectionChanged();
+        });
+      }
+
+      // Apply initial selections
       await loadRuntimeSettingsConfig();
       await loadUserWalletConfig();
       loadDeployedContracts();
@@ -4262,17 +5579,8 @@
       updateFunctionSelector();
       updateConnectedWalletDisplay();
 
-      // Auto-discover rollups and refresh when rollupId changes
-      const rollupSel = document.getElementById('rollupId');
-      if (rollupSel) {
-        rollupSel.addEventListener('change', async () => {
-          log(`Switched to rollup ${rollupSel.value}`, 'info');
-          await refreshStatus();
-          await fetchTxHistory();
-        });
-      }
-      // Auto-scan rollups on load (non-blocking)
-      discoverRollups().catch(() => {});
+      // Discover rollups before first refresh (ensures rollupId is set)
+      await discoverRollups().catch(() => {});
 
       await fetchAllWalletBalances();
       await refreshStatus();
@@ -4286,5 +5594,6 @@
       log('Initialization failed: ' + e.message, 'error');
     });
   </script>
-</body>
-</html>
+
+
+<div data-lastpass-root="" style="position: absolute !important; top: 0px !important; left: 0px !important; height: 0px !important; width: 0px !important; display: initial !important;"><template shadowrootmode="closed"></template></div></body></html>

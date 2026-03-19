@@ -1,18 +1,51 @@
 {
-  "anvil": {
-    "label": "Anvil Local",
-    "settingsFile": "settings.anvil.json",
-    "walletsFile": "wallets.anvil.json",
-    "l1ChainId": 31337,
-    "l1ExplorerUrl": "http://localhost:4000",
-    "l2ExplorerUrl": "http://localhost:4001"
-  },
-  "chiado": {
-    "label": "Chiado (ECDSA Verifier)",
-    "settingsFile": "settings.chiado.json",
-    "walletsFile": "wallets.chiado.json",
-    "l1ChainId": 10200,
-    "l1ExplorerUrl": "https://gnosis-chiado.blockscout.com",
-    "l2ExplorerUrl": "http://54.38.26.5:4001"
+  "chains": {
+    "chiado": {
+      "label": "Chiado Testnet",
+      "l1ChainId": 10200,
+      "l1Rpc": "http://51.210.221.124:8645/",
+      "l1ExplorerUrl": "https://gnosis-chiado.blockscout.com",
+      "contracts": {
+        "0x83C6686fB5ECbf7905EA8dD2fdf59ABBC81CcA99": {
+          "label": "ECDSA Verifier (Mar 2026)",
+          "deploymentBlock": 20290483,
+          "defaultRollupId": 1,
+          "walletsFile": "wallets.chiado.json",
+          "instances": {
+            "1": {
+              "server": "54.38.26.5",
+              "l2ChainId": 10200200
+            }
+          }
+        }
+      }
+    },
+    "ethereum": {
+      "label": "Ethereum Mainnet",
+      "l1ChainId": 1,
+      "l1Rpc": "https://mainnet.gateway.tenderly.co/1dqHPTA6y5oLxYMiJh2xfD",
+      "l1ExplorerUrl": "https://etherscan.io",
+      "contracts": {
+        "0x744251145366d6a4795502bB7D28dB9fD539CA54": {
+          "label": "ECDSA Verifier (Mar 2026)",
+          "deploymentBlock": 24679040,
+          "defaultRollupId": 1,
+          "walletsFile": "wallets.mainnet.json",
+          "instances": {
+            "1": {
+              "server": "54.38.26.5",
+              "l2ChainId": 1200
+            }
+          }
+        }
+      }
+    },
+    "anvil": {
+      "label": "Anvil (Local)",
+      "l1ChainId": 31337,
+      "l1Rpc": "http://localhost:8545",
+      "l1ExplorerUrl": "",
+      "contracts": {}
+    }
   }
 }
