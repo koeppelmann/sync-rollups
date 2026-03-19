@@ -16,7 +16,8 @@
               "server": "54.38.26.5",
               "l2ChainId": 10200200,
               "ports": {
-                "l2BuilderRpc": 7600,
+                "l1BuilderRpc": 7100,
+                "l2BuilderRpc": 7200,
                 "builderUrl": 3201,
                 "prooferUrl": 3301,
                 "l2Rpc": 7500,

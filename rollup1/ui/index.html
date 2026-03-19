@@ -2154,10 +2154,8 @@
       const instance = getInstanceConfig();
       const ports = instance?.ports || {};
       const chain = getChainConfig();
-      // L1 Builder RPC defaults to the chain's L1 RPC (not the server IP)
-      const l1Rpc = chain?.rpcs?.[0] || `http://${ip}:7100`;
       return {
-        l1BuilderRpc: ports.l1BuilderRpc ? `http://${ip}:${ports.l1BuilderRpc}` : l1Rpc,
+        l1BuilderRpc: `http://${ip}:${ports.l1BuilderRpc || 7100}`,
         l2BuilderRpc: `http://${ip}:${ports.l2BuilderRpc || 7200}`,
         builderUrl: `http://${ip}:${ports.builderUrl || 7300}`,
         prooferUrl: `http://${ip}:${ports.prooferUrl || 7400}`,
