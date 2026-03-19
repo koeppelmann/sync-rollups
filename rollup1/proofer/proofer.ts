@@ -311,13 +311,23 @@ export class Proofer {
     const rollbackBlockNum = parseInt(rollbackBlock, 16);
 
     try {
-      // Check if proofer's L2 is at the required state.
-      // First check tracked state (event-processor-committed) — EVM may differ
-      // due to timestamp mismatches on real chains.
-      const trackedState = await this.fullnodeProvider.send(
-        "syncrollups_getStateRoot",
-        []
-      );
+      // Wait for proofer's event processor to catch up to the required state.
+      // After a bundle lands on L1, the proofer may need a few hundred ms to
+      // process the new L1 block and update its tracked state.
+      let trackedState = await this.fullnodeProvider.send("syncrollups_getStateRoot", []);
+      if (trackedState !== requiredState) {
+        const waitStart = Date.now();
+        const SYNC_WAIT_MS = 5_000;
+        while (Date.now() - waitStart < SYNC_WAIT_MS) {
+          await new Promise(r => setTimeout(r, 200));
+          trackedState = await this.fullnodeProvider.send("syncrollups_getStateRoot", []);
+          if (trackedState === requiredState) {
+            console.log(`[${ts()}] [Proofer] Synced to required state [${Date.now() - waitStart}ms]`);
+            break;
+          }
+        }
+      }
+
       let currentState = await this.fullnodeProvider.send(
         "syncrollups_getActualStateRoot",
         []
@@ -543,6 +553,8 @@ export class Proofer {
         };
       }
 
+      // L1→L2 CALL: use mine-based simulation (speculative leaves system txs
+      // in txpool that corrupt subsequent mining). Rollback happens after prove.
       simResultJson = await this.fullnodeProvider.send(
         "syncrollups_simulateL1Call",
         [
@@ -585,11 +597,16 @@ export class Proofer {
       return { success: true };
     }
 
-    // For L2TX and other action types, use simulateAction
+    // For L2TX and other action types: use speculative simulation if available
+    // (no state change, no rollback needed). Fall back to regular simulation.
+    const speculative = rootAction.actionType === ActionType.L2TX;
     simResultJson = await this.fullnodeProvider.send(
-      "syncrollups_simulateAction",
+      speculative ? "syncrollups_speculateAction" : "syncrollups_simulateAction",
       [actionToJson(rootAction), timestamp]
     );
+    if (speculative) {
+      console.log(`[Proofer] Entry ${index}: speculative simulation (no state change)`);
+    }
 
     if (!simResultJson.success) {
       // Simulation failed — check if the entry also claims failure

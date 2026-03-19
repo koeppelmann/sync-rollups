@@ -94,6 +94,8 @@ interface PrepareL1CallResponse {
   executionsLoaded?: number; // Number of executions pre-loaded
   postBatchTxHash?: string;  // When deferMine=true: the pending postBatch tx hash
   reusedPreparation?: boolean; // Whether an existing prep was reused
+  bundleIncluded?: boolean;  // Whether the bundle was included (bundle submitter path)
+  l1BlockNumber?: number;    // L1 block number where the bundle landed
   error?: string;
 }
 
@@ -402,12 +404,18 @@ export class Builder {
     // Check sync status (tracked state only — not the EVM state check).
     // The builder's L2 EVM may be temporarily ahead during L1→L2 call preparation.
     // See isTrackedStateSynced() for details.
-    const synced = await this.planner.isTrackedStateSynced();
+    let synced = await this.planner.isTrackedStateSynced();
     if (!synced) {
-      return {
-        success: false,
-        error: "Fullnode not synced with L1",
-      };
+      console.log("[Builder] Waiting for fullnode sync...");
+      const syncStart = Date.now();
+      while (Date.now() - syncStart < 10_000) {
+        await new Promise(r => setTimeout(r, 200));
+        synced = await this.planner.isTrackedStateSynced();
+        if (synced) { console.log(`[Builder] Synced [${Date.now() - syncStart}ms]`); break; }
+      }
+      if (!synced) {
+        return { success: false, error: "Fullnode not synced with L1 after 10s" };
+      }
     }
 
     try {
@@ -596,7 +604,10 @@ export class Builder {
           proxyDeploySignedTx
         );
       } else {
-        plan = await this.planner.planL2Transaction(signedTx, simTimestamp, undefined);
+        // Use speculative simulation for ECDSA mode (no state change, no rollback)
+        plan = (this.config.useECDSAVerifier && !this.isAnvilL1)
+          ? await this.planner.speculatePlanL2Transaction(signedTx, simTimestamp)
+          : await this.planner.planL2Transaction(signedTx, simTimestamp, undefined);
       }
 
       entryCount = plan.entries.length;
@@ -605,7 +616,7 @@ export class Builder {
 
       // Include any pending L1→L2 hints for the proofer. After an L1→L2 call,
       // the proofer's EVM may be behind due to timestamp mismatch during replay.
-      const hintsForProof = this.recentL1ToL2Hints.length > 0
+      let hintsForProof = this.recentL1ToL2Hints.length > 0
         ? [...this.recentL1ToL2Hints]
         : undefined;
       if (hintsForProof) {
@@ -667,7 +678,10 @@ export class Builder {
           return p > min ? p : min;
         })();
         const baseMaxFee = (() => {
-          if (this.l1ChainId === 10200n) return 1_000_000_000n;
+          if (this.l1ChainId === 10200n) {
+              const bf = feeData.maxFeePerGas || 20_000_000_000n;
+              return bf + bf / 2n;
+            }
           const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n;
           const min = basePriority * 8n;
           return f > min ? f : min;
@@ -675,7 +689,7 @@ export class Builder {
 
         // ECDSA bundle submission loop: each attempt gets a fresh proof for the
         // current target block, since the proof is block-bound.
-        const MAX_ECDSA_ATTEMPTS = this.config.useECDSAVerifier ? 5 : 1;
+        const MAX_ECDSA_ATTEMPTS = this.config.useECDSAVerifier ? 20 : 1;
         let bundleResult: { included: boolean; blockNumber: number; txHashes: string[] } | null = null;
 
         for (let ecdsaAttempt = 1; ecdsaAttempt <= MAX_ECDSA_ATTEMPTS; ecdsaAttempt++) {
@@ -1466,9 +1480,18 @@ export class Builder {
     try {
       this.prunePrepareL1Cache();
 
-      // Check sync status (tracked state only — the builder's L2 EVM may be
-      // temporarily ahead from a previous simulateL1ToL2Call pre-execution).
-      const synced = await this.planner.isTrackedStateSynced();
+      // Wait for fullnode to sync with L1 (poll rapidly — event processor may
+      // be processing the previous TX's L1 block right now).
+      let synced = await this.planner.isTrackedStateSynced();
+      if (!synced) {
+        console.log("[Builder] Waiting for fullnode sync...");
+        const syncStart = Date.now();
+        while (Date.now() - syncStart < 10_000) {
+          await new Promise(r => setTimeout(r, 200));
+          synced = await this.planner.isTrackedStateSynced();
+          if (synced) { console.log(`[Builder] Fullnode synced [${Date.now() - syncStart}ms]`); break; }
+        }
+      }
       if (!synced) {
         return {
           success: false,
@@ -1537,7 +1560,7 @@ export class Builder {
       if (!this.isAnvilL1) {
         console.log("[Builder] Non-Anvil L1→L2 call flow (mempool broadcast)");
 
-        const MAX_PREP_ATTEMPTS = 5;
+        const MAX_PREP_ATTEMPTS = 30;
         for (let attempt = 1; attempt <= MAX_PREP_ATTEMPTS; attempt++) {
           console.log(`[Builder] L1→L2 bundle attempt ${attempt}/${MAX_PREP_ATTEMPTS}`);
 
@@ -1652,7 +1675,10 @@ export class Builder {
             return p > min ? p : min;
           })();
           const baseMaxFee = (() => {
-            if (this.l1ChainId === 10200n) return 1_000_000_000n;
+            if (this.l1ChainId === 10200n) {
+              const bf = feeData.maxFeePerGas || 20_000_000_000n;
+              return bf + bf / 2n;
+            }
             const f = (feeData.maxFeePerGas || 1_000_000_000n) * 3n;
             const min = basePriority * 8n;
             return f > min ? f : min;

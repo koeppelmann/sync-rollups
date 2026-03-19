@@ -124,6 +124,59 @@ export class ExecutionPlanner {
   }
 
   /**
+   * Speculative version of planL2Transaction.
+   * Uses engine_getPayloadV3 to get stateRoot WITHOUT committing.
+   * Canonical chain stays unchanged — no rollback needed.
+   */
+  async speculatePlanL2Transaction(rlpEncodedTx: string, timestamp?: number): Promise<ExecutionPlan> {
+    const entries: ExecutionEntry[] = [];
+
+    const states = await this.getStates();
+    const currentState = states.l1State.stateRoot;
+    console.log(`[Planner] Speculate L2TX, current state: ${currentState.slice(0, 18)}...`);
+
+    const l2txAction = createL2TXAction(this.config.rollupId, rlpEncodedTx);
+    const rootActionHash = this.computeActionHash(l2txAction);
+
+    // Speculative simulation — does NOT mine a real block
+    const simulation = await this.speculateAction(l2txAction, timestamp);
+    console.log(`[Planner] Speculate success: ${simulation.success}, stateDeltas: ${simulation.stateDeltas.length}`);
+
+    if (!simulation.success) {
+      throw new Error(`L2TX speculative simulation failed: ${simulation.error || "unknown error"}`);
+    }
+
+    const resultAction = createResultAction(
+      this.config.rollupId,
+      simulation.nextAction.data,
+      simulation.nextAction.failed
+    );
+
+    const newState = simulation.stateDeltas[0].newState;
+    console.log(`[Planner] Speculative new state: ${newState.slice(0, 18)}...`);
+
+    const execution: ExecutionEntry = {
+      stateDeltas: [{
+        rollupId: this.config.rollupId,
+        currentState,
+        newState,
+        etherDelta: 0n,
+      }],
+      actionHash: rootActionHash,
+      nextAction: resultAction,
+    };
+
+    entries.push(execution);
+
+    return {
+      entries,
+      rootActionHash,
+      rootActions: [l2txAction],
+      proof: "",
+    };
+  }
+
+  /**
    * Plan a batch of L2 transactions to be included in a single L2 block.
    * Simulates all txs together in one block on the builder's fullnode.
    */
@@ -599,6 +652,110 @@ export class ExecutionPlanner {
   }
 
   /**
+   * Speculative version of planL1ToL2CallWithProxy.
+   * Uses speculateBlock() instead of mineBlock() — no state change, no rollback.
+   */
+  async speculatePlanL1ToL2CallWithProxy(
+    l2Target: string,
+    callData: string,
+    value: bigint,
+    targetProxyAddress: string,
+    sourceProxyAddress: string,
+    originalSender: string,
+    timestamp?: number,
+    overrideCurrentState?: string,
+    proxyRollupId?: bigint
+  ): Promise<ExecutionPlan> {
+    const entries: ExecutionEntry[] = [];
+
+    const states = await this.getStates();
+    const currentState = overrideCurrentState || states.l1State.stateRoot;
+    console.log(`[Planner] Speculate L1→L2, current state: ${currentState.slice(0, 18)}...`);
+
+    const actionRollupId = proxyRollupId ?? this.config.rollupId;
+    const callAction = createCallAction(
+      actionRollupId, l2Target, value, callData, originalSender, 0n, []
+    );
+    const rootActionHash = this.computeActionHash(callAction);
+
+    // Speculative simulation — no state change
+    const simulation = await this.speculateL1ToL2Call(
+      l2Target, callData, value, sourceProxyAddress, originalSender, timestamp
+    );
+    console.log(`[Planner] Speculate L1→L2 success: ${simulation.success}, returnData: ${simulation.returnData.slice(0, 18)}...`);
+
+    const resultAction = createResultAction(
+      this.config.rollupId, simulation.returnData, simulation.failed
+    );
+
+    const etherDelta = value;
+    const stateDeltas: StateDelta[] = simulation.stateDeltas.length > 0
+      ? simulation.stateDeltas.map(sd => ({ ...sd, etherDelta }))
+      : [{
+          rollupId: this.config.rollupId,
+          currentState,
+          newState: simulation.newState || this.computeNewState(currentState, rootActionHash),
+          etherDelta,
+        }];
+
+    entries.push({
+      stateDeltas,
+      actionHash: rootActionHash,
+      nextAction: resultAction,
+    });
+
+    return {
+      entries,
+      rootActionHash,
+      rootActions: [callAction],
+      proof: "",
+    };
+  }
+
+  /**
+   * Speculative L1→L2 call on the fullnode — no state change.
+   */
+  private async speculateL1ToL2Call(
+    destination: string,
+    data: string,
+    value: bigint,
+    fromProxy: string,
+    originalSender: string,
+    timestamp?: number
+  ): Promise<{
+    returnData: string;
+    failed: boolean;
+    stateDeltas: StateDelta[];
+    newState?: string;
+    success: boolean;
+  }> {
+    try {
+      const result = await this.fullnodeProvider.send("syncrollups_speculateL1Call", [{
+        from: fromProxy,
+        to: destination,
+        value: "0x" + value.toString(16),
+        data: data,
+        originalSender: originalSender,
+      }, timestamp]);
+
+      return {
+        returnData: result.returnData || "0x",
+        failed: result.failed || false,
+        stateDeltas: result.stateDeltas ? result.stateDeltas.map(stateDeltaFromJson) : [],
+        newState: result.newState,
+        success: !result.failed,
+      };
+    } catch (e: any) {
+      return {
+        returnData: "0x",
+        failed: true,
+        stateDeltas: [],
+        success: false,
+      };
+    }
+  }
+
+  /**
    * Simulate an L1→L2 call on the fullnode
    */
   private async simulateL1ToL2Call(
@@ -693,6 +850,26 @@ export class ExecutionPlanner {
     ]);
 
     // Convert response back to native types
+    return {
+      nextAction: actionFromJson(resultJson.nextAction),
+      stateDeltas: resultJson.stateDeltas.map(stateDeltaFromJson),
+      success: resultJson.success,
+      error: resultJson.error,
+    };
+  }
+
+  /**
+   * Speculative simulation: get stateRoot WITHOUT mining a real block.
+   * Uses engine_getPayloadV3 to build a speculative block, extracts stateRoot,
+   * but does NOT commit. Canonical chain stays unchanged — no rollback needed.
+   */
+  private async speculateAction(action: Action, timestamp?: number): Promise<SimulationResult> {
+    const actionJson = actionToJson(action);
+    const resultJson = await this.fullnodeProvider.send("syncrollups_speculateAction", [
+      actionJson,
+      timestamp,
+    ]);
+
     return {
       nextAction: actionFromJson(resultJson.nextAction),
       stateDeltas: resultJson.stateDeltas.map(stateDeltaFromJson),
