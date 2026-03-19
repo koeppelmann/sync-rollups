@@ -293,6 +293,33 @@ If `status` is not `"VALID"`, the block production failed.
 
 This makes the new block canonical. The second parameter is `null` (no new payload attributes).
 
+### 3.2 `speculateBlock(options?)` Sequence
+
+Called by the builder and proofer to obtain a speculative `stateRoot` WITHOUT committing a block. The canonical chain is unchanged afterward. This enables repeated simulation attempts (e.g., ECDSA retry loops targeting different L1 blocks) without expensive rollbacks.
+
+The sequence is identical to `mineBlock` Steps 1-2, but **deliberately skips Steps 3-5** (newPayload, FCU-finalize):
+
+#### Step 1: Get current head
+
+Same as `mineBlock` Step 1.
+
+#### Step 2: Request payload build (`engine_forkchoiceUpdatedV3`)
+
+Same as `mineBlock` Step 2. Returns `payloadId`.
+
+#### Step 3: Get built payload (`engine_getPayloadV3`)
+
+Same as `mineBlock` Step 3. The `executionPayload.stateRoot` is the speculative state root — the result of executing all pending txpool transactions on top of the current head with the given timestamp.
+
+#### Step 4: STOP — do NOT submit or finalize
+
+Do **not** call `engine_newPayloadV3` or `engine_forkchoiceUpdatedV3`. The built payload is discarded. The canonical chain head remains unchanged.
+
+**Critical invariants:**
+- The canonical head block (`eth_blockNumber`) MUST NOT change after `speculateBlock`.
+- Transactions in the txpool MUST remain available for subsequent `speculateBlock` or `mineBlock` calls. The payload builder reads from the txpool but does not consume transactions — they are only removed when included in a canonical block via the full `mineBlock` sequence.
+- Multiple `speculateBlock` calls with different timestamps produce different `stateRoot` values (due to EIP-1559 base fee dynamics and any timestamp-dependent contract logic), all from the same base state.
+
 ---
 
 ## 4. Transaction Types
@@ -508,6 +535,29 @@ Two conditions must hold:
 2. Actual L2 EVM state root matches the L1 contract's state root
 
 If (1) passes but (2) fails, it indicates fraud.
+
+### 8.4 Action Hash Verification
+
+After each `L2ExecutionPerformed` event with an accompanying `ExecutionConsumed` event, the fullnode recomputes the action hash from the Action struct in the event data:
+
+```
+recomputedHash = keccak256(abi.encode(action))
+assert recomputedHash == ExecutionConsumed.actionHash (indexed topic)
+```
+
+A mismatch indicates the `ExecutionConsumed` event data is inconsistent with its indexed action hash, which should not occur under normal operation.
+
+### 8.5 Return Data Verification
+
+For L1→L2 cross-chain calls, after the fullnode performs its independent `eth_call` dry-run to predict return data, it also fetches the `postBatch` transaction from the same L1 block and decodes the execution entry's `nextAction.data` field. It then compares:
+
+```
+claimed_return_data = postBatch_entry.nextAction.data
+actual_return_data  = eth_call(from=operator, to=destination, data, value)
+assert claimed_return_data == actual_return_data
+```
+
+A mismatch indicates the builder generated the proof with incorrect return data in the RESULT action. This does not affect L2 state (the fullnode independently re-derives the correct execution), but it means the L1 entry does not accurately describe the L2 execution result.
 
 ---
 

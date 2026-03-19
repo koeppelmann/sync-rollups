@@ -30,6 +30,7 @@ const ROLLUPS_ABI = [
   "function authorizedProxies(address) view returns (address originalAddress, uint64 originalRollupId)",
   // Functions we need to decode L1 transactions
   "function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes)",
+  "function postBatch((tuple(uint256 rollupId, bytes32 currentState, bytes32 newState, int256 etherDelta)[] stateDeltas, bytes32 actionHash, tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope) nextAction)[] entries, uint256 blobCount, bytes callData, bytes proof)",
 ];
 
 // CrossChainProxy immutables are internal in the new contract.
@@ -75,7 +76,9 @@ export class EventProcessor {
     this.config = config;
     this.stateManager = stateManager;
     this.lastProcessedBlock = config.startBlock - 1;
-    this.pollingInterval = config.pollingInterval || 2000;
+    // 500ms default enables consecutive-block bundle inclusion on 5s slot chains.
+    // Configurable via pollingInterval option to reduce L1 RPC load if needed.
+    this.pollingInterval = config.pollingInterval || 500;
     this.deploymentBlock = config.startBlock; // Remember original deployment block
 
     this.l1Provider = new JsonRpcProvider(config.l1RpcUrl, undefined, {
@@ -269,6 +272,7 @@ export class EventProcessor {
             currentState: event.args[1],
             newState: event.args[2],
             // Action from ExecutionConsumed event (if available)
+            consumedActionHash: firstConsumed ? firstConsumed[0] as string : null,
             consumedAction: firstConsumed ? {
               actionType: Number(firstConsumed[1][0]),
               rollupId: firstConsumed[1][1],
@@ -416,7 +420,7 @@ export class EventProcessor {
           `[EventProcessor] L2ExecutionPerformed at block ${blockNumber}: ${args.currentState.slice(0, 10)}... -> ${args.newState.slice(0, 10)}...`
         );
         // Replay the execution on L2 EVM using action data from ExecutionConsumed event
-        await this.replayExecution(args.currentState, args.newState, blockNumber, transactionHash, args.consumedAction, args.l2ToL1Result);
+        await this.replayExecution(args.currentState, args.newState, blockNumber, transactionHash, args.consumedAction, args.l2ToL1Result, args.consumedActionHash);
         this.lastEventWasStateUpdate = false;
         break;
 
@@ -435,11 +439,47 @@ export class EventProcessor {
     blockNumber: number,
     l1TxHash: string,
     consumedAction?: { actionType: number; rollupId: bigint; destination: string; value: bigint; data: string; failed: boolean; sourceAddress: string; sourceRollup: bigint } | null,
-    l2ToL1Result?: { actionType: number; rollupId: bigint; data: string; failed: boolean; [key: string]: any } | null
+    l2ToL1Result?: { actionType: number; rollupId: bigint; data: string; failed: boolean; [key: string]: any } | null,
+    consumedActionHash?: string | null
   ): Promise<void> {
     console.log(
       `[EventProcessor] Replaying execution from L1 tx ${l1TxHash.slice(0, 10)}...`
     );
+
+    // VERIFICATION: Recompute the action hash from the consumed Action struct
+    // and verify it matches the indexed actionHash from the ExecutionConsumed event.
+    // This catches entry integrity issues (e.g., wrong returnData in RESULT actions).
+    if (consumedAction && consumedActionHash) {
+      try {
+        const { AbiCoder, keccak256 } = await import("ethers");
+        const abiCoder = AbiCoder.defaultAbiCoder();
+        const ACTION_TUPLE = "tuple(uint8 actionType, uint256 rollupId, address destination, uint256 value, bytes data, bool failed, address sourceAddress, uint256 sourceRollup, uint256[] scope)";
+        const encoded = abiCoder.encode([ACTION_TUPLE], [[
+          consumedAction.actionType,
+          consumedAction.rollupId,
+          consumedAction.destination,
+          consumedAction.value,
+          consumedAction.data,
+          consumedAction.failed,
+          consumedAction.sourceAddress,
+          consumedAction.sourceRollup,
+          [], // scope (not in event data, always empty for root actions)
+        ]]);
+        const recomputedHash = keccak256(encoded);
+        if (recomputedHash !== consumedActionHash) {
+          console.error(
+            `\n!!! ACTION HASH MISMATCH !!!\n` +
+            `  L1 event actionHash: ${consumedActionHash}\n` +
+            `  Recomputed from Action: ${recomputedHash}\n` +
+            `  This indicates the execution entry data is inconsistent.\n`
+          );
+        } else {
+          console.log(`[EventProcessor] Action hash verified ✓ (${consumedActionHash.slice(0, 14)}...)`);
+        }
+      } catch (e: any) {
+        console.warn(`[EventProcessor] Action hash verification failed: ${e.message}`);
+      }
+    }
 
     // Verify our tracked state matches
     const trackedState = this.stateManager.getStateRoot();
@@ -607,6 +647,47 @@ export class EventProcessor {
           rawReturnData = e.data || "0x";
         }
 
+        // VERIFICATION: Check that the L1 postBatch entry's RESULT action data
+        // matches our independent dry-run. Finds the postBatch tx in the same block
+        // and decodes the entry's nextAction.data field.
+        try {
+          const l1Block2 = await this.l1Provider.getBlock(blockNumber);
+          if (l1Block2) {
+            for (const txHash of l1Block2.transactions) {
+              const pbTx = await this.l1Provider.getTransaction(txHash as string);
+              if (pbTx && pbTx.to?.toLowerCase() === this.config.rollupsAddress.toLowerCase() && pbTx.data.startsWith("0x92cbb26e")) {
+                // Decode postBatch calldata
+                const pbDecoded = this.rollupsInterface.parseTransaction({ data: pbTx.data });
+                if (pbDecoded && pbDecoded.name === "postBatch") {
+                  const entries = pbDecoded.args[0];
+                  // Find entry matching our consumedActionHash
+                  for (const entry of entries) {
+                    if (consumedActionHash && entry.actionHash === consumedActionHash) {
+                      const claimedReturnData = entry.nextAction.data;
+                      if (claimedReturnData !== rawReturnData) {
+                        console.error(
+                          `\n!!! RETURN DATA MISMATCH !!!\n` +
+                          `  L1 entry claims returnData: ${claimedReturnData}\n` +
+                          `  L2 dry-run actually returns: ${rawReturnData}\n` +
+                          `  actionHash: ${consumedActionHash}\n` +
+                          `  The L1 proof was generated with incorrect return data.\n`
+                        );
+                      } else {
+                        console.log(`[EventProcessor] Return data verified ✓ (${rawReturnData.slice(0, 20)}${rawReturnData.length > 20 ? "..." : ""})`);
+                      }
+                      break;
+                    }
+                  }
+                }
+                break;
+              }
+            }
+          }
+        } catch (e: any) {
+          // Non-fatal — verification is best-effort
+          console.warn(`[EventProcessor] Return data verification skipped: ${e.message?.slice(0, 60)}`);
+        }
+
         // Step 2: Use raw return data as-is to match what _processCallAtScope captures.
         // CrossChainProxy.executeOnBehalf uses assembly return, so the caller's .call()
         // gets the raw bytes from the destination — NOT ABI-wrapped.
@@ -713,16 +794,31 @@ export class EventProcessor {
         console.log(`[EventProcessor] Legacy L1→L2 call executed in single block`);
       }
 
-      // Verify the state matches what L1 expects
+      // FRAUD CHECK: Independently verify the state transition.
+      // Re-executing the same actions on L2 should produce the same state root
+      // that was posted on L1. A mismatch indicates either:
+      //   - A bug in the builder/proofer simulation
+      //   - A fraudulent proof accepted by the L1 verifier
+      //   - A non-determinism issue (timestamp, nonce, etc.)
       const actualState = await this.stateManager.getActualStateRoot();
       if (actualState !== newState) {
-        console.warn(
-          `[EventProcessor] State mismatch after replay! Expected: ${newState.slice(0, 10)}..., Got: ${actualState.slice(0, 10)}...`
-        );
+        if (this.lastFraudWarningState !== newState) {
+          console.error(
+            `\n` +
+            `!!! FRAUD WARNING: State mismatch after independent re-execution !!!\n` +
+            `  L1 claims newState: ${newState}\n` +
+            `  L2 actual state:   ${actualState}\n` +
+            `  L1 block: ${blockNumber}, tx: ${l1TxHash}\n` +
+            `  The L1 state transition may be invalid.\n`
+          );
+          this.lastFraudWarningState = newState;
+        }
         // Keep the mismatched block to maintain L2 block height parity across all
         // fullnodes. Rolling back would cause block height divergence, which breaks
         // EIP-1559 base fee determinism. The tracked state advances to match L1;
         // the proofer uses hints to reach the correct starting state when needed.
+      } else {
+        console.log(`[EventProcessor] State verified ✓ (L2 replay matches L1)`);
       }
 
       // Update tracked state

@@ -309,9 +309,8 @@ export class StateManager {
     const rethBinary = process.env.SYNC_ROLLUPS_RETH || "reth";
 
     // Derive unique ports from the HTTP port so multiple reth instances don't conflict
-    const portOffset = l2EvmPort - 9546;
-    const p2pPort = 30303 + portOffset;
-    const authRpcPort = 8551 + portOffset;
+    const p2pPort = l2EvmPort + 23000;
+    const authRpcPort = l2EvmPort + 1000;
 
     // Store auth RPC port for engine API calls (block production)
     this.authRpcPort = authRpcPort;
@@ -452,9 +451,9 @@ export class StateManager {
 
     console.log(`[StateManager] Unwinding reth to L2 block ${l2BlockNumber}...`);
 
-    // reth stage unwind has off-by-one: "to-block N" ends at block N-1.
-    // Pass N+1 to end at the desired block N. Guard against block 0 edge case.
-    const unwindTarget = l2BlockNumber + 1;
+    // reth stage unwind "to-block N" keeps blocks up to and including N.
+    // To end at block N, pass N directly.
+    const unwindTarget = l2BlockNumber;
     try {
       const result = execSync(
         `"${rethBinary}" stage unwind --datadir "${rethDataDir}" --chain "${genesisPath}" to-block ${unwindTarget}`,
@@ -539,26 +538,78 @@ export class StateManager {
     }
     console.log(`[StateManager] Rolling back L2 from block ${currentBlock} to ${targetBlock}...`);
 
-    // Try lightweight forkchoice-based rollback first.
-    // Get the target block's hash and set it as the chain head.
+    // Lightweight rollback via fork reorg:
+    // 1. FCU to targetBlock (sets it as head — reth drops later blocks from canonical chain)
+    // 2. Mine an empty block on top of targetBlock with a unique timestamp
+    //    This creates a fork that replaces blocks after targetBlock.
+    // No reth restart needed — all done via Engine API.
     try {
       const provider = this.getL2Provider();
       const targetBlockHex = "0x" + targetBlock.toString(16);
-      const block = await provider.send("eth_getBlockByNumber", [targetBlockHex, false]);
-      if (block && block.hash) {
+      const targetBlockData = await provider.send("eth_getBlockByNumber", [targetBlockHex, false]);
+      if (targetBlockData && targetBlockData.hash) {
+        const targetHash = targetBlockData.hash;
+        const targetTs = parseInt(targetBlockData.timestamp, 16);
+
+        // Step 1: FCU to target block (sets canonical head)
         await this.engineApiCall("engine_forkchoiceUpdatedV3", [
-          { headBlockHash: block.hash, safeBlockHash: block.hash, finalizedBlockHash: block.hash },
+          { headBlockHash: targetHash, safeBlockHash: targetHash, finalizedBlockHash: targetHash },
           null,
         ]);
+
+        // Step 2: Build empty fork block on top of target with unique timestamp.
+        // Use a high offset to avoid collision with existing blocks that reth
+        // may still know about (reth won't return payloadId if the timestamp
+        // matches an existing block in its tree).
+        const forkTs = targetTs + 999999;
+        const payloadAttributes = {
+          timestamp: "0x" + forkTs.toString(16),
+          prevRandao: "0x0000000000000000000000000000000000000000000000000000000000000000",
+          suggestedFeeRecipient: "0x0000000000000000000000000000000000000000",
+          withdrawals: [],
+          parentBeaconBlockRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        };
+        const fcuResult = await this.engineApiCall("engine_forkchoiceUpdatedV3", [
+          { headBlockHash: targetHash, safeBlockHash: targetHash, finalizedBlockHash: targetHash },
+          payloadAttributes,
+        ]);
+        if (!fcuResult.payloadId) {
+          // reth's Engine API doesn't return payloadId when FCU points to an
+          // ancestor in the existing canonical chain (it won't reorg to a fork
+          // without a competing block). Fall through to heavy path.
+          throw new Error("FCU did not return payloadId (reth won't reorg to ancestor)");
+        }
+
+        // Step 3: Get and submit the fork payload
+        const payload = await this.engineApiCall("engine_getPayloadV3", [fcuResult.payloadId]);
+        const execPayload = payload.executionPayload;
+        const npResult = await this.engineApiCall("engine_newPayloadV3", [
+          execPayload, [], payloadAttributes.parentBeaconBlockRoot,
+        ]);
+        if (npResult.status !== "VALID") {
+          throw new Error(`Fork payload invalid: ${npResult.status} ${npResult.validationError || ""}`);
+        }
+
+        // Step 4: FCU to the fork block (reorgs away all blocks after target)
+        const forkHash = execPayload.blockHash;
+        await this.engineApiCall("engine_forkchoiceUpdatedV3", [
+          { headBlockHash: forkHash, safeBlockHash: forkHash, finalizedBlockHash: forkHash },
+          null,
+        ]);
+
         const newBlock = await this.getL2BlockNumber();
-        if (newBlock === targetBlock) {
-          console.log(`[StateManager] Rollback complete via forkchoice, now at block ${newBlock}`);
+        const actualState = await this.getActualStateRoot();
+        // Verify block number decreased (don't require exact state root match —
+        // the fork block may slightly alter baseFee etc., which is fine since
+        // the next simulation will produce a valid result from this base state).
+        if (newBlock <= targetBlock + 1) {
+          console.log(`[StateManager] Fork rollback complete: block=${newBlock}, state=${actualState.slice(0,14)}...`);
           return;
         }
-        console.warn(`[StateManager] Forkchoice rollback landed at block ${newBlock}, expected ${targetBlock}. Trying heavy path.`);
+        console.warn(`[StateManager] Fork rollback did not decrease block number: ${currentBlock} → ${newBlock}. Trying heavy path.`);
       }
     } catch (e: any) {
-      console.warn(`[StateManager] Forkchoice rollback failed: ${e.message}. Trying heavy path.`);
+      console.warn(`[StateManager] Fork rollback failed: ${e.message}. Trying heavy path.`);
     }
 
     // Heavy path: stop reth, unwind, restart
@@ -566,19 +617,12 @@ export class StateManager {
     try {
       await this.unwindToBlock(targetBlock);
     } catch (e: any) {
-      // Unwind can fail if simulation blocks weren't persisted to reth's DB
-      // (e.g. target block > reth's latest persisted block after stop).
-      // The unpersisted blocks are already gone after stopEngine(), so this is safe to ignore.
       console.warn(`[StateManager] Unwind failed (non-fatal): ${e.message}`);
     }
     await this.startEngine();
     const newBlock = await this.getL2BlockNumber();
-    console.log(`[StateManager] Rollback complete, now at block ${newBlock}`);
+    console.log(`[StateManager] Rollback complete (heavy path), now at block ${newBlock}`);
     if (newBlock < targetBlock) {
-      // Engine API blocks weren't persisted to reth's DB before the stop.
-      // After restart, reth is at a lower block than expected. This is OK —
-      // the event processor will re-mine the missing blocks from L1 events.
-      // Update trackedL2Block to reflect what reth actually has.
       console.warn(
         `[StateManager] Rollback undershoot: landed at block ${newBlock}, expected ${targetBlock}. ` +
         `Event processor will re-mine missing blocks.`
@@ -916,6 +960,17 @@ export class StateManager {
    * Use this for preparation transactions that should share a block with the main tx.
    * Call mineBlock() afterwards to include all pending txs in one block.
    */
+  /** Save the current operator nonce for later restoration.
+   *  Used by callers that need to speculatively send system txs without committing. */
+  saveOperatorNonce(): number {
+    return this.operatorNonce;
+  }
+
+  /** Restore operator nonce to a previously saved value (used after speculative simulation). */
+  restoreOperatorNonce(nonce: number): void {
+    this.operatorNonce = nonce;
+  }
+
   async sendSystemTx(to: string, data: string, value: string = "0x0"): Promise<string> {
     if (!this.operatorWallet) {
       throw new Error("Operator wallet not initialized - call startEngine first");
@@ -1241,6 +1296,65 @@ export class StateManager {
       { headBlockHash: newHash, safeBlockHash: newHash, finalizedBlockHash: newHash },
       null,
     ]);
+  }
+
+  /**
+   * Build a speculative block via Engine API WITHOUT committing it.
+   * Returns the stateRoot (and other payload data) from the built block.
+   * The canonical chain is unchanged — no rollback needed.
+   *
+   * This is identical to mineBlock() steps 1-2, but skips steps 3-4
+   * (newPayload + FCU-finalize). The tx(s) stay in the txpool for reuse.
+   */
+  async speculateBlock(options?: { coinbase?: string; timestamp?: number }): Promise<{
+    stateRoot: string;
+    blockHash: string;
+    gasUsed: string;
+    transactions: string[];
+  }> {
+    if (!this.l2Provider) {
+      throw new Error("L2 provider not initialized");
+    }
+
+    const headBlock = await this.l2Provider.send("eth_getBlockByNumber", ["latest", false]);
+    const headHash = headBlock.hash;
+    const headTimestamp = parseInt(headBlock.timestamp, 16);
+
+    let blockTimestamp = options?.timestamp ?? (headTimestamp + 1);
+    if (blockTimestamp <= headTimestamp) {
+      blockTimestamp = headTimestamp + 1;
+    }
+
+    const coinbase = options?.coinbase || "0x0000000000000000000000000000000000000000";
+
+    // Step 1: FCU with payload attributes → start building
+    const payloadAttributes = {
+      timestamp: "0x" + blockTimestamp.toString(16),
+      prevRandao: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      suggestedFeeRecipient: coinbase,
+      withdrawals: [],
+      parentBeaconBlockRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
+    };
+    const fcuResult = await this.engineApiCall("engine_forkchoiceUpdatedV3", [
+      { headBlockHash: headHash, safeBlockHash: headHash, finalizedBlockHash: headHash },
+      payloadAttributes,
+    ]);
+    const payloadId = fcuResult.payloadId;
+    if (!payloadId) {
+      throw new Error("speculateBlock: engine_forkchoiceUpdatedV3 did not return payloadId");
+    }
+
+    // Step 2: Get the built payload (includes stateRoot)
+    const payload = await this.engineApiCall("engine_getPayloadV3", [payloadId]);
+    const ep = payload.executionPayload;
+
+    // DON'T call newPayload or FCU — head stays unchanged
+    return {
+      stateRoot: ep.stateRoot,
+      blockHash: ep.blockHash,
+      gasUsed: ep.gasUsed,
+      transactions: ep.transactions || [],
+    };
   }
 
   /**

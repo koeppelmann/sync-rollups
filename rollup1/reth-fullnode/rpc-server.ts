@@ -383,6 +383,144 @@ export class RpcServer {
             break;
           }
 
+          case "syncrollups_speculateAction": {
+            // Speculative simulation: get stateRoot WITHOUT mining a real block.
+            // Uses engine_getPayloadV3 to build a speculative block, extracts
+            // stateRoot, but does NOT commit. Canonical chain stays unchanged.
+            // params: [actionJson, timestamp?]
+            const specAction = actionFromJson(params?.[0] as ActionJson);
+            const specTimestamp = params?.[1] as number | undefined;
+            if (!specAction) throw new Error("Missing action parameter");
+
+            const specCurrentState = this.stateManager.getStateRoot();
+            let specReturnData = "0x";
+            let specFailed = false;
+            let specError: string | undefined;
+
+            if (specAction.actionType === ActionType.L2TX) {
+              // Send signed tx to txpool (idempotent — "already known" is fine)
+              try {
+                await this.stateManager.sendRawTransaction(specAction.data);
+              } catch (e: any) {
+                if (!e.message?.includes("already known")) {
+                  specFailed = true;
+                  specError = e.message;
+                }
+              }
+
+              // Use eth_call to get return data (read-only, doesn't change state).
+              // Runs against current canonical state — correct when simulating a
+              // single tx on top of the canonical head. NOT correct for batches
+              // where prior txs in the same block would change state that affects
+              // subsequent return values.
+              if (!specFailed) {
+                try {
+                  const { Transaction: Tx } = await import("ethers");
+                  const parsed = Tx.from(specAction.data);
+                  if (parsed.to) {
+                    specReturnData = await this.stateManager.getL2Provider().send("eth_call", [{
+                      from: parsed.from,
+                      to: parsed.to,
+                      value: "0x" + (parsed.value || 0n).toString(16),
+                      data: parsed.data || "0x",
+                      gas: "0x" + (parsed.gasLimit || 1000000n).toString(16),
+                    }, "latest"]);
+                  }
+                } catch {
+                  // eth_call failure is non-fatal — return data defaults to "0x"
+                }
+              }
+            }
+
+            // Build speculative block to get stateRoot
+            let specNewState = specCurrentState;
+            if (!specFailed) {
+              try {
+                // Small delay to let tx propagate to txpool
+                await new Promise(r => setTimeout(r, 50));
+                const specBlock = await this.stateManager.speculateBlock({
+                  timestamp: specTimestamp,
+                });
+                specNewState = specBlock.stateRoot;
+              } catch (e: any) {
+                specFailed = true;
+                specError = e.message;
+              }
+            }
+
+            result = {
+              nextAction: actionToJson({
+                actionType: ActionType.RESULT,
+                rollupId: specAction.rollupId,
+                destination: "0x0000000000000000000000000000000000000000",
+                value: 0n,
+                data: specReturnData,
+                failed: specFailed,
+                sourceAddress: "0x0000000000000000000000000000000000000000",
+                sourceRollup: 0n,
+                scope: [],
+              }),
+              stateDeltas: specFailed ? [] : [stateDeltaToJson({
+                rollupId: specAction.rollupId,
+                currentState: specCurrentState,
+                newState: specNewState,
+                etherDelta: 0n,
+              })],
+              success: !specFailed,
+              error: specError,
+            };
+            break;
+          }
+
+          case "syncrollups_speculateBatch": {
+            // Speculative batch simulation: send all txs to txpool, build
+            // speculative block, return stateRoot without committing.
+            // params: [signedTxs[], timestamp?]
+            const specBatchTxs = params?.[0] as string[];
+            const specBatchTs = params?.[1] as number | undefined;
+            if (!specBatchTxs || !Array.isArray(specBatchTxs)) {
+              throw new Error("Missing signed transactions array");
+            }
+            const specBatchCurrent = this.stateManager.getStateRoot();
+            let specBatchOk = true;
+            let specBatchErr: string | undefined;
+
+            // Send all txs to txpool
+            for (const rawTx of specBatchTxs) {
+              try {
+                await this.stateManager.sendRawTransaction(rawTx);
+              } catch (e: any) {
+                if (!e.message?.includes("already known")) {
+                  specBatchOk = false;
+                  specBatchErr = e.message;
+                  break;
+                }
+              }
+            }
+
+            let specBatchNewState = specBatchCurrent;
+            if (specBatchOk) {
+              try {
+                await new Promise(r => setTimeout(r, 50));
+                const specBatchBlock = await this.stateManager.speculateBlock({
+                  timestamp: specBatchTs,
+                });
+                specBatchNewState = specBatchBlock.stateRoot;
+              } catch (e: any) {
+                specBatchOk = false;
+                specBatchErr = e.message;
+              }
+            }
+
+            result = {
+              currentState: specBatchCurrent,
+              newState: specBatchNewState,
+              success: specBatchOk,
+              error: specBatchErr,
+            };
+            break;
+          }
+
           default:
             throw new Error(`Unknown method: ${method}`);
         }
@@ -556,6 +694,10 @@ export class RpcServer {
         "0x" + value.toString(16)
       );
       console.log(`[RpcServer]   executeIncomingCrossChainCall tx: ${execTxHash}`);
+
+      // Capture the return data from the dry-run for the caller
+      returnData = proxyReturnData;
+      failed = callFailed;
 
       // Step 9: Mine one block with both txs
       console.log(`[RpcServer] Mining block with loadExecutionTable + executeIncomingCrossChainCall...`);
