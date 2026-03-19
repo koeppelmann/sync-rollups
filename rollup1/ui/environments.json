@@ -3,7 +3,7 @@
     "chiado": {
       "label": "Chiado Testnet",
       "l1ChainId": 10200,
-      "l1Rpc": "http://51.210.221.124:8645/",
+      "rpcs": ["http://51.210.221.124:8645/"],
       "l1ExplorerUrl": "https://gnosis-chiado.blockscout.com",
       "contracts": {
         "0x83C6686fB5ECbf7905EA8dD2fdf59ABBC81CcA99": {
@@ -14,7 +14,14 @@
           "instances": {
             "1": {
               "server": "54.38.26.5",
-              "l2ChainId": 10200200
+              "l2ChainId": 10200200,
+              "ports": {
+                "l2BuilderRpc": 7601,
+                "builderUrl": 3201,
+                "prooferUrl": 3301,
+                "l2Rpc": 7500,
+                "blockscoutL2Url": 7801
+              }
             }
           }
         }
@@ -23,7 +30,7 @@
     "ethereum": {
       "label": "Ethereum Mainnet",
       "l1ChainId": 1,
-      "l1Rpc": "https://mainnet.gateway.tenderly.co/1dqHPTA6y5oLxYMiJh2xfD",
+      "rpcs": ["https://mainnet.gateway.tenderly.co/1dqHPTA6y5oLxYMiJh2xfD"],
       "l1ExplorerUrl": "https://etherscan.io",
       "contracts": {
         "0x744251145366d6a4795502bB7D28dB9fD539CA54": {
@@ -43,7 +50,7 @@
     "anvil": {
       "label": "Anvil (Local)",
       "l1ChainId": 31337,
-      "l1Rpc": "http://localhost:8545",
+      "rpcs": ["http://localhost:8545"],
       "l1ExplorerUrl": "",
       "contracts": {}
     }

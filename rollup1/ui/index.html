@@ -2150,13 +2150,19 @@
     /** Derive all service URLs from a server IP */
     function serverToUrls(ip) {
       if (!ip) return {};
+      // Check if the current instance has explicit port overrides
+      const instance = getInstanceConfig();
+      const ports = instance?.ports || {};
+      const chain = getChainConfig();
+      // L1 Builder RPC defaults to the chain's L1 RPC (not the server IP)
+      const l1Rpc = chain?.rpcs?.[0] || `http://${ip}:7100`;
       return {
-        l1BuilderRpc: `http://${ip}:7100`,
-        l2BuilderRpc: `http://${ip}:7200`,
-        builderUrl: `http://${ip}:7300`,
-        prooferUrl: `http://${ip}:7400`,
-        l2Rpc: `http://${ip}:7500`,
-        blockscoutL2Url: `http://${ip}:7801`,
+        l1BuilderRpc: ports.l1BuilderRpc ? `http://${ip}:${ports.l1BuilderRpc}` : l1Rpc,
+        l2BuilderRpc: `http://${ip}:${ports.l2BuilderRpc || 7200}`,
+        builderUrl: `http://${ip}:${ports.builderUrl || 7300}`,
+        prooferUrl: `http://${ip}:${ports.prooferUrl || 7400}`,
+        l2Rpc: `http://${ip}:${ports.l2Rpc || 7500}`,
+        blockscoutL2Url: `http://${ip}:${ports.blockscoutL2Url || 7801}`,
       };
     }
 
