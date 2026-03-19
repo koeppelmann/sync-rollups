@@ -124,6 +124,59 @@ export class ExecutionPlanner {
   }
 
   /**
+   * Speculative version of planL2Transaction.
+   * Uses engine_getPayloadV3 to get stateRoot WITHOUT committing.
+   * Canonical chain stays unchanged — no rollback needed.
+   */
+  async speculatePlanL2Transaction(rlpEncodedTx: string, timestamp?: number): Promise<ExecutionPlan> {
+    const entries: ExecutionEntry[] = [];
+
+    const states = await this.getStates();
+    const currentState = states.l1State.stateRoot;
+    console.log(`[Planner] Speculate L2TX, current state: ${currentState.slice(0, 18)}...`);
+
+    const l2txAction = createL2TXAction(this.config.rollupId, rlpEncodedTx);
+    const rootActionHash = this.computeActionHash(l2txAction);
+
+    // Speculative simulation — does NOT mine a real block
+    const simulation = await this.speculateAction(l2txAction, timestamp);
+    console.log(`[Planner] Speculate success: ${simulation.success}, stateDeltas: ${simulation.stateDeltas.length}`);
+
+    if (!simulation.success) {
+      throw new Error(`L2TX speculative simulation failed: ${simulation.error || "unknown error"}`);
+    }
+
+    const resultAction = createResultAction(
+      this.config.rollupId,
+      simulation.nextAction.data,
+      simulation.nextAction.failed
+    );
+
+    const newState = simulation.stateDeltas[0].newState;
+    console.log(`[Planner] Speculative new state: ${newState.slice(0, 18)}...`);
+
+    const execution: ExecutionEntry = {
+      stateDeltas: [{
+        rollupId: this.config.rollupId,
+        currentState,
+        newState,
+        etherDelta: 0n,
+      }],
+      actionHash: rootActionHash,
+      nextAction: resultAction,
+    };
+
+    entries.push(execution);
+
+    return {
+      entries,
+      rootActionHash,
+      rootActions: [l2txAction],
+      proof: "",
+    };
+  }
+
+  /**
    * Plan a batch of L2 transactions to be included in a single L2 block.
    * Simulates all txs together in one block on the builder's fullnode.
    */
@@ -693,6 +746,26 @@ export class ExecutionPlanner {
     ]);
 
     // Convert response back to native types
+    return {
+      nextAction: actionFromJson(resultJson.nextAction),
+      stateDeltas: resultJson.stateDeltas.map(stateDeltaFromJson),
+      success: resultJson.success,
+      error: resultJson.error,
+    };
+  }
+
+  /**
+   * Speculative simulation: get stateRoot WITHOUT mining a real block.
+   * Uses engine_getPayloadV3 to build a speculative block, extracts stateRoot,
+   * but does NOT commit. Canonical chain stays unchanged — no rollback needed.
+   */
+  private async speculateAction(action: Action, timestamp?: number): Promise<SimulationResult> {
+    const actionJson = actionToJson(action);
+    const resultJson = await this.fullnodeProvider.send("syncrollups_speculateAction", [
+      actionJson,
+      timestamp,
+    ]);
+
     return {
       nextAction: actionFromJson(resultJson.nextAction),
       stateDeltas: resultJson.stateDeltas.map(stateDeltaFromJson),
