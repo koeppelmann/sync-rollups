@@ -2194,6 +2194,12 @@
       const bsL1El = document.getElementById('blockscoutL1Url');
       if (bsL1El) bsL1El.value = chain.explorer || '';
 
+      // Set L1 title link to the Rollups contract on the explorer
+      const l1TitleLink = document.getElementById('l1BlockscoutLink');
+      if (l1TitleLink && chain.explorer && currentContract) {
+        l1TitleLink.href = `${chain.explorer}/address/${currentContract}`;
+      }
+
       // Deployment block from contract config
       const contractCfg = getContractConfig();
       if (contractCfg?.deploymentBlock) {
