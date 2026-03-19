@@ -3780,8 +3780,12 @@
       let finalResult = null;
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        if (done) {
+          // Process any remaining data in buffer
+          buffer += decoder.decode();
+        } else {
+          buffer += decoder.decode(value, { stream: true });
+        }
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
         for (const line of lines) {
@@ -3795,6 +3799,14 @@
             }
           } catch {}
         }
+        if (done) break;
+      }
+      // Also check buffer for a final line without trailing newline
+      if (!finalResult && buffer.startsWith('data: ')) {
+        try {
+          const evt = JSON.parse(buffer.slice(6));
+          if (evt.type === 'result') finalResult = evt;
+        } catch {}
       }
       if (!finalResult) throw new Error('No result from builder');
       return finalResult;
