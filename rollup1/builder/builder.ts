@@ -352,7 +352,7 @@ export class Builder {
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(response));
-      } else if (url.pathname === "/register-l2-hint" && req.method === "POST") {
+      } else if ((url.pathname === "/register-l2-hint" || url.pathname === "/prepare-l2-call") && req.method === "POST") {
         // Read body
         let body = "";
         for await (const chunk of req) {
